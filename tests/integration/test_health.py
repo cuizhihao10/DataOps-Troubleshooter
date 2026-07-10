@@ -2,6 +2,7 @@ import httpx
 import pytest
 
 from app.api.main import app
+from app.domain.tooling import ToolName
 
 
 @pytest.mark.asyncio
@@ -19,14 +20,7 @@ async def test_health_reports_validated_contract_baseline() -> None:
     assert payload["status"] == "ok"
     assert payload["fixtures_loaded"] == 5
     assert payload["golden_cases_loaded"] == 5
-    assert payload["mcp_tools_available"] == [
-        "bds.get_table_info",
-        "bds.get_task_log",
-        "bds.get_task_status",
-        "lts.get_dependency_topology",
-        "lts.get_task_log",
-        "lts.get_task_status",
-    ]
+    assert payload["mcp_tools_available"] == sorted(tool.value for tool in ToolName)
     assert payload["contracts"] == {
         "planner_prompt": "planner-react:v1",
         "mcp": "mcp-tools:v1",

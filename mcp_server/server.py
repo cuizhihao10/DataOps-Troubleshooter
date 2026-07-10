@@ -2,7 +2,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from app.domain.tooling import ToolName
-from mcp_server.tools import bds, lts
+from mcp_server.tools import bds, flashsync, lts
 
 mcp = FastMCP(
     name="dataops-troubleshooter-mock",
@@ -54,6 +54,24 @@ def _register_tools() -> None:
             "Get synthetic BDS table information",
             "Read deterministic table structure, partition, and statistics evidence.",
             bds.get_table_info,
+        ),
+        (
+            ToolName.FLASHSYNC_GET_SYNC_DELAY,
+            "Get synthetic FlashSync delay",
+            "Read deterministic synchronization delay, throughput, and backlog evidence.",
+            flashsync.get_sync_delay,
+        ),
+        (
+            ToolName.FLASHSYNC_GET_SYNC_LOG,
+            "Get synthetic FlashSync log",
+            "Read sanitized synchronization errors and conflict evidence.",
+            flashsync.get_sync_log,
+        ),
+        (
+            ToolName.FLASHSYNC_CHECK_CONSISTENCY,
+            "Check synthetic FlashSync consistency",
+            "Read deterministic source and target consistency sample evidence.",
+            flashsync.check_consistency,
         ),
     )
     for tool_name, title, description, handler in tools:

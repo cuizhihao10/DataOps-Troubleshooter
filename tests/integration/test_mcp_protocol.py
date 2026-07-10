@@ -1,7 +1,7 @@
 import pytest
 
 from app.domain.planner import ToolAction
-from app.domain.tooling import ToolErrorCode
+from app.domain.tooling import ToolErrorCode, ToolName
 from app.mcp.client import StdioMcpClient
 from app.mcp.executor import McpToolExecutor
 
@@ -33,16 +33,9 @@ def _action(
 async def test_real_mcp_protocol_lists_read_only_lts_tool() -> None:
     client = StdioMcpClient()
 
-    assert await client.list_tools() == (
-        "bds.get_table_info",
-        "bds.get_task_log",
-        "bds.get_task_status",
-        "lts.get_dependency_topology",
-        "lts.get_task_log",
-        "lts.get_task_status",
-    )
+    assert await client.list_tools() == tuple(sorted(tool.value for tool in ToolName))
     descriptors = await client.list_tool_descriptors()
-    assert len(descriptors) == 6
+    assert len(descriptors) == 9
     assert all(descriptor.read_only for descriptor in descriptors)
     assert all(not descriptor.destructive for descriptor in descriptors)
     assert all(descriptor.idempotent for descriptor in descriptors)
@@ -182,3 +175,61 @@ async def test_bds_permission_denied_is_not_retried_or_turned_into_evidence() ->
     assert observation.evidence == []
     assert len(observation.tool_events) == 1
     assert observation.tool_event.retryable is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "expected_data_key"),
+    [
+        ("flashsync.get_sync_delay", "delay_seconds"),
+        ("flashsync.get_sync_log", "component_error_code"),
+        ("flashsync.check_consistency", "consistent"),
+    ],
+)
+async def test_flashsync_tools_cross_real_mcp_protocol(
+    tool_name: str,
+    expected_data_key: str,
+) -> None:
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    observation = await executor.execute(
+        _action(
+            "cross_chain_pk_conflict",
+            "ods_order_delta",
+            f"trace_{tool_name.replace('.', '_')}_001",
+            tool_name=tool_name,
+        )
+    )
+
+    assert observation.response.ok is True
+    assert expected_data_key in observation.response.data
+    assert len(observation.tool_events) == 1
+    assert observation.observation_refs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "error_code"),
+    [
+        ("flashsync.get_sync_delay", ToolErrorCode.TIMEOUT),
+        ("flashsync.get_sync_log", ToolErrorCode.SERVICE_UNAVAILABLE),
+    ],
+)
+async def test_flashsync_transient_failures_retry_once_without_fake_evidence(
+    tool_name: str,
+    error_code: ToolErrorCode,
+) -> None:
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    observation = await executor.execute(
+        _action(
+            "flashsync_timeout",
+            "ods_payment_delta",
+            f"trace_{tool_name.replace('.', '_')}_failure_001",
+            tool_name=tool_name,
+        )
+    )
+
+    assert observation.response.ok is False
+    assert observation.response.error_code is error_code
+    assert observation.evidence == []
+    assert [event.attempt for event in observation.tool_events] == [1, 2]
+    assert all(event.retryable for event in observation.tool_events)

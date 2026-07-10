@@ -25,7 +25,7 @@ def test_main_scenario_exercises_all_nine_tool_contracts() -> None:
     assert len({result.tool_name for result in scenario.tool_results}) == 9
 
 
-def test_failure_scenarios_cover_empty_timeout_and_permission_denied() -> None:
+def test_failure_scenarios_cover_required_error_classes() -> None:
     registry = FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
     error_codes = {
         result.response.error_code
@@ -37,6 +37,7 @@ def test_failure_scenarios_cover_empty_timeout_and_permission_denied() -> None:
         ToolErrorCode.EMPTY_RESULT,
         ToolErrorCode.TIMEOUT,
         ToolErrorCode.PERMISSION_DENIED,
+        ToolErrorCode.SERVICE_UNAVAILABLE,
     }
 
 
