@@ -14,8 +14,13 @@ class ToolObservation(BaseModel):
 
     response: McpToolResponse
     evidence: list[Evidence] = Field(default_factory=list)
-    tool_event: ToolEvent
+    tool_events: list[ToolEvent] = Field(min_length=1)
     observation_refs: list[str] = Field(default_factory=list)
+
+    @property
+    def tool_event(self) -> ToolEvent:
+        """Return the final attempt event for callers that need the terminal result."""
+        return self.tool_events[-1]
 
 
 def normalize_observation(
@@ -67,8 +72,23 @@ def normalize_observation(
     return ToolObservation(
         response=response,
         evidence=evidence,
-        tool_event=event,
+        tool_events=[event],
         observation_refs=[item.evidence_id for item in evidence],
+    )
+
+
+def merge_observations(observations: list[ToolObservation]) -> ToolObservation:
+    if not observations:
+        raise ValueError("at least one tool observation is required")
+
+    evidence_by_id = {
+        item.evidence_id: item for observation in observations for item in observation.evidence
+    }
+    return ToolObservation(
+        response=observations[-1].response,
+        evidence=list(evidence_by_id.values()),
+        tool_events=[event for observation in observations for event in observation.tool_events],
+        observation_refs=list(evidence_by_id),
     )
 
 

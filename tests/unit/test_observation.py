@@ -47,5 +47,6 @@ def test_successful_tool_result_becomes_evidence_and_event() -> None:
     assert len(observation.evidence) == 1
     assert observation.observation_refs == [observation.evidence[0].evidence_id]
     assert observation.tool_event.trace_id == "trace_observation_001"
+    assert len(observation.tool_events) == 1
     assert observation.tool_event.retryable is False
     assert observation.evidence[0].metadata["tool_name"] == "lts.get_task_status"

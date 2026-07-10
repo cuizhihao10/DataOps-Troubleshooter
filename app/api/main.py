@@ -62,9 +62,14 @@ async def lifespan(app: FastAPI):
 
     mcp_client = StdioMcpClient(timeout_seconds=settings.tool_timeout_seconds)
     mcp_tools_available = await mcp_client.list_tools()
-    required_slice_tool = ToolName.LTS_GET_TASK_STATUS.value
-    if required_slice_tool not in mcp_tools_available:
-        raise ValueError(f"required MCP tool is unavailable: {required_slice_tool}")
+    required_slice_tools = {
+        ToolName.LTS_GET_TASK_STATUS.value,
+        ToolName.LTS_GET_TASK_LOG.value,
+        ToolName.LTS_GET_DEPENDENCY_TOPOLOGY.value,
+    }
+    missing_mcp_tools = sorted(required_slice_tools - set(mcp_tools_available))
+    if missing_mcp_tools:
+        raise ValueError(f"required MCP tools are unavailable: {missing_mcp_tools}")
 
     app.state.settings = settings
     app.state.fixture_registry = fixture_registry
