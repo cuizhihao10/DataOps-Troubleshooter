@@ -1,0 +1,61 @@
+{
+  "scenario_id": "bds_resource_pressure",
+  "title": "BDS 计算资源不足",
+  "description": "单组件合成场景，用于验证诊断不会在证据明确时无理由扩散到其他组件。",
+  "components": ["bds"],
+  "expected_behavior": "证据应支持 BDS 资源不足，并保持在单组件诊断范围内。",
+  "tool_results": [
+    {
+      "tool_name": "bds.get_task_status",
+      "request": {
+        "resource_id": "bds_customer_profile_hourly",
+        "time_range": {"start": "2026-07-10T09:00:00+08:00", "end": "2026-07-10T10:00:00+08:00"},
+        "scenario_id": "bds_resource_pressure",
+        "trace_id": "trace_bds_pressure_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {"status": "running", "stage": "aggregate", "cpu_percent": 99, "memory_percent": 96, "duration_seconds": 3300},
+        "evidence": [{"source_id": "bds_status_customer_profile", "content": "作业 CPU 与内存持续高位，运行时间超过基线三倍。"}],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-10T10:01:00+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_task_log",
+      "request": {
+        "resource_id": "bds_customer_profile_hourly",
+        "time_range": {"start": "2026-07-10T09:00:00+08:00", "end": "2026-07-10T10:00:00+08:00"},
+        "scenario_id": "bds_resource_pressure",
+        "trace_id": "trace_bds_pressure_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {"spill_count": 48, "skew_ratio": 1.12, "executor_lost": 3},
+        "evidence": [{"source_id": "bds_log_customer_profile", "content": "日志显示频繁磁盘溢写和执行器丢失，未发现显著数据倾斜。"}],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-10T10:01:10+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_table_info",
+      "request": {
+        "resource_id": "dwd_customer_event",
+        "time_range": {"start": "2026-07-10T09:00:00+08:00", "end": "2026-07-10T10:00:00+08:00"},
+        "scenario_id": "bds_resource_pressure",
+        "trace_id": "trace_bds_pressure_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {"latest_partition": "2026-07-10-09", "expected_partition": "2026-07-10-09", "row_count": 945000},
+        "evidence": [{"source_id": "bds_table_customer_event", "content": "输入分区按时到达且数据量处于正常范围。"}],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-10T10:01:20+08:00"
+      }
+    }
+  ]
+}
+

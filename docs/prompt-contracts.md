@@ -1,0 +1,185 @@
+# DataOps Troubleshooter Prompt 契约
+
+本文件定义需要进入版本控制、测试和评测的核心 Prompt。产品范围与验收以 `docs/product-design.md` 为准；这里提供编码时可直接落地的输入结构、输出 Schema 和约束。
+
+## 1. 通用原则
+
+- 为 Prompt 设置稳定 ID 和版本，例如 `planner-react:v1`、`graphrag-entity-extract:v1`。
+- 将角色说明、运行时上下文、工具 Schema 和输出 Schema 分开组织，不在代码中拼接难以审计的大段字符串。
+- 使用 Pydantic 或等价 JSON Schema 校验模型输出；校验失败只允许一次受控修复，不得把自由文本直接传给工具或数据库。
+- 不请求、保存或展示模型原始思维链。允许输出短 `decision_summary`、假设变化、证据缺口和停止原因。
+- 所有事实结论都必须引用工具 Observation、知识节点、GraphRAG 路径或已确认案例。
+
+## 2. Planner ReAct Prompt
+
+### 2.1 用途
+
+驱动 Planner 在当前状态上选择一个结构化 Action，或明确结束调查、请求用户补充信息。Observation 由确定性 MCP 工具节点生成，不由模型填写。
+
+### 2.2 模板
+
+```text
+你是 DataOps Troubleshooter 的 Planner ReAct Agent，负责排查脱敏的
+LTS、BDS、FlashSync 故障。你可以在内部分析，但不要输出逐步思维过程。
+
+【用户问题】
+{user_query}
+
+【当前短计划】
+{plan}
+
+【当前领域能力】
+{active_capabilities}
+
+【当前假设】
+{hypotheses}
+
+【已有证据与 Observation】
+{evidence_bundle}
+
+【GraphRAG 路径】
+{retrieved_paths}
+
+【已确认历史案例】
+{confirmed_case_memories}
+
+【可用工具及参数 Schema】
+{tool_schemas}
+
+【运行预算】
+当前 ReAct 步数：{react_step}
+最大步骤：{max_react_steps}
+剩余总时间：{remaining_time_ms}
+
+请选择且只选择一个下一步：
+1. call_tool：调用一个白名单工具；
+2. finish：现有证据足以生成可审计草稿，或继续行动已无信息增益；
+3. need_user_input：缺少无法通过工具获得的关键参数。
+
+只返回符合输出 Schema 的 JSON。不要输出 Thought，不要编造 Observation，
+不要重复已经成功执行过的同参工具调用。
+```
+
+### 2.3 输出 Schema
+
+```json
+{
+  "status": "call_tool | finish | need_user_input",
+  "decision_summary": "一到两句可公开的决策摘要",
+  "hypothesis_updates": [
+    {
+      "hypothesis_id": "hyp_xxx",
+      "status": "new | strengthened | weakened | rejected",
+      "evidence_refs": ["ev_xxx"]
+    }
+  ],
+  "action": {
+    "tool_name": "lts.get_task_status",
+    "arguments": {}
+  },
+  "evidence_refs": ["ev_xxx", "path_xxx"],
+  "stop_reason": null
+}
+```
+
+当 `status` 不是 `call_tool` 时，`action` 必须为 `null`；当 `status` 为 `finish` 或 `need_user_input` 时，必须提供 `stop_reason`。
+
+### 2.4 运行时防护
+
+- 默认最多 6 步 ReAct Action。
+- 工具名必须命中白名单，参数必须通过对应 Schema 校验。
+- 除可重试瞬时错误外，拒绝同一工具和参数的重复 Action。
+- 工具失败后最多重试一次；仍失败时降低置信度并列出缺失证据，不得伪造实时观察。
+- `decision_summary` 可进入事件时间线；内部推理文本不得进入状态、日志、API 或长期记忆。
+
+## 3. GraphRAG 实体与关系抽取 Prompt
+
+### 3.1 用途和边界
+
+用于离线辅助整理脱敏知识种子，不位于在线诊断主链路。首版仍以人工整理和复核为准；模型输出只能形成待审核候选，不能直接写入正式图谱。
+
+### 3.2 模板
+
+```text
+你是 DataOps Troubleshooter 的知识工程助手。请从给定的脱敏材料中，
+只抽取文本明确支持的实体和关系，不补充常识，不推断材料未说明的因果。
+
+【来源标识】
+{source_id}
+
+【允许的实体类型】
+component, task, dataset, symptom, root_cause, solution, case, sop
+
+【允许的关系类型】
+RUNS_ON, DEPENDS_ON, PRODUCES, CONSUMES, MANIFESTS_AS,
+CAUSED_BY, RESOLVED_BY, SIMILAR_TO
+
+【待抽取材料】
+{case_text}
+
+要求：
+1. 每个实体和关系都提供原文 source_span；
+2. 使用临时 ID 连接关系，不依赖数据库正式 ID；
+3. 不确定或缺少原文依据时省略，不输出猜测；
+4. 只返回符合输出 Schema 的 JSON。
+```
+
+### 3.3 输出 Schema
+
+```json
+{
+  "source_id": "case_seed_001",
+  "entities": [
+    {
+      "temp_id": "e1",
+      "type": "symptom",
+      "name": "上游数据未就绪",
+      "description": "LTS 任务等待上游数据",
+      "aliases": [],
+      "source_span": "上游数据未就绪",
+      "confidence": 0.96
+    }
+  ],
+  "relations": [
+    {
+      "from_temp_id": "e1",
+      "to_temp_id": "e2",
+      "type": "CAUSED_BY",
+      "source_span": "上游未就绪由同步延迟导致",
+      "confidence": 0.91
+    }
+  ]
+}
+```
+
+### 3.4 入库门槛
+
+- JSON Schema、枚举类型和临时 ID 引用全部有效。
+- `source_span` 能在原始脱敏材料中精确命中。
+- 实体完成规范化、别名合并和重复检测。
+- 因果关系经人工或 Golden Seed 规则复核；低置信度候选不自动入库。
+- 入库后保留 `source_id`、Prompt 版本和审核状态，便于追溯和重建。
+
+## 4. 历史案例匹配 capability 契约
+
+历史案例匹配首先使用组件/标签过滤、pgvector 相似度和 `SIMILAR_TO` 关系确定候选；模型只负责基于候选证据生成共同点、差异点、参考方案和避坑提示，不负责虚构或扩大候选集合。
+
+```json
+{
+  "trigger_reason": "user_requested | planner_validation | reusable_signature",
+  "matches": [
+    {
+      "case_id": "case_xxx",
+      "similarity": 0.87,
+      "confirmed": true,
+      "common_points": ["..."],
+      "differences": ["..."],
+      "reference_actions": ["..."],
+      "pitfall_warnings": ["..."],
+      "evidence_refs": ["ev_xxx", "path_xxx"]
+    }
+  ]
+}
+```
+
+只允许返回已确认案例。每个共同点、差异点和建议都必须能追溯到历史案例字段或证据；当历史案例与当前 Observation 冲突时，将冲突写入 `differences`，不得覆盖本次实时事实。

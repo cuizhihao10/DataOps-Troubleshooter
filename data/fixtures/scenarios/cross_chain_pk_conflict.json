@@ -1,0 +1,163 @@
+{
+  "scenario_id": "cross_chain_pk_conflict",
+  "title": "FlashSync 主键冲突导致跨组件链路失败",
+  "description": "合成的 LTS 到 BDS 再到 FlashSync 故障链路，用于主演示和证据引用测试。",
+  "components": ["lts", "bds", "flashsync"],
+  "expected_behavior": "实时证据应形成 FlashSync 主键冲突到 BDS 数据延迟再到 LTS 上游未就绪的传导链路。",
+  "tool_results": [
+    {
+      "tool_name": "lts.get_task_status",
+      "request": {
+        "resource_id": "dws_order_report_daily",
+        "time_range": {"start": "2026-07-10T00:00:00+08:00", "end": "2026-07-10T03:00:00+08:00"},
+        "scenario_id": "cross_chain_pk_conflict",
+        "trace_id": "trace_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {"status": "failed", "retry_count": 1, "upstream_ready": false},
+        "evidence": [{"source_id": "lts_status_dws_order_report_daily", "content": "任务失败，上游数据在触发窗口内未就绪。"}],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-10T03:01:00+08:00"
+      }
+    },
+    {
+      "tool_name": "lts.get_task_log",
+      "request": {
+        "resource_id": "dws_order_report_daily",
+        "time_range": {"start": "2026-07-10T00:00:00+08:00", "end": "2026-07-10T03:00:00+08:00"},
+        "scenario_id": "cross_chain_pk_conflict",
+        "trace_id": "trace_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {"log_level": "ERROR", "component_error_code": "LTS_UPSTREAM_NOT_READY"},
+        "evidence": [{"source_id": "lts_log_dws_order_report_daily", "content": "调度日志显示依赖数据集 ods_order_delta 未在截止时间前就绪。"}],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-10T03:01:10+08:00"
+      }
+    },
+    {
+      "tool_name": "lts.get_dependency_topology",
+      "request": {
+        "resource_id": "dws_order_report_daily",
+        "time_range": {"start": "2026-07-10T00:00:00+08:00", "end": "2026-07-10T03:00:00+08:00"},
+        "scenario_id": "cross_chain_pk_conflict",
+        "trace_id": "trace_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {"upstream_task": "bds_order_aggregate_daily", "dataset": "ods_order_delta", "link_state": "blocked"},
+        "evidence": [{"source_id": "lts_topology_dws_order_report_daily", "content": "LTS 任务依赖 BDS 作业 bds_order_aggregate_daily 产出的 ods_order_delta。"}],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-10T03:01:20+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_task_status",
+      "request": {
+        "resource_id": "bds_order_aggregate_daily",
+        "time_range": {"start": "2026-07-10T00:00:00+08:00", "end": "2026-07-10T03:00:00+08:00"},
+        "scenario_id": "cross_chain_pk_conflict",
+        "trace_id": "trace_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {"status": "running", "stage": "source_read", "duration_seconds": 7200, "cpu_percent": 21},
+        "evidence": [{"source_id": "bds_status_order_aggregate", "content": "BDS 作业长时间停留在源表读取阶段，计算资源未饱和。"}],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-10T03:01:30+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_task_log",
+      "request": {
+        "resource_id": "bds_order_aggregate_daily",
+        "time_range": {"start": "2026-07-10T00:00:00+08:00", "end": "2026-07-10T03:00:00+08:00"},
+        "scenario_id": "cross_chain_pk_conflict",
+        "trace_id": "trace_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {"warning": "SOURCE_PARTITION_LAG", "skew_ratio": 1.08},
+        "evidence": [{"source_id": "bds_log_order_aggregate", "content": "作业等待 ods_order_delta 最新分区，未发现显著数据倾斜。"}],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-10T03:01:40+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_table_info",
+      "request": {
+        "resource_id": "ods_order_delta",
+        "time_range": {"start": "2026-07-10T00:00:00+08:00", "end": "2026-07-10T03:00:00+08:00"},
+        "scenario_id": "cross_chain_pk_conflict",
+        "trace_id": "trace_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {"latest_partition": "2026-07-08", "expected_partition": "2026-07-09", "row_count": 1284500},
+        "evidence": [{"source_id": "bds_table_ods_order_delta", "content": "目标表缺少预期的 2026-07-09 分区，最近分区仍为前一天。"}],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-10T03:01:50+08:00"
+      }
+    },
+    {
+      "tool_name": "flashsync.get_sync_delay",
+      "request": {
+        "resource_id": "ods_order_delta",
+        "time_range": {"start": "2026-07-10T00:00:00+08:00", "end": "2026-07-10T03:00:00+08:00"},
+        "scenario_id": "cross_chain_pk_conflict",
+        "trace_id": "trace_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {"delay_seconds": 5400, "backlog_records": 182, "throughput_per_second": 0},
+        "evidence": [{"source_id": "flashsync_delay_ods_order_delta", "content": "同步延迟达到 5400 秒，存在 182 条积压且当前吞吐为零。"}],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-10T03:02:00+08:00"
+      }
+    },
+    {
+      "tool_name": "flashsync.get_sync_log",
+      "request": {
+        "resource_id": "ods_order_delta",
+        "time_range": {"start": "2026-07-10T00:00:00+08:00", "end": "2026-07-10T03:00:00+08:00"},
+        "scenario_id": "cross_chain_pk_conflict",
+        "trace_id": "trace_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {"component_error_code": "FS_PRIMARY_KEY_CONFLICT", "conflict_key": "synthetic_order_1042"},
+        "evidence": [{"source_id": "flashsync_log_ods_order_delta", "content": "同步日志记录脱敏主键 synthetic_order_1042 冲突，批次提交已暂停。"}],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-10T03:02:10+08:00"
+      }
+    },
+    {
+      "tool_name": "flashsync.check_consistency",
+      "request": {
+        "resource_id": "ods_order_delta",
+        "time_range": {"start": "2026-07-10T00:00:00+08:00", "end": "2026-07-10T03:00:00+08:00"},
+        "scenario_id": "cross_chain_pk_conflict",
+        "trace_id": "trace_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {"consistent": false, "difference_count": 182, "sampled_records": 1000},
+        "evidence": [{"source_id": "flashsync_consistency_ods_order_delta", "content": "一致性抽检发现 182 条目标端缺失记录，与同步积压数量一致。"}],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-10T03:02:20+08:00"
+      }
+    }
+  ]
+}
+
