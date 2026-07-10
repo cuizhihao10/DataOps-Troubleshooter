@@ -1,3 +1,9 @@
+"""验证场景注册、Golden Case 引用和失败 Fixture 覆盖。
+
+测试确保五个场景可重复加载、九工具主场景完整、错误类别齐全，并拒绝重复 scenario_id
+和工具请求引用其他场景等会破坏可复现性的输入。
+"""
+
 import json
 import shutil
 from pathlib import Path

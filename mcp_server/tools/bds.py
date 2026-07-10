@@ -1,3 +1,9 @@
+"""BDS 任务状态、执行日志和表信息三个只读 MCP 工具。
+
+状态工具提供阶段与资源线索，日志工具提供错误和性能线索，表工具提供分区与统计信息。
+三者只返回观察事实，不自行判断资源不足、数据倾斜或上游故障。
+"""
+
 from app.domain.tooling import McpToolRequest, McpToolResponse, TimeRange, ToolName
 from mcp_server.repository import get_fixture_tool_repository
 

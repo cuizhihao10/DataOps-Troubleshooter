@@ -1,3 +1,9 @@
+"""合成场景与 Golden Case 的版本化数据结构。
+
+ScenarioFixture 描述工具在指定 scenario_id 下的确定性响应；GoldenCaseSpec 描述预期的
+诊断行为。两者分离后可以独立演进工具 Mock 和 Agent 评测标准。
+"""
+
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator

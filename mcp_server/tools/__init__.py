@@ -1,1 +1,5 @@
-"""Read-only synthetic MCP tools."""
+"""LTS、BDS 和 FlashSync 的只读合成工具集合。
+
+各模块只负责把 MCP 参数组装成统一请求并调用 Fixture 仓储，不在工具函数中硬编码答案、
+执行写操作或复制错误处理逻辑。
+"""

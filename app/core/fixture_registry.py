@@ -1,3 +1,9 @@
+"""合成故障场景与 Golden Case 的严格加载器。
+
+注册表在启动阶段一次性解析 JSON 并执行 Pydantic 校验，同时拒绝重复场景和悬空引用。
+这样 MCP 服务只读取已验证对象，测试与演示也能依靠 scenario_id 获得确定性结果。
+"""
+
 from __future__ import annotations
 
 import json

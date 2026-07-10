@@ -1,3 +1,9 @@
+"""验证 MCP 服务端 Fixture 仓储的确定性查找和错误标准化。
+
+成功场景必须返回指定工具/资源的固定观察；未知 scenario_id 与缺失结果分别映射到
+INVALID_REQUEST 和 EMPTY_RESULT，不能把内部 KeyError 泄露给客户端。
+"""
+
 from pathlib import Path
 
 from app.core.fixture_registry import FixtureRegistry

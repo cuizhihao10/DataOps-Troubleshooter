@@ -1,3 +1,9 @@
+"""九个 MCP 工具的白名单、统一输入输出和错误分类。
+
+所有组件共享同一请求/响应外壳，使 Planner 只处理标准 Observation。跨字段校验拒绝
+成功响应携带错误或失败响应缺少错误信息，并明确哪些错误允许执行一次瞬时重试。
+"""
+
 from __future__ import annotations
 
 from datetime import datetime

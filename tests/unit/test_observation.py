@@ -1,3 +1,9 @@
+"""验证 MCP 响应转换为 Evidence、ToolEvent 和稳定引用。
+
+Observation 适配器是模型事实来源的关键边界。本测试检查证据元数据、trace、事件列表和
+重试属性，确保后续 Planner 只能引用真实工具返回。
+"""
+
 from datetime import UTC, datetime, timedelta
 
 from app.domain.planner import ToolAction

@@ -1,4 +1,8 @@
-"""Shared, boundary-validated domain contracts."""
+"""跨 API、Agent、MCP、检索和持久化共享的领域契约出口。
+
+统一出口让调用方依赖稳定模型而不是松散字典。具体模型仍按工具、Planner 和报告拆分，
+避免单文件演变为与外部框架耦合的通用数据容器。
+"""
 
 from app.domain.models import (
     AgentState,

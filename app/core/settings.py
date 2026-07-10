@@ -1,7 +1,13 @@
+"""集中式环境配置模型。
+
+所有预算、路径、超时和连接信息都通过 pydantic-settings 进入应用，避免魔法数字散落。
+数据库 URL 使用 SecretStr，健康检查和日志只报告连接状态，不输出认证信息。
+"""
+
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,6 +33,8 @@ class Settings(BaseSettings):
 
     fixture_directory: Path = Path("data/fixtures/scenarios")
     golden_case_file: Path = Path("data/fixtures/golden_cases.json")
+    knowledge_seed_file: Path = Path("data/knowledge/cross_chain_graph.json")
+    database_url: SecretStr | None = None
 
     planner_prompt_id: str = "planner-react:v1"
     mcp_contract_id: str = "mcp-tools:v1"

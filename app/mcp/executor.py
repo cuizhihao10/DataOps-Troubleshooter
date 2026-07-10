@@ -1,3 +1,9 @@
+"""将单个 Planner ToolAction 执行为可审计 Observation。
+
+执行器只对 TIMEOUT 和 SERVICE_UNAVAILABLE 进行最多一次重试，并为每次尝试保留独立
+ToolEvent。它不解释业务含义，也不生成根因，从而保持工具执行节点的确定性。
+"""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime

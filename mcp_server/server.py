@@ -1,3 +1,9 @@
+"""FastMCP stdio 服务和九个只读工具注册表。
+
+所有工具共享只读、非破坏、幂等和封闭世界注解。注册表中的名称来自 ToolName 枚举，
+API 启动与协议测试会反向检查九项齐全，防止静默改名或遗漏。
+"""
+
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 

@@ -1,3 +1,9 @@
+"""FlashSync 延迟、同步日志和一致性抽检三个只读 MCP 工具。
+
+这些工具覆盖同步链路的时效、错误和结果一致性三个观察维度。返回值由 scenario_id 决定，
+不会触发真实同步、修复冲突或修改位点。
+"""
+
 from app.domain.tooling import McpToolRequest, McpToolResponse, TimeRange, ToolName
 from mcp_server.repository import get_fixture_tool_repository
 

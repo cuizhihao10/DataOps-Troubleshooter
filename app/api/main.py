@@ -1,3 +1,9 @@
+"""FastAPI 应用入口和启动时依赖审计。
+
+lifespan 会在开放端口前校验 Fixture、Golden Case、Prompt、九个 MCP 工具以及可选
+PostgreSQL 图数据。依赖不完整时直接拒绝启动，避免用户提交诊断后才遇到隐蔽配置错误。
+"""
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
@@ -12,6 +18,12 @@ from app.core.fixture_registry import FixtureRegistry, load_golden_cases
 from app.core.settings import get_settings
 from app.domain.tooling import ToolName
 from app.mcp.client import StdioMcpClient
+from app.persistence.database import (
+    check_database_connection,
+    create_database_engine,
+    create_session_factory,
+)
+from app.retrieval.repository import PostgresGraphRepository
 
 
 class ContractVersions(BaseModel):
@@ -42,6 +54,9 @@ class HealthResponse(BaseModel):
     golden_cases_loaded: int
     scenario_ids: list[str]
     mcp_tools_available: list[str]
+    database_status: Literal["disabled", "ok"]
+    knowledge_nodes_loaded: int
+    knowledge_edges_loaded: int
     contracts: ContractVersions
     limits: RuntimeLimits
 
@@ -67,11 +82,32 @@ async def lifespan(app: FastAPI):
     if missing_mcp_tools:
         raise ValueError(f"required MCP tools are unavailable: {missing_mcp_tools}")
 
+    database_engine = None
+    database_status = "disabled"
+    knowledge_nodes_loaded = 0
+    knowledge_edges_loaded = 0
+    if settings.database_url is not None:
+        database_engine = create_database_engine(settings.database_url.get_secret_value())
+        await check_database_connection(database_engine)
+        factory = create_session_factory(database_engine)
+        async with factory() as session:
+            repository = PostgresGraphRepository(session)
+            knowledge_nodes_loaded, knowledge_edges_loaded = await repository.count_graph()
+        database_status = "ok"
+
     app.state.settings = settings
     app.state.fixture_registry = fixture_registry
     app.state.golden_cases = golden_cases
     app.state.mcp_tools_available = mcp_tools_available
-    yield
+    app.state.database_engine = database_engine
+    app.state.database_status = database_status
+    app.state.knowledge_nodes_loaded = knowledge_nodes_loaded
+    app.state.knowledge_edges_loaded = knowledge_edges_loaded
+    try:
+        yield
+    finally:
+        if database_engine is not None:
+            await database_engine.dispose()
 
 
 app = FastAPI(
@@ -96,6 +132,9 @@ async def health(request: Request) -> HealthResponse:
         golden_cases_loaded=len(golden_cases),
         scenario_ids=list(fixture_registry.scenario_ids),
         mcp_tools_available=list(mcp_tools_available),
+        database_status=request.app.state.database_status,
+        knowledge_nodes_loaded=request.app.state.knowledge_nodes_loaded,
+        knowledge_edges_loaded=request.app.state.knowledge_edges_loaded,
         contracts=ContractVersions(
             planner_prompt=settings.planner_prompt_id,
             mcp=settings.mcp_contract_id,

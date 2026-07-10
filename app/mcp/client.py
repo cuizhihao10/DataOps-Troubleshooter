@@ -1,3 +1,9 @@
+"""基于官方 MCP SDK 的 stdio 客户端适配器。
+
+客户端负责启动独立 FastMCP 子进程、完成 initialize 握手、发现工具注解并解析结构化
+返回。所有传输异常都会被转换成带错误分类的 McpClientError，供确定性执行器记录。
+"""
+
 from __future__ import annotations
 
 import asyncio

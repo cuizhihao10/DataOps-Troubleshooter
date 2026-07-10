@@ -1,9 +1,39 @@
 services:
+  # PostgreSQL is the project's single state service. The pgvector image keeps
+  # vector storage, full-text search, graph edges, and future case memory in one
+  # infrastructure boundary instead of adding a separate graph/vector database.
+  database:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: dataops
+      POSTGRES_USER: dataops
+      POSTGRES_PASSWORD: ${DATAOPS_DB_AUTH:?set DATAOPS_DB_AUTH in .env}
+    ports:
+      - "127.0.0.1:${DATAOPS_DB_PORT:-15432}:5432"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "pg_isready -U dataops -d dataops"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    volumes:
+      - dataops-postgres:/var/lib/postgresql/data
+
   api:
     build:
       context: .
     environment:
       DATAOPS_ENVIRONMENT: docker
+      DATAOPS_DATABASE_URL: "postgresql+asyncpg://dataops:${DATAOPS_DB_AUTH}@database:5432/dataops"
+    depends_on:
+      database:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - "alembic upgrade head && python -m app.persistence.seed && uvicorn app.api.main:app --host 0.0.0.0 --port 8000"
     ports:
       - "${DATAOPS_API_PORT:-18000}:8000"
     healthcheck:
@@ -16,3 +46,6 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+
+volumes:
+  dataops-postgres:

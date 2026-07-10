@@ -1,3 +1,5 @@
+# Force reviewable text files to LF so Linux containers and Windows development
+# produce identical diffs. Binary design assets must never be line-normalized.
 * text=auto eol=lf
 *.png binary
 *.docx binary

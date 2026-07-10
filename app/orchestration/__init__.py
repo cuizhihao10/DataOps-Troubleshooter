@@ -1,1 +1,5 @@
-"""Orchestration contracts and, in later slices, LangGraph workflow nodes."""
+"""编排层契约及未来 LangGraph 工作流节点的边界。
+
+当前仅导出经过验证的状态模型；后续工作流会把 Planner、MCP 执行、Auditor 和记忆节点
+连接起来，但不会把输入校验、检索或渲染伪装成新的 LLM Agent。
+"""

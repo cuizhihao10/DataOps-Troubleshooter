@@ -1,3 +1,9 @@
+"""Planner ReAct 结构化决策契约。
+
+本模块只描述可公开的决策摘要、假设更新和单个 Action。跨字段校验确保 call_tool、finish
+与 need_user_input 的字段组合合法，任何自由文本都不能绕过 Schema 直接驱动工具。
+"""
+
 from __future__ import annotations
 
 from enum import StrEnum

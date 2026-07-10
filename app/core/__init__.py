@@ -1,1 +1,5 @@
-"""Application configuration and deterministic infrastructure helpers."""
+"""集中配置与确定性基础设施辅助包。
+
+环境变量解析、Fixture 注册等跨层能力放在这里，避免在业务节点中散落路径、预算和
+超时常量。该包不包含领域推理，因此可被 API、MCP 服务与测试安全复用。
+"""

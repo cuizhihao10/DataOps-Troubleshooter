@@ -1,3 +1,6 @@
+# Exclude local development state and documents that are not required to run the
+# API image. Application source, MCP server, migrations, and synthetic data remain
+# in the build context because startup validation depends on them.
 .venv
 __pycache__
 .pytest_cache
@@ -6,4 +9,3 @@ __pycache__
 .env
 docs
 tests
-

@@ -1,3 +1,9 @@
+"""排障状态、证据、假设、报告和案例记忆的领域模型。
+
+这些 Pydantic 模型是未来 LangGraph 节点之间唯一允许传递的数据形态。模型刻意不包含
+Thought 或 reasoning_process，从数据结构层阻止原始思维链进入日志、API 和长期记忆。
+"""
+
 from __future__ import annotations
 
 from datetime import datetime

@@ -1,0 +1,246 @@
+{
+  "seed_version": "graph-seed:v1",
+  "source_id": "synthetic_cross_chain_knowledge_v1",
+  "nodes": [
+    {
+      "node_id": "component_lts",
+      "node_type": "component",
+      "name": "LTS 调度组件",
+      "content": "LTS 负责触发合成调度任务并检查上游任务和数据是否就绪。",
+      "aliases": ["LTS", "scheduler"],
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "LTS 负责触发合成调度任务并检查上游任务和数据是否就绪。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "component_bds",
+      "node_type": "component",
+      "name": "BDS 计算组件",
+      "content": "BDS 负责执行合成批处理计算并产出下游调度依赖的数据分区。",
+      "aliases": ["BDS", "compute"],
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "BDS 负责执行合成批处理计算并产出下游调度依赖的数据分区。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "component_flashsync",
+      "node_type": "component",
+      "name": "FlashSync 同步组件",
+      "content": "FlashSync 负责将合成源数据同步到 BDS 消费的数据集。",
+      "aliases": ["FlashSync", "synchronization"],
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "FlashSync 负责将合成源数据同步到 BDS 消费的数据集。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "task_lts_order_report",
+      "node_type": "task",
+      "name": "dws_order_report_daily",
+      "content": "LTS 日报调度任务依赖 BDS 聚合作业完成。",
+      "aliases": ["order report daily"],
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "LTS 日报调度任务依赖 BDS 聚合作业完成。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "task_bds_order_aggregate",
+      "node_type": "task",
+      "name": "bds_order_aggregate_daily",
+      "content": "BDS 聚合作业依赖 FlashSync 同步作业提供最新订单数据。",
+      "aliases": ["order aggregate daily"],
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "BDS 聚合作业依赖 FlashSync 同步作业提供最新订单数据。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "task_flashsync_order_delta",
+      "node_type": "task",
+      "name": "flashsync_order_delta",
+      "content": "FlashSync 订单增量同步作业生成 ods_order_delta 数据集。",
+      "aliases": ["order delta sync"],
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "FlashSync 订单增量同步作业生成 ods_order_delta 数据集。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "dataset_ods_order_delta",
+      "node_type": "dataset",
+      "name": "ods_order_delta",
+      "content": "订单增量数据集由 FlashSync 生成并被 BDS 聚合作业消费。",
+      "aliases": ["order delta dataset"],
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "订单增量数据集由 FlashSync 生成并被 BDS 聚合作业消费。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "symptom_sync_backlog",
+      "node_type": "symptom",
+      "name": "同步积压",
+      "content": "同步吞吐降为零并出现等待提交的积压记录。",
+      "aliases": ["sync backlog", "synchronization delay"],
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "同步吞吐降为零并出现等待提交的积压记录。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "symptom_upstream_not_ready",
+      "node_type": "symptom",
+      "name": "上游数据未就绪",
+      "content": "调度任务在截止时间前未检测到上游数据分区。",
+      "aliases": ["upstream not ready"],
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "调度任务在截止时间前未检测到上游数据分区。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "root_cause_primary_key_conflict",
+      "node_type": "root_cause",
+      "name": "FlashSync 主键冲突",
+      "content": "目标端存在重复主键时，同步批次暂停并导致后续数据分区延迟。",
+      "aliases": ["primary key conflict", "duplicate key"],
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "目标端存在重复主键时，同步批次暂停并导致后续数据分区延迟。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "solution_resolve_pk_conflict",
+      "node_type": "solution",
+      "name": "核对并处理冲突记录",
+      "content": "确认冲突范围、备份差异记录、按变更流程处理重复键并验证同步位点。",
+      "aliases": ["resolve primary key conflict"],
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "确认冲突范围、备份差异记录、按变更流程处理重复键并验证同步位点。",
+      "reliability": 1.0,
+      "embedding": null
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "edge_lts_depends_bds",
+      "from_node_id": "component_lts",
+      "to_node_id": "component_bds",
+      "relation_type": "DEPENDS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "LTS 的订单日报链路依赖 BDS 计算产出。"
+    },
+    {
+      "edge_id": "edge_bds_depends_flashsync",
+      "from_node_id": "component_bds",
+      "to_node_id": "component_flashsync",
+      "relation_type": "DEPENDS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "BDS 的订单计算链路依赖 FlashSync 同步数据。"
+    },
+    {
+      "edge_id": "edge_lts_task_runs_on",
+      "from_node_id": "task_lts_order_report",
+      "to_node_id": "component_lts",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "dws_order_report_daily 运行在 LTS。"
+    },
+    {
+      "edge_id": "edge_bds_task_runs_on",
+      "from_node_id": "task_bds_order_aggregate",
+      "to_node_id": "component_bds",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "bds_order_aggregate_daily 运行在 BDS。"
+    },
+    {
+      "edge_id": "edge_flashsync_task_runs_on",
+      "from_node_id": "task_flashsync_order_delta",
+      "to_node_id": "component_flashsync",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "flashsync_order_delta 运行在 FlashSync。"
+    },
+    {
+      "edge_id": "edge_lts_task_depends_bds_task",
+      "from_node_id": "task_lts_order_report",
+      "to_node_id": "task_bds_order_aggregate",
+      "relation_type": "DEPENDS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "LTS 日报调度任务依赖 BDS 聚合作业完成。"
+    },
+    {
+      "edge_id": "edge_bds_task_depends_sync_task",
+      "from_node_id": "task_bds_order_aggregate",
+      "to_node_id": "task_flashsync_order_delta",
+      "relation_type": "DEPENDS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "BDS 聚合作业依赖 FlashSync 同步作业提供最新订单数据。"
+    },
+    {
+      "edge_id": "edge_sync_produces_dataset",
+      "from_node_id": "task_flashsync_order_delta",
+      "to_node_id": "dataset_ods_order_delta",
+      "relation_type": "PRODUCES",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "FlashSync 订单增量同步作业生成 ods_order_delta 数据集。"
+    },
+    {
+      "edge_id": "edge_bds_consumes_dataset",
+      "from_node_id": "task_bds_order_aggregate",
+      "to_node_id": "dataset_ods_order_delta",
+      "relation_type": "CONSUMES",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "BDS 聚合作业消费 ods_order_delta 数据集。"
+    },
+    {
+      "edge_id": "edge_sync_manifest_backlog",
+      "from_node_id": "task_flashsync_order_delta",
+      "to_node_id": "symptom_sync_backlog",
+      "relation_type": "MANIFESTS_AS",
+      "weight": 0.95,
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "同步作业异常表现为同步吞吐为零和记录积压。"
+    },
+    {
+      "edge_id": "edge_backlog_caused_by_pk",
+      "from_node_id": "symptom_sync_backlog",
+      "to_node_id": "root_cause_primary_key_conflict",
+      "relation_type": "CAUSED_BY",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "同步积压由目标端主键冲突导致。"
+    },
+    {
+      "edge_id": "edge_pk_resolved_by_solution",
+      "from_node_id": "root_cause_primary_key_conflict",
+      "to_node_id": "solution_resolve_pk_conflict",
+      "relation_type": "RESOLVED_BY",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "主键冲突通过核对并处理冲突记录解决。"
+    },
+    {
+      "edge_id": "edge_lts_manifest_upstream",
+      "from_node_id": "task_lts_order_report",
+      "to_node_id": "symptom_upstream_not_ready",
+      "relation_type": "MANIFESTS_AS",
+      "weight": 0.95,
+      "source_id": "synthetic_cross_chain_knowledge_v1",
+      "source_span": "LTS 任务失败表现为上游数据未就绪。"
+    }
+  ]
+}

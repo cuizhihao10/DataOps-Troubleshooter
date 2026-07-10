@@ -1,1 +1,5 @@
-"""FastAPI entry points and response contracts."""
+"""FastAPI 接入层。
+
+该层负责 HTTP 生命周期和结构化响应，不承载诊断规则。真正的领域契约、MCP 调用与
+检索分别位于对应包中，从而使 API 只承担依赖组装和边界校验职责。
+"""

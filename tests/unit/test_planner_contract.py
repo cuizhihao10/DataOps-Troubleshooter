@@ -1,3 +1,9 @@
+"""验证 Planner ReAct 结构化输出和版本化 Prompt 契约。
+
+测试覆盖 Action/停止原因的互斥关系、Schema 中不存在原始思维链字段，以及 Prompt 保留
+运行时必须注入的占位符，防止自由文本直接驱动工具。
+"""
+
 import json
 
 import pytest

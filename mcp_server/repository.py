@@ -1,3 +1,9 @@
+"""MCP 服务端的 scenario_id Fixture 仓储。
+
+只有本模块允许从注册表读取合成响应。未知场景和缺失工具结果被转换为统一错误响应，
+因此客户端始终接收相同契约，而不会看到文件路径或 Python KeyError。
+"""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime

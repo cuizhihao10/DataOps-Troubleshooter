@@ -1,3 +1,9 @@
+"""通过真实 stdio MCP 协议验证九工具、失败分类和重试 trace。
+
+测试不调用服务端 Python 函数，而是完成 initialize、list_tools 和 call_tool。这样能够
+发现伪协议实现、错误工具注解、结构化输出缺失和失败重试次数错误。
+"""
+
 import pytest
 
 from app.domain.planner import ToolAction

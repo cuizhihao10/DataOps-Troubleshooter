@@ -1,1 +1,5 @@
-"""Local synthetic MCP server package."""
+"""独立合成 MCP 服务根包。
+
+该进程是 Agent 与 Fixture 之间唯一允许的边界。工具只读、可重复且不连接生产系统，
+用于学习 MCP 握手、Schema、错误分类和协议级集成测试。
+"""

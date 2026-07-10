@@ -1,3 +1,9 @@
+"""MCP 响应到 Evidence 与 ToolEvent 的确定性转换。
+
+证据 ID 和事件 ID 使用输入内容的稳定摘要生成，确保同一调用可重放、可引用。重试产生
+的多个 Observation 会合并证据但保留全部事件，避免成功重试掩盖首次失败。
+"""
+
 from __future__ import annotations
 
 from hashlib import sha256

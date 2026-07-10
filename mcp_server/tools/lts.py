@@ -1,3 +1,9 @@
+"""LTS 调度状态、日志和依赖拓扑三个只读 MCP 工具。
+
+三个函数共享统一执行辅助函数，确保资源、时间范围、场景和 trace 都经过同一 Pydantic
+请求模型。具体响应来自脱敏 Fixture，工具本身不包含诊断规则。
+"""
+
 from app.domain.tooling import McpToolRequest, McpToolResponse, TimeRange, ToolName
 from mcp_server.repository import get_fixture_tool_repository
 
