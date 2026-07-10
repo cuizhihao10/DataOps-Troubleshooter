@@ -2,11 +2,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from app.domain.tooling import ToolName
-from mcp_server.tools.lts import (
-    get_dependency_topology,
-    get_task_log,
-    get_task_status,
-)
+from mcp_server.tools import bds, lts
 
 mcp = FastMCP(
     name="dataops-troubleshooter-mock",
@@ -21,25 +17,43 @@ READ_ONLY_ANNOTATIONS = ToolAnnotations(
 )
 
 
-def _register_lts_tools() -> None:
+def _register_tools() -> None:
     tools = (
         (
             ToolName.LTS_GET_TASK_STATUS,
             "Get synthetic LTS task status",
             "Read deterministic LTS task status from a scenario fixture.",
-            get_task_status,
+            lts.get_task_status,
         ),
         (
             ToolName.LTS_GET_TASK_LOG,
             "Get synthetic LTS task log",
             "Read sanitized deterministic LTS task logs from a scenario fixture.",
-            get_task_log,
+            lts.get_task_log,
         ),
         (
             ToolName.LTS_GET_DEPENDENCY_TOPOLOGY,
             "Get synthetic LTS dependency topology",
             "Read deterministic LTS upstream and downstream dependencies.",
-            get_dependency_topology,
+            lts.get_dependency_topology,
+        ),
+        (
+            ToolName.BDS_GET_TASK_STATUS,
+            "Get synthetic BDS task status",
+            "Read deterministic BDS task status and resource usage evidence.",
+            bds.get_task_status,
+        ),
+        (
+            ToolName.BDS_GET_TASK_LOG,
+            "Get synthetic BDS task log",
+            "Read sanitized BDS logs, errors, and performance evidence.",
+            bds.get_task_log,
+        ),
+        (
+            ToolName.BDS_GET_TABLE_INFO,
+            "Get synthetic BDS table information",
+            "Read deterministic table structure, partition, and statistics evidence.",
+            bds.get_table_info,
         ),
     )
     for tool_name, title, description, handler in tools:
@@ -52,7 +66,7 @@ def _register_lts_tools() -> None:
         )(handler)
 
 
-_register_lts_tools()
+_register_tools()
 
 
 def main() -> None:

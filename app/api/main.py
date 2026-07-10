@@ -66,6 +66,9 @@ async def lifespan(app: FastAPI):
         ToolName.LTS_GET_TASK_STATUS.value,
         ToolName.LTS_GET_TASK_LOG.value,
         ToolName.LTS_GET_DEPENDENCY_TOPOLOGY.value,
+        ToolName.BDS_GET_TASK_STATUS.value,
+        ToolName.BDS_GET_TASK_LOG.value,
+        ToolName.BDS_GET_TABLE_INFO.value,
     }
     missing_mcp_tools = sorted(required_slice_tools - set(mcp_tools_available))
     if missing_mcp_tools:
