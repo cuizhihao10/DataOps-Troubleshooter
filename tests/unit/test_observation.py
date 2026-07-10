@@ -12,6 +12,12 @@ from app.mcp.observation import normalize_observation
 
 
 def test_successful_tool_result_becomes_evidence_and_event() -> None:
+    """验证成功 MCP 响应被确定性转换为一条 Evidence、一个 ToolEvent 和稳定引用。
+
+    测试使用生产 ToolAction/Response Schema，传入明确开始完成时间后检查 trace、重试属性、事件数
+    和工具元数据；这证明 Planner 后续引用来自真实响应，且 Observation 没有添加未返回的事实。
+    """
+
     action = ToolAction.model_validate(
         {
             "tool_name": "lts.get_task_status",

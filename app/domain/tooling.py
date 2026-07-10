@@ -14,6 +14,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ToolName(StrEnum):
+    """列出产品设计批准的九个只读 MCP 工具完整名称。
+
+    枚举同时约束 Planner Action、Fixture、MCP 服务注册和集成测试，防止任一层静默改名、合并
+    或新增未审计工具；字符串值与协议层公开名称保持完全一致。
+    """
+
     LTS_GET_TASK_STATUS = "lts.get_task_status"
     LTS_GET_TASK_LOG = "lts.get_task_log"
     LTS_GET_DEPENDENCY_TOPOLOGY = "lts.get_dependency_topology"
@@ -26,6 +32,12 @@ class ToolName(StrEnum):
 
 
 class ToolErrorCode(StrEnum):
+    """统一跨 LTS、BDS 和 FlashSync 的工具失败分类。
+
+    错误类别决定是否值得重试及报告如何降级；只有超时和暂时不可用属于瞬时错误，权限拒绝、
+    空结果和非法请求不会因重复调用而增加信息。
+    """
+
     INVALID_REQUEST = "INVALID_REQUEST"
     EMPTY_RESULT = "EMPTY_RESULT"
     TIMEOUT = "TIMEOUT"
@@ -35,6 +47,12 @@ class ToolErrorCode(StrEnum):
 
 
 class TimeRange(BaseModel):
+    """表示工具查询使用的带时区半开放式时间上下界。
+
+    模型要求结束时间严格晚于开始时间并强制时区，避免跨容器或夏令时环境解释不一致；具体工具
+    可按自身语义读取区间，但不能接收倒置或无时区时间。
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     start: datetime
@@ -42,6 +60,13 @@ class TimeRange(BaseModel):
 
     @model_validator(mode="after")
     def validate_range(self) -> TimeRange:
+        """拒绝无时区或非递增的工具查询时间范围。
+
+        先检查时区是因为两个 naive datetime 虽可比较，却无法映射到统一观察时间线；随后要求
+        end 大于 start，避免零长度或倒置查询在下游产生含糊空结果。
+        """
+
+        # 时区完整性属于可审计性约束，应在任何大小比较前明确验证。
         if self.start.tzinfo is None or self.end.tzinfo is None:
             raise ValueError("time_range values must include a timezone")
         if self.end <= self.start:
@@ -50,6 +75,12 @@ class TimeRange(BaseModel):
 
 
 class McpToolRequest(BaseModel):
+    """定义九个 MCP 工具共享的最小、可追踪请求外壳。
+
+    资源 ID 指定调查对象，时间范围限制观察窗口，scenario_id 选择合成数据，trace_id 串联一次
+    诊断。共享 Schema 使 Planner 和执行器无需为每个组件维护不同参数解析逻辑。
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     resource_id: str = Field(min_length=1, max_length=200)
@@ -59,6 +90,12 @@ class McpToolRequest(BaseModel):
 
 
 class ToolEvidencePayload(BaseModel):
+    """表示 MCP 服务返回、尚待标准化为领域 Evidence 的证据载荷。
+
+    服务端只提供来源 ID、可引用内容和结构化元数据，不自行生成最终 evidence_id 或可靠性；
+    这些审计属性由客户端 Observation 适配器按确定性规则补齐。
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     source_id: str = Field(min_length=1, max_length=200)
@@ -67,6 +104,12 @@ class ToolEvidencePayload(BaseModel):
 
 
 class McpToolResponse(BaseModel):
+    """统一表示 MCP 工具的成功数据、证据或结构化失败。
+
+    成功与错误字段严格互斥，所有响应必须包含带时区观察时间。这样执行器可以只依据 `ok` 和
+    error_code 做重试决策，并保证失败响应不会携带伪造 Evidence 混入诊断状态。
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     ok: bool
@@ -78,8 +121,16 @@ class McpToolResponse(BaseModel):
 
     @model_validator(mode="after")
     def validate_success_or_error(self) -> McpToolResponse:
+        """校验观察时间和成功/失败字段组合的一致性。
+
+        成功响应不得残留错误，失败响应必须同时给出机器码和可读消息；校验在协议载荷进入领域层
+        时执行，任何矛盾返回都会抛出 ValidationError 而不是让调用方猜测优先级。
+        """
+
+        # 所有证据排序都依赖绝对时间，因此即使 Mock 数据也必须提供时区。
         if self.observed_at.tzinfo is None:
             raise ValueError("observed_at must include a timezone")
+        # `ok` 是唯一分支开关，错误字段必须与它保持严格互斥才能安全自动化。
         if self.ok and (self.error_code is not None or self.error_message is not None):
             raise ValueError("successful responses cannot include error fields")
         if not self.ok and (self.error_code is None or not self.error_message):

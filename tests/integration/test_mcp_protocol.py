@@ -19,6 +19,12 @@ def _action(
     *,
     tool_name: str = "lts.get_task_status",
 ) -> ToolAction:
+    """构造统一、已校验的 ToolAction，供真实 MCP 协议参数化测试复用。
+
+    固定带时区时间窗并允许覆盖工具名、场景、资源和 trace，使每个测试只突出自己的协议行为；
+    通过 `model_validate` 而非松散字典保证测试输入与生产 Planner Action 使用同一 Schema。
+    """
+
     return ToolAction.model_validate(
         {
             "tool_name": tool_name,
@@ -37,6 +43,12 @@ def _action(
 
 @pytest.mark.asyncio
 async def test_real_mcp_protocol_lists_read_only_lts_tool() -> None:
+    """验证独立 FastMCP 进程通过 list_tools 暴露完整九工具及统一安全注解。
+
+    断言排序名称、数量、只读、非破坏、幂等和输出 Schema，能同时发现服务未启动、工具遗漏、
+    静默改名或注解漂移；直接读取本地枚举无法证明真实协议注册，因此本测试必须跨 stdio 握手。
+    """
+
     client = StdioMcpClient()
 
     assert await client.list_tools() == tuple(sorted(tool.value for tool in ToolName))
@@ -50,6 +62,12 @@ async def test_real_mcp_protocol_lists_read_only_lts_tool() -> None:
 
 @pytest.mark.asyncio
 async def test_action_crosses_mcp_protocol_and_becomes_observation() -> None:
+    """验证成功的 LTS Action 穿过真实 MCP 后生成响应、证据引用和单次 ToolEvent。
+
+    测试从执行器入口出发，覆盖子进程启动、initialize、call_tool、Pydantic 响应校验和 Observation
+    标准化；状态值、trace 与事件数共同证明结果来自指定 Fixture 且没有发生不必要重试。
+    """
+
     executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
     observation = await executor.execute(
         _action(
@@ -79,6 +97,12 @@ async def test_remaining_lts_tools_cross_real_mcp_protocol(
     tool_name: str,
     expected_data_key: str,
 ) -> None:
+    """参数化验证其余两个 LTS 工具也使用真实协议并返回各自结构化字段。
+
+    每个工具复用同一场景和资源，但检查不同业务键，从而防止注册表把多个名称错误绑定到同一
+    处理器；单事件和非空引用同时验证成功路径没有重试且证据已标准化。
+    """
+
     executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
     observation = await executor.execute(
         _action(
@@ -97,6 +121,12 @@ async def test_remaining_lts_tools_cross_real_mcp_protocol(
 
 @pytest.mark.asyncio
 async def test_mcp_failure_response_is_preserved_without_fake_evidence() -> None:
+    """验证 EMPTY_RESULT 作为非瞬时失败原样保留，且不会重试或生成伪 Evidence。
+
+    场景通过真实协议返回结构化失败；执行器应产生一个不可重试 ToolEvent，但 evidence 与引用
+    必须为空。该测试防止为了让报告“有依据”而把错误消息错误转换成已观察事实。
+    """
+
     executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
     observation = await executor.execute(
         _action(
@@ -116,6 +146,12 @@ async def test_mcp_failure_response_is_preserved_without_fake_evidence() -> None
 
 @pytest.mark.asyncio
 async def test_transient_mcp_failure_retries_once_and_preserves_both_events() -> None:
+    """验证 TIMEOUT 恰好重试一次，并保留两个具有不同稳定 ID 的失败事件。
+
+    Fixture 对两次调用都返回瞬时错误，最终响应仍失败且无证据；attempt 序列 `[1, 2]` 证明预算
+    没有少执行或无限循环，两个 event_id 证明成功/失败合并逻辑没有覆盖首次尝试。
+    """
+
     executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
     observation = await executor.execute(
         _action(
@@ -148,6 +184,12 @@ async def test_bds_tools_cross_real_mcp_protocol(
     resource_id: str,
     expected_data_key: str,
 ) -> None:
+    """参数化验证 BDS 状态、日志和表信息三工具均跨真实 MCP 返回专属字段。
+
+    不同资源 ID 与 expected_data_key 证明服务注册、参数传递和 Fixture 精确匹配正确；每个成功
+    调用只保留一个事件并产生证据引用，工具层不需要 Planner 或数据库参与。
+    """
+
     executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
     observation = await executor.execute(
         _action(
@@ -166,6 +208,12 @@ async def test_bds_tools_cross_real_mcp_protocol(
 
 @pytest.mark.asyncio
 async def test_bds_permission_denied_is_not_retried_or_turned_into_evidence() -> None:
+    """验证权限拒绝不会因重试预算而重复调用，也不会被包装成可信证据。
+
+    PERMISSION_DENIED 属于稳定边界错误，重复请求无信息增益；断言单事件、retryable=False 和空证据
+    防止执行器把所有失败一概重试，或让 Planner 将“无法读取”误解为表状态事实。
+    """
+
     executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
     observation = await executor.execute(
         _action(
@@ -196,6 +244,12 @@ async def test_flashsync_tools_cross_real_mcp_protocol(
     tool_name: str,
     expected_data_key: str,
 ) -> None:
+    """参数化验证 FlashSync 延迟、日志和一致性工具的真实协议映射。
+
+    三个名称分别检查不同结构化数据键，能发现处理器绑定错位；成功结果必须只有一次事件并带
+    Observation 引用，证明只读同步观察完整通过客户端和标准化边界。
+    """
+
     executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
     observation = await executor.execute(
         _action(
@@ -224,6 +278,12 @@ async def test_flashsync_transient_failures_retry_once_without_fake_evidence(
     tool_name: str,
     error_code: ToolErrorCode,
 ) -> None:
+    """验证 FlashSync 的 TIMEOUT 与 SERVICE_UNAVAILABLE 都只重试一次且不制造证据。
+
+    参数化覆盖两个批准瞬时错误，最终 error_code 必须与 Fixture 一致；两个 retryable 事件证明
+    重试审计完整，空 evidence 则保证知识降级或 Planner 后续不能声称实时同步工具已确认根因。
+    """
+
     executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
     observation = await executor.execute(
         _action(

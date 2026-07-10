@@ -25,10 +25,22 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):
+    """为本项目 ORM 映射提供统一 SQLAlchemy metadata 注册中心。
+
+    Alembic 从 `Base.metadata` 发现表结构，运行时仓储则使用具体 Record；基类不承载领域行为，
+    从而保持 Pydantic 领域模型与数据库持久化模型分离。
+    """
+
     pass
 
 
 class KnowledgeNodeRecord(Base):
+    """把知识图节点映射到 PostgreSQL，并在数据库层重复关键完整性约束。
+
+    JSONB 保存别名，GIN 表达式索引由迁移创建，Vector 可空字段为后续语义召回预留。类型与可靠性
+    CheckConstraint 防止绕过 Pydantic 的其他写入者污染表；Record 只负责持久化，不生成证据结论。
+    """
+
     __tablename__ = "knowledge_nodes"
     __table_args__ = (
         CheckConstraint(
@@ -67,6 +79,12 @@ class KnowledgeNodeRecord(Base):
 
 
 class KnowledgeEdgeRecord(Base):
+    """把有向知识关系映射到 PostgreSQL，并禁止非法类型、权重、自环和重复来源边。
+
+    两端外键使用级联删除保证删节点不留悬空边；唯一约束允许不同来源描述同一关系，同时阻止同一
+    来源重复写入。边权用于路径评分而非概率证明，最终结论仍需来源与实时 Observation 支撑。
+    """
+
     __tablename__ = "knowledge_edges"
     __table_args__ = (
         CheckConstraint(

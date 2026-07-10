@@ -24,6 +24,13 @@ READ_ONLY_ANNOTATIONS = ToolAnnotations(
 
 
 def _register_tools() -> None:
+    """把产品基线中的九个处理器注册为带安全注解的结构化 FastMCP 工具。
+
+    元组集中绑定枚举名、展示标题、协议描述和处理函数，循环统一应用只读、非破坏、幂等、封闭
+    世界注解及输出 Schema。若遗漏或改名，API 启动审计和协议集成测试会失败；本函数只注册，
+    不执行工具或读取 Fixture。
+    """
+
     tools = (
         (
             ToolName.LTS_GET_TASK_STATUS,
@@ -80,6 +87,7 @@ def _register_tools() -> None:
             flashsync.check_consistency,
         ),
     )
+    # 统一装饰过程避免九个处理器的安全注解逐处复制后发生配置漂移。
     for tool_name, title, description, handler in tools:
         mcp.tool(
             name=tool_name.value,
@@ -94,6 +102,12 @@ _register_tools()
 
 
 def main() -> None:
+    """以 stdio transport 启动本地 FastMCP 服务并占用当前进程事件循环。
+
+    stdio 让客户端通过标准 MCP 消息与独立子进程通信，不开放网络端口，也不会接入真实系统。
+    该函数只在模块作为程序执行时调用；导入模块用于测试工具发现不会重复启动服务。
+    """
+
     mcp.run(transport="stdio")
 
 

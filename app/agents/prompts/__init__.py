@@ -11,6 +11,13 @@ PLANNER_PROMPT_PATH = Path(__file__).with_name("planner_react_v1.txt")
 
 
 def load_planner_prompt() -> str:
+    """读取受版本控制的 Planner Prompt 模板并原样返回。
+
+    调用方负责在启动阶段检查非空内容和配置中的 Prompt ID；本函数只执行 UTF-8 资源读取，
+    不在运行时拼接隐藏规则，从而让评测能够把一次决策准确关联到仓库中的固定文本版本。
+    文件缺失或编码损坏会直接抛出标准 I/O 异常，避免静默退回未经审计的默认 Prompt。
+    """
+
     return PLANNER_PROMPT_PATH.read_text(encoding="utf-8")
 
 

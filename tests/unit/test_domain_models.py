@@ -8,6 +8,13 @@ from app.domain.models import AgentState
 
 
 def test_agent_state_is_serializable_without_reasoning_process() -> None:
+    """验证最小 AgentState 可稳定 JSON 序列化且不存在原始思维链字段。
+
+    只提供运行、会话和问题三个必填值，借此检查 ReAct 步数与重试次数安全默认值；序列化结果中
+    同时拒绝 `reasoning_process` 和 `thought`，防止未来字段扩张把模型内部推理写入 checkpoint、
+    日志、API 或长期记忆。
+    """
+
     state = AgentState(
         run_id="run_001",
         session_id="session_001",

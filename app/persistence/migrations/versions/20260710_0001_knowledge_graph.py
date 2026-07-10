@@ -17,7 +17,17 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """创建 pgvector 扩展、知识节点/边表及完整性和检索索引。
+
+    迁移先确保 vector 类型可用，再建节点表与全文 GIN 索引，最后建依赖节点外键的边表。数据库
+    约束重复领域 Schema 的核心不变量，以保护脚本或未来服务直接写库的路径；任一步失败由 Alembic
+    事务回滚，不会留下可被 API 当作完整图使用的半成品结构。
+    """
+
+    # 扩展必须先创建，否则后续 embedding Vector 列在解析 DDL 时就会失败。
     op.execute("CREATE EXTENSION IF NOT EXISTS vector")
+
+    # 节点先于边建立，因为边表的两个外键都依赖 knowledge_nodes 主键。
     op.create_table(
         "knowledge_nodes",
         sa.Column("node_id", sa.String(length=100), primary_key=True),
@@ -55,6 +65,7 @@ def upgrade() -> None:
             name="ck_knowledge_nodes_reliability",
         ),
     )
+    # 普通索引服务类型/来源过滤，表达式 GIN 索引服务当前 lexical seed 召回。
     op.create_index("ix_knowledge_nodes_type", "knowledge_nodes", ["node_type"])
     op.create_index("ix_knowledge_nodes_source", "knowledge_nodes", ["source_id"])
     op.execute(
@@ -63,6 +74,7 @@ def upgrade() -> None:
         "' ' || coalesce(aliases::text, '')))"
     )
 
+    # 边表显式保存有向关系、来源和权重，使 GraphRAG 能返回可引用路径而非文本暗示。
     op.create_table(
         "knowledge_edges",
         sa.Column("edge_id", sa.String(length=100), primary_key=True),
@@ -126,6 +138,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """按外键依赖反序删除图表和全文索引，回退首个知识图迁移。
+
+    先删边表避免外键引用阻止节点删除，再显式删除节点表达式索引和节点表。vector 扩展可能被同库
+    其他对象共享，因此不在 downgrade 中删除；回退会丢失知识图数据，只适用于开发/测试环境。
+    """
+
+    # 删除顺序与 upgrade 相反：先移除依赖节点的边，再移除节点索引和节点本身。
     op.drop_table("knowledge_edges")
     op.drop_index("ix_knowledge_nodes_search", table_name="knowledge_nodes")
     op.drop_table("knowledge_nodes")

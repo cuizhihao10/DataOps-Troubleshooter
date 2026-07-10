@@ -13,6 +13,14 @@ from app.domain.tooling import ToolName
 
 @pytest.mark.asyncio
 async def test_health_reports_validated_contract_baseline() -> None:
+    """验证 FastAPI lifespan 完成真实依赖审计后才返回稳定健康契约。
+
+    测试显式进入 lifespan，因此会加载 Fixture/Golden Case/Prompt 并跨 stdio 发现九个 MCP 工具；
+    ASGITransport 随后在不开放网络端口的情况下调用 `/health`。断言同时覆盖资产数量、工具白名单、
+    无数据库模式和预算版本，防止路由只返回固定 `ok` 而没有反映实际初始化状态。
+    """
+
+    # 手动进入 lifespan 才能测试启动审计；只调用路由会绕过真实依赖初始化。
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
@@ -21,6 +29,7 @@ async def test_health_reports_validated_contract_baseline() -> None:
         ) as client:
             response = await client.get("/health")
 
+    # HTTP 成功后继续逐字段检查，避免一个空的 200 响应被误判为系统就绪。
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ok"

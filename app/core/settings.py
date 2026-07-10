@@ -12,6 +12,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """集中声明应用配置、运行预算、资产路径和可选数据库连接。
+
+    `pydantic-settings` 从 `DATAOPS_` 环境变量与 `.env` 读取值，并在进程启动时执行范围校验；
+    因此业务代码只接收合法预算而无需重复解析字符串。数据库 URL 使用 SecretStr，避免对象
+    被日志或异常直接格式化时泄露凭据；额外环境变量被忽略以兼容共享部署环境。
+    """
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="DATAOPS_",
@@ -43,4 +50,11 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    """构造并缓存进程级 Settings，确保所有组件看到同一份已校验配置。
+
+    配置解析可能读取环境文件，缓存可避免每个请求重复 I/O，也防止运行中环境变量变化造成
+    同一诊断使用不同预算。测试若需切换环境，应显式调用 `get_settings.cache_clear()` 后重建，
+    而不是修改已创建的 Settings 对象。
+    """
+
     return Settings()
