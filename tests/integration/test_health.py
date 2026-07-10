@@ -39,14 +39,27 @@ async def test_health_reports_validated_contract_baseline() -> None:
     assert payload["database_status"] == "disabled"
     assert payload["knowledge_nodes_loaded"] == 0
     assert payload["knowledge_edges_loaded"] == 0
+    assert payload["knowledge_nodes_embedded"] == 0
     assert payload["contracts"] == {
         "planner_prompt": "planner-react:v1",
         "mcp": "mcp-tools:v1",
         "golden_case": "golden-case:v1",
+        "graph_retrieval": "graphrag-retrieval:v1",
     }
     assert payload["limits"] == {
         "max_react_steps": 6,
         "max_graph_hops": 2,
         "max_audit_revisions": 1,
         "tool_retry_count": 1,
+    }
+    assert payload["retrieval"] == {
+        "embedding_provider": "deterministic-hash:v1",
+        "embedding_dimensions": 128,
+        "score_weights": {
+            "semantic": 0.45,
+            "lexical": 0.1,
+            "path": 0.25,
+            "reliability": 0.1,
+            "freshness": 0.1,
+        },
     }

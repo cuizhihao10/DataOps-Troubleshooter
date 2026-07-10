@@ -7,8 +7,12 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from math import isfinite
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+GRAPH_RETRIEVAL_CONTRACT_ID = "graphrag-retrieval:v1"
 
 
 class KnowledgeNodeType(StrEnum):
@@ -45,6 +49,46 @@ class KnowledgeRelationType(StrEnum):
     SIMILAR_TO = "SIMILAR_TO"
 
 
+class RetrievalChannel(StrEnum):
+    """标记一个种子节点由全文、向量或两种检索通道中的哪些通道命中。
+
+    通道信息随结果返回，使 Planner、Auditor 和评测能够区分关键词命中与 embedding 相似度，
+    防止把融合后的单个分数误解为不可解释的模型判断；字符串枚举便于 API 稳定序列化。
+    """
+
+    LEXICAL = "lexical"
+    VECTOR = "vector"
+
+
+class HybridScoringWeights(BaseModel):
+    """集中声明 GraphRAG 五项可解释评分权重，并强制总和等于一。
+
+    语义、全文、路径、可靠性和案例新鲜度与产品基线一一对应。模型允许运行配置替换默认值，
+    但拒绝负权重或总和漂移，从而让不同环境的 `hybrid_score` 始终保持可比较的零到一区间。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    semantic: float = Field(default=0.45, ge=0, le=1)
+    lexical: float = Field(default=0.10, ge=0, le=1)
+    path: float = Field(default=0.25, ge=0, le=1)
+    reliability: float = Field(default=0.10, ge=0, le=1)
+    freshness: float = Field(default=0.10, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_total_weight(self) -> HybridScoringWeights:
+        """验证五项权重之和在浮点容差内等于一，并返回不可变配置对象。
+
+        使用绝对误差容差处理十进制转二进制造成的微小偏差，但不自动归一化错误配置；显式失败
+        能让部署者看见评分契约变化，而不是让服务悄悄采用与文档不同的实际权重。
+        """
+
+        total = self.semantic + self.lexical + self.path + self.reliability + self.freshness
+        if abs(total - 1.0) > 1e-9:
+            raise ValueError("hybrid scoring weights must sum to 1.0")
+        return self
+
+
 class KnowledgeNode(BaseModel):
     """表示一个有来源、可靠性和可选向量的知识图实体。
 
@@ -63,6 +107,34 @@ class KnowledgeNode(BaseModel):
     source_span: str = Field(min_length=1, max_length=2000)
     reliability: float = Field(default=1, ge=0, le=1)
     embedding: list[float] | None = None
+    embedding_provider: str | None = Field(default=None, min_length=1, max_length=100)
+    embedding_dimensions: int | None = Field(default=None, ge=8, le=4096)
+
+    @model_validator(mode="after")
+    def validate_embedding_metadata(self) -> KnowledgeNode:
+        """保证向量、Provider ID 和维度元数据要么同时存在，要么同时为空。
+
+        非空向量还必须长度匹配、只含有限数值且不能为全零，因为 pgvector cosine distance 无法为
+        零向量提供有意义的方向相似度。该校验阻止不同 Provider 空间或损坏向量静默进入数据库。
+        """
+
+        metadata_present = (
+            self.embedding_provider is not None or self.embedding_dimensions is not None
+        )
+        if self.embedding is None:
+            if metadata_present:
+                raise ValueError("embedding metadata requires an embedding vector")
+            return self
+
+        if self.embedding_provider is None or self.embedding_dimensions is None:
+            raise ValueError("embedding vector requires provider and dimensions metadata")
+        if len(self.embedding) != self.embedding_dimensions:
+            raise ValueError("embedding length must match embedding_dimensions")
+        if not all(isfinite(value) for value in self.embedding):
+            raise ValueError("embedding values must be finite")
+        if not any(value != 0 for value in self.embedding):
+            raise ValueError("embedding vector must not be all zeros")
+        return self
 
 
 class KnowledgeEdge(BaseModel):
@@ -138,6 +210,39 @@ class LexicalSeedMatch(BaseModel):
     lexical_score: float = Field(ge=0)
 
 
+class VectorSeedMatch(BaseModel):
+    """把 pgvector cosine 相似度与对应知识节点绑定为语义种子候选。
+
+    `semantic_score` 已从 cosine distance 转换并裁剪到零到一；匹配对象单独携带 Provider ID 与
+    维度。原始向量不会进入检索结果，避免路径重复携带大数组并泄漏派生模型特征。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    node: KnowledgeNode
+    embedding_provider: str = Field(min_length=1, max_length=100)
+    embedding_dimensions: int = Field(ge=8, le=4096)
+    semantic_score: float = Field(ge=0, le=1)
+
+
+class HybridSeedMatch(BaseModel):
+    """表示全文与向量候选按节点 ID 合并后的可解释种子评分。
+
+    模型保留每个评分分量、实际命中通道和组合分数，避免服务只返回一个无法复核的排序值。
+    当前知识节点没有案例时间字段，因此 freshness 默认为零；后续案例记忆可在同一契约中补值。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    node: KnowledgeNode
+    channels: list[RetrievalChannel] = Field(min_length=1)
+    semantic_score: float = Field(default=0, ge=0, le=1)
+    lexical_score: float = Field(default=0, ge=0, le=1)
+    reliability_score: float = Field(ge=0, le=1)
+    freshness_score: float = Field(default=0, ge=0, le=1)
+    hybrid_score: float = Field(ge=0, le=1)
+
+
 class GraphPath(BaseModel):
     """保存一条一至两跳的完整节点、边、深度、来源和稳定引用。
 
@@ -155,6 +260,22 @@ class GraphPath(BaseModel):
     source_ids: list[str] = Field(min_length=1)
 
 
+class ScoredGraphPath(GraphPath):
+    """在原始关系路径上附加种子来源与五项混合评分分量。
+
+    继承字段中的 `score` 仍表示边权乘积形成的路径相关性，`hybrid_score` 才是最终排序值；二者
+    分开保存让删边消融、评分调参与审计都能判断结果变化来自图结构还是种子召回。
+    """
+
+    seed_node_id: str = Field(min_length=3, max_length=100)
+    channels: list[RetrievalChannel] = Field(min_length=1)
+    semantic_score: float = Field(ge=0, le=1)
+    lexical_score: float = Field(ge=0, le=1)
+    reliability_score: float = Field(ge=0, le=1)
+    freshness_score: float = Field(ge=0, le=1)
+    hybrid_score: float = Field(ge=0, le=1)
+
+
 class GraphRetrievalResult(BaseModel):
     """表示一次检索的原始查询、种子节点和去重图路径集合。
 
@@ -164,6 +285,9 @@ class GraphRetrievalResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    contract_id: Literal["graphrag-retrieval:v1"] = GRAPH_RETRIEVAL_CONTRACT_ID
     query: str = Field(min_length=1, max_length=2000)
-    seeds: list[LexicalSeedMatch] = Field(default_factory=list)
-    paths: list[GraphPath] = Field(default_factory=list)
+    embedding_provider: str = Field(min_length=1, max_length=100)
+    score_weights: HybridScoringWeights
+    seeds: list[HybridSeedMatch] = Field(default_factory=list)
+    paths: list[ScoredGraphPath] = Field(default_factory=list)

@@ -1,8 +1,8 @@
 # DataOps Troubleshooter
 
-面向公开作品集的、证据驱动的大数据链路智能排障 Agent。当前已经完成领域契约、九工具真实 MCP 边界，以及 GraphRAG 的 PostgreSQL 图存储、全文种子召回和两跳路径扩展首切片。
+面向公开作品集的、证据驱动的大数据链路智能排障 Agent。当前已经完成领域契约、九工具真实 MCP 边界，以及 GraphRAG 的可替换 Embedding Provider、pgvector/全文双路种子召回、混合评分和两跳路径扩展。
 
-本项目同时是学习与求职展示项目。代码中的模块级 docstring 和关键注释负责解释局部设计，完整技术原理、数据流、设计取舍和验证方法统一维护在 [`docs/implementation-guide.md`](docs/implementation-guide.md)。
+本项目同时是学习与求职展示项目。代码中的模块级说明、每个 callable 的详细 docstring 和复杂函数关键步骤注释负责解释局部设计，完整技术原理、数据流、设计取舍和验证方法统一维护在 [`docs/implementation-guide.md`](docs/implementation-guide.md)。
 
 ## 当前切片
 
@@ -13,9 +13,9 @@
 - 提供 `GET /health`，返回契约版本、运行预算和已加载场景。
 - 通过官方 MCP Python SDK 和 stdio 协议暴露产品规定的 9 个只读工具，并将返回标准化为 Evidence 与 ToolEvent。
 - 瞬时错误最多自动重试一次，每次尝试均保留独立 ToolEvent；空结果和权限错误不会重试。
-- PostgreSQL + pgvector 保存显式知识节点和关系边，并支持全文种子召回与 1–2 跳路径扩展。
+- PostgreSQL + pgvector 保存显式知识节点、关系边和带 Provider 溯源的向量，支持全文/向量混合召回、五项可解释评分与 1–2 跳路径扩展。
 
-当前已完成全部 MCP 工具，以及 GraphRAG 的 PostgreSQL 图存储、人工知识种子、全文种子召回和路径扩展首切片。pgvector 语义召回、混合评分、LangGraph ReAct、Planner/Auditor 和长期记忆仍待后续实现。
+当前已完成全部 MCP 工具，以及 GraphRAG 的 PostgreSQL 图存储、人工知识种子、离线确定性 Embedding Provider、真实 cosine 查询、全文/向量融合评分和路径扩展。模型级 Embedding Provider、evidence bundle 上下文预算、LangGraph ReAct、Planner/Auditor 和长期记忆仍待后续实现。
 
 ## 本地启动
 

@@ -2,7 +2,7 @@
 
 本文档服务于两个目标：帮助学习者从代码理解 Agent 工程的真实边界；帮助求职者在面试中能够解释每项技术为什么存在、如何实现、如何验证以及当前尚未完成的部分。
 
-文档只描述已经进入仓库并通过验证的实现。尚未完成的 LangGraph Planner/Auditor、语义向量召回、混合评分、长期记忆和完整 API 会明确标记为后续工作，避免把设计当作完成结果。
+文档只描述已经进入仓库并通过验证的实现。尚未完成的模型级 Embedding Provider、GraphRAG 上下文预算、LangGraph Planner/Auditor、长期记忆和完整 API 会明确标记为后续工作，避免把设计当作完成结果。
 
 ## 1. 阅读路径
 
@@ -12,7 +12,7 @@
 2. `data/fixtures/` 与 `app/core/fixture_registry.py`：理解确定性 Mock 如何保证测试可复现。
 3. `mcp_server/` 与 `app/mcp/`：理解真实 MCP 协议边界、工具调用和 Observation 标准化。
 4. `app/persistence/`：理解 PostgreSQL、Alembic、pgvector 和显式图表的职责。
-5. `app/retrieval/`：理解全文种子召回、递归图扩展和路径证据。
+5. `app/retrieval/`：理解 Embedding Provider、pgvector/全文双路召回、混合评分、递归图扩展和路径证据。
 6. `app/api/main.py`：理解 FastAPI lifespan 如何在对外服务前验证依赖。
 7. `tests/`：理解每项设计如何通过失败用例而不是只靠文档保证。
 
@@ -136,9 +136,9 @@ FastAPI lifespan 在开始接收请求前执行以下检查：
 2. 加载 Golden Case，并确认它引用的场景真实存在。
 3. 检查版本化 Planner Prompt 是否存在且 ID 匹配。
 4. 通过真实 MCP 协议发现九个固定工具。
-5. 配置数据库时，建立 PostgreSQL 连接并读取知识节点/边数量。
+5. 配置数据库时，建立 PostgreSQL 连接，读取知识节点/边数量，并确认全部节点已位于当前 Provider/维度空间。
 
-任何强依赖不满足时，应用启动失败，而不是在用户提交诊断后才暴露配置错误。未配置数据库的纯单元测试模式会明确返回 `database_status=disabled`，Docker 演示模式必须返回 `database_status=ok`。
+任何强依赖不满足时，应用启动失败，而不是在用户提交诊断后才暴露配置错误。未配置数据库的纯单元测试模式会明确返回 `database_status=disabled`；Docker 演示模式必须返回 `database_status=ok`、`knowledge_nodes_embedded=11`，并公开不含凭据的 Provider、维度和评分权重快照。
 
 ## 7. PostgreSQL、SQLAlchemy、Alembic 与 pgvector
 
@@ -164,9 +164,17 @@ Alembic 迁移是数据库结构的版本历史。首个迁移：
 
 ### 7.4 pgvector 当前边界
 
-当前迁移已经提供 `embedding vector` 字段，但知识种子的 embedding 仍为 `null`。这意味着本切片完成了向量存储基础，却没有声称完成语义检索。
+原始人工知识 JSON 的 embedding 仍为 `null`，因为静态种子不应固化某个 Provider 的派生向量。容器执行 `app.persistence.seed` 时，根据当前配置批量生成向量，并在同一事务中写入 `embedding`、`embedding_provider` 和 `embedding_dimensions`。
 
-下一切片会加入可替换 Embedding Provider、向量写入、pgvector 距离查询和向量/全文合并评分。把空向量列命名成“语义召回”会构成伪 GraphRAG，因此当前文档明确区分已完成与未完成能力。
+第二个迁移使用 CheckConstraint 保证向量和两项溯源元数据同时存在或同时为空，并验证 `vector_dims(embedding)` 等于记录维度。查询先按 Provider ID 和维度过滤，再由 pgvector cosine distance 运算符排序，因此模型或维度切换后不会把不兼容空间混在一起。
+
+### 7.5 可替换 Embedding Provider
+
+`app/retrieval/embeddings.py` 定义异步 `EmbeddingProvider` 协议：实现只需提供稳定 `provider_id`、固定 `dimensions` 和保持顺序的批量 `embed_texts`。数据库仓储和融合服务不导入任何模型 SDK，未来可以替换成 OpenAI-compatible 或本地模型实现。
+
+默认 `deterministic-hash:v1` 使用 NFKC 规范化、英文词元/字符三元组、中文单字/二元组/三元组和 SHA-256 feature hashing，再执行 L2 归一化。它的优点是无网络、无凭据、跨进程可重放，适合测试和作品演示；限制是没有神经模型级同义词理解，因此 README 不把它宣传成高质量通用语义模型。
+
+Provider 算法发生变化时必须提升 ID 版本。只改变维度则更新 `embedding_dimensions`；两者都会让旧行自动退出当前向量查询，直到重新执行幂等种子写入。
 
 ## 8. 显式 GraphRAG 路径
 
@@ -184,11 +192,17 @@ component_lts
 
 ### 8.2 全文种子召回
 
-当前首切片使用 PostgreSQL `to_tsvector` 和 `websearch_to_tsquery` 召回种子节点，同时使用名称/别名包含匹配补充短标识符。查询返回全文得分和节点可靠性。
+PostgreSQL `to_tsvector` 和 `websearch_to_tsquery` 召回全文种子，同时使用名称/别名包含匹配补充短标识符。另一条 SQL 使用 pgvector cosine distance 召回相同 Provider/维度的向量种子；两条查询均执行数据库 top-k，不在 Python 中加载全表计算距离。
 
-中文全文检索在默认 `simple` 配置下不是最终方案，因此本阶段主要验证稳定英文别名、任务 ID 和组件名。未来混合检索会由语义向量承担自然语言近义表达召回。
+服务按 `node_id` 合并两路候选，保留 `lexical` / `vector` 命中通道和原始分量。全文 ts_rank/bonus 被裁剪到零到一，cosine similarity 同样标准化；单路未命中时对应分量为零，而不是复制另一通道分数。
 
-### 8.3 递归 CTE 路径扩展
+### 8.3 五项混合评分
+
+默认权重与产品基线一致：语义 0.45、全文 0.10、路径 0.25、可靠性 0.10、案例新鲜度 0.10。`HybridScoringWeights` 强制总和为 1，环境变量可以逐项覆盖，但错误总和会阻止 Settings 构造。
+
+种子尚无路径分，因此种子分只包含语义、全文、可靠性和当前可用的新鲜度；图扩展后再加入 `GraphPath.score × path_weight` 得到最终 `ScoredGraphPath.hybrid_score`。原始边权乘积分与最终混合分分开保存，调权不会覆盖真实路径关系。当前人工知识节点没有案例时间字段，freshness 明确为零；长期案例切片接入时间戳后再使用该项。
+
+### 8.4 递归 CTE 路径扩展
 
 路径扩展使用 PostgreSQL `WITH RECURSIVE`：
 
@@ -200,7 +214,7 @@ component_lts
 
 最大跳数限制为 1 或 2，与产品预算一致。`path_id` 由有序 edge ID 计算稳定 SHA-256 摘要，同一条路径在重放时保持相同引用。
 
-### 8.4 删边消融为什么重要
+### 8.5 删边消融为什么重要
 
 集成测试先验证能够得到 LTS → BDS → FlashSync 两跳路径，再在事务中删除 BDS → FlashSync 关键边。删除后相同查询不能返回三组件路径，事务随后回滚。
 
@@ -208,9 +222,9 @@ component_lts
 
 ## 9. 测试分层
 
-- 单元测试：Pydantic 约束、Fixture、Prompt Schema、Observation、种子完整性。
+- 单元测试：Pydantic 约束、Fixture、Prompt Schema、Observation、Provider 稳定性、向量元数据和混合评分公式。
 - MCP 集成测试：真实 stdio 握手、九工具发现、成功/失败响应和重试 trace。
-- PostgreSQL 集成测试：迁移、pgvector 扩展、幂等种子、全文检索、递归路径和删边消融。
+- PostgreSQL 集成测试：迁移、pgvector 扩展、带 Provider 溯源的幂等种子、cosine/全文双路检索、混合评分、递归路径和删边消融。
 - Docker 验证：从镜像安装依赖，等待 PostgreSQL 健康，执行迁移/种子，再检查 API `/health`。
 
 PostgreSQL 测试使用 `postgres` marker。普通 `pytest` 默认排除它，保持无 Docker 环境下的快速反馈；显式数据库验证使用：
@@ -237,12 +251,12 @@ python -m pytest -m postgres
 - 九个真实 MCP 只读 Mock 工具。
 - Action → MCP → Observation 与单次瞬时错误重试。
 - PostgreSQL/pgvector 图存储基础。
-- 人工知识种子、全文种子召回和 1–2 跳显式路径扩展。
+- 人工知识种子、可替换 Embedding Provider、真实 pgvector cosine 查询。
+- 全文/向量种子合并去重、五项可解释评分和 1–2 跳显式路径扩展。
 
 尚未完成：
 
-- Embedding Provider 与真实 pgvector 语义召回。
-- 全文/向量合并去重和完整混合评分。
+- 模型级 Embedding Provider（当前默认实现是离线 feature hashing 基线）。
 - GraphRAG evidence bundle 上下文预算。
 - 五个运行时 capabilities。
 - LangGraph Planner ReAct / Auditor 双 Agent。

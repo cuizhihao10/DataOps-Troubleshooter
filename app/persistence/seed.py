@@ -10,6 +10,7 @@ import asyncio
 
 from app.core.settings import get_settings
 from app.persistence.database import create_database_engine, create_session_factory
+from app.retrieval.embeddings import create_embedding_provider, embed_knowledge_bundle
 from app.retrieval.repository import PostgresGraphRepository
 from app.retrieval.seeds import load_knowledge_seed
 
@@ -28,6 +29,13 @@ async def seed_database() -> tuple[int, int]:
 
     # 在连接数据库前完成文件与图引用校验，让坏种子以更清晰、低成本的错误提前失败。
     bundle = load_knowledge_seed(settings.knowledge_seed_file)
+    embedding_provider = create_embedding_provider(
+        settings.embedding_provider,
+        dimensions=settings.embedding_dimensions,
+    )
+
+    # 原始 JSON 保持人工可审查且不固化某个模型向量；启动时按当前 Provider 批量生成并标记空间。
+    embedded_bundle = await embed_knowledge_bundle(bundle, embedding_provider)
     engine = create_database_engine(settings.database_url.get_secret_value())
     factory = create_session_factory(engine)
     try:
@@ -35,7 +43,7 @@ async def seed_database() -> tuple[int, int]:
             repository = PostgresGraphRepository(session)
 
             # 节点必须先于边写入，整个 Bundle 只提交一次以保证图结构原子可见。
-            await repository.upsert_seed_bundle(bundle)
+            await repository.upsert_seed_bundle(embedded_bundle)
             await session.commit()
 
             # 提交后计数验证数据库实际状态，而不是简单回报输入文件中的元素数量。

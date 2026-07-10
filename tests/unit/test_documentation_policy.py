@@ -23,6 +23,7 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/persistence/migrations/versions/20260710_0001_knowledge_graph.py"),
     Path("app/persistence/seed.py"),
     Path("app/retrieval/repository.py"),
+    Path("app/retrieval/embeddings.py"),
     Path("app/retrieval/service.py"),
     Path("mcp_server/repository.py"),
 )
@@ -122,7 +123,9 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
 
     for section in REQUIRED_GUIDE_SECTIONS:
         assert section in guide
-    assert "embedding 仍为 `null`" in guide
+    assert "原始人工知识 JSON 的 embedding 仍为 `null`" in guide
+    assert "可替换 Embedding Provider" in guide
+    assert "五项混合评分" in guide
     assert "尚未完成" in guide
     assert "代码注释的强制粒度" in guide
     assert "callable 级 docstring" in guide

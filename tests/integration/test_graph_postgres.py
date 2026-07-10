@@ -1,7 +1,7 @@
 """PostgreSQL/pgvector 图存储、路径扩展和删边消融集成测试。
 
-该测试使用 postgres marker 与快速测试隔离。它真实检查 vector 扩展、幂等种子、全文
-召回和两跳路径，并在事务中删除关键边证明三组件链路依赖显式图关系。
+该测试使用 postgres marker 与快速测试隔离。它真实检查 vector 扩展、Provider 溯源、cosine
+召回、全文/向量混合评分和两跳路径，并在事务中删除关键边证明三组件链路依赖显式图关系。
 """
 
 import os
@@ -9,9 +9,12 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import delete, text
+from sqlalchemy.exc import IntegrityError
 
 from app.persistence.database import create_database_engine, create_session_factory
 from app.persistence.models import KnowledgeEdgeRecord
+from app.retrieval.embeddings import DeterministicHashEmbeddingProvider, embed_knowledge_bundle
+from app.retrieval.models import RetrievalChannel
 from app.retrieval.repository import PostgresGraphRepository
 from app.retrieval.seeds import load_knowledge_seed
 from app.retrieval.service import GraphRetrievalService
@@ -24,9 +27,9 @@ DATABASE_URL = os.getenv("DATAOPS_TEST_DATABASE_URL")
 async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> None:
     """验证真实 PostgreSQL 中从迁移能力、幂等种子到两跳路径和删边消融的闭环。
 
-    测试先确认 pgvector 扩展，再写入人工 Bundle 并检查固定规模；随后从 LTS lexical seed 扩展出
-    LTS→BDS→FlashSync 路径。最后在未提交事务中删除关键边并重查，若路径仍存在则说明实现没有
-    真实依赖图关系。rollback 与 finally 保证测试不永久改变种子且始终释放连接池。
+    测试先确认 pgvector 扩展，再用默认可替换 Provider 嵌入人工 Bundle；随后验证数据库 cosine
+    查询、双路种子、混合分和 LTS→BDS→FlashSync 路径。最后在未提交事务中删除关键边并重查，
+    若路径仍存在则说明实现没有真实依赖图关系。rollback 与 finally 保证隔离和资源释放。
     """
 
     if DATABASE_URL is None:
@@ -44,20 +47,70 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
 
         async with factory() as session:
             repository = PostgresGraphRepository(session)
+            embedding_provider = DeterministicHashEmbeddingProvider(dimensions=128)
 
-            # 重复部署依赖 upsert 幂等；提交后计数验证数据库实际持久化的完整图规模。
-            await repository.upsert_seed_bundle(
-                load_knowledge_seed(Path("data/knowledge/cross_chain_graph.json"))
+            # 原始人工 JSON 保持无向量，入库前通过 Provider 批量生成并记录同一向量空间元数据。
+            embedded_bundle = await embed_knowledge_bundle(
+                load_knowledge_seed(Path("data/knowledge/cross_chain_graph.json")),
+                embedding_provider,
             )
+            await repository.upsert_seed_bundle(embedded_bundle)
             await session.commit()
 
             node_count, edge_count = await repository.count_graph()
             assert node_count == 11
             assert edge_count == 13
+            assert (
+                await repository.count_embedded_nodes(
+                    provider_id=embedding_provider.provider_id,
+                    dimensions=embedding_provider.dimensions,
+                )
+                == 11
+            )
 
-            # 从组件短标识符召回种子，并要求递归 CTE 返回方向和关系都正确的两跳链。
-            service = GraphRetrievalService(repository)
+            # 直接绕过 Pydantic 篡改维度，确认数据库 CheckConstraint 仍能拒绝不兼容向量元数据。
+            with pytest.raises(IntegrityError):
+                await session.execute(
+                    text(
+                        "UPDATE knowledge_nodes SET embedding_dimensions = 127 "
+                        "WHERE node_id = 'component_lts'"
+                    )
+                )
+            await session.rollback()
+
+            # 直接调用向量仓储，证明排序由 PostgreSQL cosine distance 而非 Python 全表扫描完成。
+            query_embedding = (await embedding_provider.embed_texts(["duplicate key"]))[0]
+            vector_matches = await repository.search_vector_seeds(
+                query_embedding,
+                provider_id=embedding_provider.provider_id,
+                limit=5,
+            )
+            assert any(
+                match.node.node_id == "root_cause_primary_key_conflict" for match in vector_matches
+            )
+            assert all(match.embedding_dimensions == 128 for match in vector_matches)
+            assert all(
+                match.embedding_provider == embedding_provider.provider_id
+                for match in vector_matches
+            )
+            assert all(match.node.embedding is None for match in vector_matches)
+            assert (
+                await repository.search_vector_seeds(
+                    query_embedding,
+                    provider_id="different-space:v1",
+                    limit=5,
+                )
+                == []
+            )
+
+            # 从组件短标识符执行双路召回，并要求递归 CTE 返回方向正确的三组件两跳链。
+            service = GraphRetrievalService(repository, embedding_provider)
             result = await service.retrieve("LTS", seed_limit=5, max_hops=2)
+            lts_seed = next(seed for seed in result.seeds if seed.node.node_id == "component_lts")
+            assert RetrievalChannel.LEXICAL in lts_seed.channels
+            assert RetrievalChannel.VECTOR in lts_seed.channels
+            assert lts_seed.semantic_score > 0
+            assert lts_seed.lexical_score > 0
             component_path = next(
                 path
                 for path in result.paths
@@ -70,6 +123,8 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
                 "DEPENDS_ON",
             ]
             assert component_path.path_id.startswith("path_")
+            assert component_path.hybrid_score > component_path.score * result.score_weights.path
+            assert component_path.seed_node_id == "component_lts"
 
             # 删除只在当前事务可见且稍后回滚，用消融证明路径不是提示词或硬编码结果。
             await session.execute(

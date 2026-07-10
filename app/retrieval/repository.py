@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
+from math import isfinite
 
 from sqlalchemy import bindparam, func, select, text
 from sqlalchemy.dialects.postgresql import ARRAY, insert
@@ -21,6 +22,7 @@ from app.retrieval.models import (
     KnowledgeRelationType,
     KnowledgeSeedBundle,
     LexicalSeedMatch,
+    VectorSeedMatch,
 )
 
 
@@ -60,6 +62,8 @@ class PostgresGraphRepository:
                 "source_span": node.source_span,
                 "reliability": node.reliability,
                 "embedding": node.embedding,
+                "embedding_provider": node.embedding_provider,
+                "embedding_dimensions": node.embedding_dimensions,
             }
             # 冲突更新完整来源字段，避免旧版本种子在重复部署后残留过时内容。
             statement = insert(KnowledgeNodeRecord).values(**values)
@@ -102,6 +106,30 @@ class PostgresGraphRepository:
         )
         return int(node_count or 0), int(edge_count or 0)
 
+    async def count_embedded_nodes(self, *, provider_id: str, dimensions: int) -> int:
+        """统计当前 Provider/维度空间中已具有非空向量的知识节点数量。
+
+        健康检查用该值确认迁移后种子命令确实完成向量回填，而不是只看到节点总数；过滤条件与
+        cosine 查询完全一致，因此数字不会把旧 Provider 或不同维度记录误报为当前空间可用数据。
+        方法只读当前事务视图，不加载向量内容或提交会话。
+        """
+
+        if not provider_id.strip():
+            raise ValueError("provider_id must not be blank")
+        if not 8 <= dimensions <= 4096:
+            raise ValueError("dimensions must be between 8 and 4096")
+
+        count = await self._session.scalar(
+            select(func.count())
+            .select_from(KnowledgeNodeRecord)
+            .where(
+                KnowledgeNodeRecord.embedding.is_not(None),
+                KnowledgeNodeRecord.embedding_provider == provider_id,
+                KnowledgeNodeRecord.embedding_dimensions == dimensions,
+            )
+        )
+        return int(count or 0)
+
     async def search_lexical_seeds(
         self,
         query: str,
@@ -133,7 +161,6 @@ class PostgresGraphRepository:
                     source_id,
                     source_span,
                     reliability,
-                    embedding,
                     ts_rank(
                         to_tsvector(
                             'simple',
@@ -173,6 +200,63 @@ class PostgresGraphRepository:
             )
             for row in result
         ]
+
+    async def search_vector_seeds(
+        self,
+        query_embedding: list[float],
+        *,
+        provider_id: str,
+        limit: int = 5,
+    ) -> list[VectorSeedMatch]:
+        """用 pgvector cosine distance 在兼容 Provider/维度空间内召回语义种子。
+
+        查询向量必须是有限非零列表，limit 受 top-k 预算限制；SQL 先按 Provider ID 和实际列表长度
+        过滤，避免不同模型或维度之间进行无意义比较。距离通过 pgvector `<=>` 运算符执行，结果
+        转为 `[0, 1]` 相似度并按相似度、可靠性和 ID 稳定排序，不在 Python 中扫描全表。
+        """
+
+        if not query_embedding:
+            raise ValueError("query_embedding must not be empty")
+        if not all(isinstance(value, int | float) and isfinite(value) for value in query_embedding):
+            raise ValueError("query_embedding values must be finite numbers")
+        if not any(value != 0 for value in query_embedding):
+            raise ValueError("query_embedding must not be an all-zero vector")
+        if not 1 <= limit <= 20:
+            raise ValueError("limit must be between 1 and 20")
+        if not provider_id.strip():
+            raise ValueError("provider_id must not be blank")
+
+        # cosine_distance 由 pgvector comparator 生成 `<=>`，数据库只对同一向量空间的行计算。
+        distance = KnowledgeNodeRecord.embedding.cosine_distance(query_embedding)
+        statement = (
+            select(KnowledgeNodeRecord, distance.label("cosine_distance"))
+            .where(
+                KnowledgeNodeRecord.embedding.is_not(None),
+                KnowledgeNodeRecord.embedding_provider == provider_id,
+                KnowledgeNodeRecord.embedding_dimensions == len(query_embedding),
+            )
+            .order_by(
+                distance,
+                KnowledgeNodeRecord.reliability.desc(),
+                KnowledgeNodeRecord.node_id,
+            )
+            .limit(limit)
+        )
+        result = await self._session.execute(statement)
+
+        matches: list[VectorSeedMatch] = []
+        for record, raw_distance in result:
+            # cosine similarity 理论范围为 [-1, 1]；检索分数裁剪负相关项到零以保持评分契约。
+            semantic_score = max(0.0, min(1.0, 1.0 - float(raw_distance)))
+            matches.append(
+                VectorSeedMatch(
+                    node=_node_from_record(record),
+                    embedding_provider=record.embedding_provider,
+                    embedding_dimensions=record.embedding_dimensions,
+                    semantic_score=semantic_score,
+                )
+            )
+        return matches
 
     async def expand_paths(
         self,
@@ -278,13 +362,12 @@ class PostgresGraphRepository:
 
 
 def _node_from_mapping(mapping) -> KnowledgeNode:
-    """把原生 SQL RowMapping 转换为受校验 KnowledgeNode，并规范化 pgvector 值。
+    """把全文原生 SQL RowMapping 转换为不携带原始向量的受校验 KnowledgeNode。
 
-    全文查询返回 mapping 而非 ORM Record；pgvector 可能提供专用序列对象，因此在非空时显式转成
-    list 以满足可序列化领域模型。字段缺失或非法枚举会在 Pydantic 构造时显式失败。
+    全文查询不需要 embedding，因此 SQL 不选择向量列，避免驱动把未声明类型的 vector 解码成文本，
+    也避免检索上下文重复携带大数组。字段缺失或非法枚举仍由 Pydantic 显式拒绝。
     """
 
-    embedding = mapping["embedding"]
     return KnowledgeNode(
         node_id=mapping["node_id"],
         node_type=mapping["node_type"],
@@ -294,15 +377,14 @@ def _node_from_mapping(mapping) -> KnowledgeNode:
         source_id=mapping["source_id"],
         source_span=mapping["source_span"],
         reliability=mapping["reliability"],
-        embedding=list(embedding) if embedding is not None else None,
     )
 
 
 def _node_from_record(record: KnowledgeNodeRecord) -> KnowledgeNode:
     """把 SQLAlchemy 节点 Record 转换成与协议层无关的 Pydantic 领域节点。
 
-    显式字段映射避免 ORM 内部状态泄漏到检索结果，并把可选 pgvector 转成普通列表；如果数据库
-    被其他写入者污染，领域模型会在这里拒绝非法类型、ID 或可靠性。
+    显式字段映射避免 ORM 内部状态和原始向量泄漏到检索结果；向量只用于数据库距离计算，
+    Provider/维度由 VectorSeedMatch 单独保留。如果数据库被污染，领域模型仍会拒绝非法字段。
     """
 
     return KnowledgeNode(
@@ -314,7 +396,6 @@ def _node_from_record(record: KnowledgeNodeRecord) -> KnowledgeNode:
         source_id=record.source_id,
         source_span=record.source_span,
         reliability=record.reliability,
-        embedding=list(record.embedding) if record.embedding is not None else None,
     )
 
 

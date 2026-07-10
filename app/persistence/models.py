@@ -15,6 +15,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -52,8 +53,20 @@ class KnowledgeNodeRecord(Base):
             "reliability >= 0 AND reliability <= 1",
             name="ck_knowledge_nodes_reliability",
         ),
+        CheckConstraint(
+            "(embedding IS NULL AND embedding_provider IS NULL AND "
+            "embedding_dimensions IS NULL) OR "
+            "(embedding IS NOT NULL AND embedding_provider IS NOT NULL AND "
+            "embedding_dimensions >= 8 AND vector_dims(embedding) = embedding_dimensions)",
+            name="ck_knowledge_nodes_embedding_metadata",
+        ),
         Index("ix_knowledge_nodes_type", "node_type"),
         Index("ix_knowledge_nodes_source", "source_id"),
+        Index(
+            "ix_knowledge_nodes_embedding_space",
+            "embedding_provider",
+            "embedding_dimensions",
+        ),
     )
 
     node_id: Mapped[str] = mapped_column(String(100), primary_key=True)
@@ -65,6 +78,8 @@ class KnowledgeNodeRecord(Base):
     source_span: Mapped[str] = mapped_column(Text, nullable=False)
     reliability: Mapped[float] = mapped_column(Float, nullable=False, default=1)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(), nullable=True)
+    embedding_provider: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    embedding_dimensions: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -23,6 +23,8 @@ from app.persistence.database import (
     create_database_engine,
     create_session_factory,
 )
+from app.retrieval.embeddings import create_embedding_provider
+from app.retrieval.models import GRAPH_RETRIEVAL_CONTRACT_ID, HybridScoringWeights
 from app.retrieval.repository import PostgresGraphRepository
 
 
@@ -38,6 +40,7 @@ class ContractVersions(BaseModel):
     planner_prompt: str
     mcp: str
     golden_case: str
+    graph_retrieval: str
 
 
 class RuntimeLimits(BaseModel):
@@ -53,6 +56,20 @@ class RuntimeLimits(BaseModel):
     max_graph_hops: int
     max_audit_revisions: int
     tool_retry_count: int
+
+
+class RetrievalConfiguration(BaseModel):
+    """公开当前 Embedding 空间和五项混合评分配置，不包含任何模型凭据。
+
+    Provider ID、维度和权重让演示者能够解释一次检索使用的数学空间与排序公式；响应只来自经过
+    Settings/Provider 工厂校验的值，避免健康接口报告一个运行时无法创建的配置。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    embedding_provider: str
+    embedding_dimensions: int
+    score_weights: HybridScoringWeights
 
 
 class HealthResponse(BaseModel):
@@ -75,8 +92,10 @@ class HealthResponse(BaseModel):
     database_status: Literal["disabled", "ok"]
     knowledge_nodes_loaded: int
     knowledge_edges_loaded: int
+    knowledge_nodes_embedded: int
     contracts: ContractVersions
     limits: RuntimeLimits
+    retrieval: RetrievalConfiguration
 
 
 @asynccontextmanager
@@ -104,6 +123,14 @@ async def lifespan(app: FastAPI):
         raise ValueError("configured planner prompt ID does not match the packaged prompt")
     if not load_planner_prompt().strip():
         raise ValueError("planner prompt must not be empty")
+    if settings.graphrag_retrieval_contract_id != GRAPH_RETRIEVAL_CONTRACT_ID:
+        raise ValueError("configured GraphRAG retrieval contract ID does not match the package")
+
+    # Provider 工厂在任何部署模式都执行，使未知 ID 或非法维度不能等到首次检索才失败。
+    embedding_provider = create_embedding_provider(
+        settings.embedding_provider,
+        dimensions=settings.embedding_dimensions,
+    )
 
     # 工具发现必须跨真实 stdio MCP 握手；直接比较本地枚举会掩盖服务进程注册失败。
     mcp_client = StdioMcpClient(timeout_seconds=settings.tool_timeout_seconds)
@@ -117,6 +144,7 @@ async def lifespan(app: FastAPI):
     database_status = "disabled"
     knowledge_nodes_loaded = 0
     knowledge_edges_loaded = 0
+    knowledge_nodes_embedded = 0
     if settings.database_url is not None:
         # 数据库是可选依赖：纯单测模式明确标记 disabled，配置后则必须真正可连接且可查询。
         database_engine = create_database_engine(settings.database_url.get_secret_value())
@@ -125,6 +153,14 @@ async def lifespan(app: FastAPI):
         async with factory() as session:
             repository = PostgresGraphRepository(session)
             knowledge_nodes_loaded, knowledge_edges_loaded = await repository.count_graph()
+            knowledge_nodes_embedded = await repository.count_embedded_nodes(
+                provider_id=embedding_provider.provider_id,
+                dimensions=embedding_provider.dimensions,
+            )
+            if knowledge_nodes_embedded != knowledge_nodes_loaded:
+                raise ValueError(
+                    "all knowledge nodes must be embedded in the configured provider space"
+                )
         database_status = "ok"
 
     # 只有所有检查完成后才发布共享状态，避免路由观察到半初始化的依赖集合。
@@ -136,6 +172,7 @@ async def lifespan(app: FastAPI):
     app.state.database_status = database_status
     app.state.knowledge_nodes_loaded = knowledge_nodes_loaded
     app.state.knowledge_edges_loaded = knowledge_edges_loaded
+    app.state.knowledge_nodes_embedded = knowledge_nodes_embedded
     try:
         yield
     finally:
@@ -176,15 +213,22 @@ async def health(request: Request) -> HealthResponse:
         database_status=request.app.state.database_status,
         knowledge_nodes_loaded=request.app.state.knowledge_nodes_loaded,
         knowledge_edges_loaded=request.app.state.knowledge_edges_loaded,
+        knowledge_nodes_embedded=request.app.state.knowledge_nodes_embedded,
         contracts=ContractVersions(
             planner_prompt=settings.planner_prompt_id,
             mcp=settings.mcp_contract_id,
             golden_case=settings.golden_case_contract_id,
+            graph_retrieval=settings.graphrag_retrieval_contract_id,
         ),
         limits=RuntimeLimits(
             max_react_steps=settings.max_react_steps,
             max_graph_hops=settings.max_graph_hops,
             max_audit_revisions=settings.max_audit_revisions,
             tool_retry_count=settings.tool_retry_count,
+        ),
+        retrieval=RetrievalConfiguration(
+            embedding_provider=settings.embedding_provider,
+            embedding_dimensions=settings.embedding_dimensions,
+            score_weights=settings.hybrid_scoring_weights(),
         ),
     )
