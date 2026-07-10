@@ -6,6 +6,23 @@
   "expected_behavior": "Observation 应记录 EMPTY_RESULT，Planner 不得声称实时日志确认了根因。",
   "tool_results": [
     {
+      "tool_name": "lts.get_task_status",
+      "request": {
+        "resource_id": "lts_inventory_snapshot_daily",
+        "time_range": {"start": "2026-07-09T00:00:00+08:00", "end": "2026-07-09T01:00:00+08:00"},
+        "scenario_id": "lts_empty_result",
+        "trace_id": "trace_lts_empty_001"
+      },
+      "response": {
+        "ok": false,
+        "data": {},
+        "evidence": [],
+        "error_code": "EMPTY_RESULT",
+        "error_message": "指定时间范围内没有匹配的脱敏任务状态。",
+        "observed_at": "2026-07-10T10:01:55+08:00"
+      }
+    },
+    {
       "tool_name": "lts.get_task_log",
       "request": {
         "resource_id": "lts_inventory_snapshot_daily",
@@ -24,4 +41,3 @@
     }
   ]
 }
-

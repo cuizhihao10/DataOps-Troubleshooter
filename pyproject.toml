@@ -10,8 +10,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.116,<1",
+  "mcp>=1.28,<2",
   "pydantic>=2.11,<3",
   "pydantic-settings>=2.10,<3",
+  "pywin32>=310; sys_platform == 'win32'",
   "uvicorn[standard]>=0.35,<1",
 ]
 
@@ -25,7 +27,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["app*"]
+include = ["app*", "mcp_server*"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"
@@ -37,4 +39,3 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
-

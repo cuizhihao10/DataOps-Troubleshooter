@@ -9,8 +9,9 @@
 - 提供 5 个脱敏且确定性的合成场景，以及对应 Golden Case 格式。
 - 启动时校验全部 Fixture 和 Golden Case 引用。
 - 提供 `GET /health`，返回契约版本、运行预算和已加载场景。
+- 通过官方 MCP Python SDK 和 stdio 协议暴露 `lts.get_task_status`，并将返回标准化为 Evidence 与 ToolEvent。
 
-本切片尚未实现真实 MCP Server、LangGraph ReAct 循环、Planner/Auditor 模型调用、GraphRAG、PostgreSQL 或长期记忆写入。
+当前 MCP 垂直切片只实现了 `lts.get_task_status`；其余 8 个产品规定工具仍待后续切片接入。本项目尚未实现 LangGraph ReAct 循环、Planner/Auditor 模型调用、GraphRAG、PostgreSQL 或长期记忆写入。
 
 ## 本地启动
 

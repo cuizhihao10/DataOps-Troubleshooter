@@ -10,6 +10,8 @@ from app import __version__
 from app.agents.prompts import PLANNER_PROMPT_ID, load_planner_prompt
 from app.core.fixture_registry import FixtureRegistry, load_golden_cases
 from app.core.settings import get_settings
+from app.domain.tooling import ToolName
+from app.mcp.client import StdioMcpClient
 
 
 class ContractVersions(BaseModel):
@@ -39,6 +41,7 @@ class HealthResponse(BaseModel):
     fixtures_loaded: int
     golden_cases_loaded: int
     scenario_ids: list[str]
+    mcp_tools_available: list[str]
     contracts: ContractVersions
     limits: RuntimeLimits
 
@@ -57,9 +60,16 @@ async def lifespan(app: FastAPI):
     if not load_planner_prompt().strip():
         raise ValueError("planner prompt must not be empty")
 
+    mcp_client = StdioMcpClient(timeout_seconds=settings.tool_timeout_seconds)
+    mcp_tools_available = await mcp_client.list_tools()
+    required_slice_tool = ToolName.LTS_GET_TASK_STATUS.value
+    if required_slice_tool not in mcp_tools_available:
+        raise ValueError(f"required MCP tool is unavailable: {required_slice_tool}")
+
     app.state.settings = settings
     app.state.fixture_registry = fixture_registry
     app.state.golden_cases = golden_cases
+    app.state.mcp_tools_available = mcp_tools_available
     yield
 
 
@@ -75,6 +85,7 @@ async def health(request: Request) -> HealthResponse:
     settings = request.app.state.settings
     fixture_registry = request.app.state.fixture_registry
     golden_cases = request.app.state.golden_cases
+    mcp_tools_available = request.app.state.mcp_tools_available
     return HealthResponse(
         status="ok",
         service=settings.app_name,
@@ -83,6 +94,7 @@ async def health(request: Request) -> HealthResponse:
         fixtures_loaded=len(fixture_registry),
         golden_cases_loaded=len(golden_cases),
         scenario_ids=list(fixture_registry.scenario_ids),
+        mcp_tools_available=list(mcp_tools_available),
         contracts=ContractVersions(
             planner_prompt=settings.planner_prompt_id,
             mcp=settings.mcp_contract_id,

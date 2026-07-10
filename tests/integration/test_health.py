@@ -19,6 +19,7 @@ async def test_health_reports_validated_contract_baseline() -> None:
     assert payload["status"] == "ok"
     assert payload["fixtures_loaded"] == 5
     assert payload["golden_cases_loaded"] == 5
+    assert payload["mcp_tools_available"] == ["lts.get_task_status"]
     assert payload["contracts"] == {
         "planner_prompt": "planner-react:v1",
         "mcp": "mcp-tools:v1",

@@ -11,6 +11,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
 
 COPY pyproject.toml README.md ./
 COPY app ./app
+COPY mcp_server ./mcp_server
 COPY data ./data
 
 RUN python -m pip install --no-cache-dir --no-deps .
@@ -18,4 +19,3 @@ RUN python -m pip install --no-cache-dir --no-deps .
 EXPOSE 8000
 
 CMD ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
-
