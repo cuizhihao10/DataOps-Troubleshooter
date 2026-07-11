@@ -213,6 +213,39 @@ class DiagnosisReport(BaseModel):
         return self
 
 
+class SessionTurnContext(BaseModel):
+    """保存同一会话上一轮已完成报告的公开追问上下文。
+
+    该对象只复制用户已经能够通过 run API 看到的报告摘要、根因、处置、风险和不确定性，并记录
+    来源 run；它不保存 Prompt、供应商原始输出、Thought 或隐藏推理。Planner 可据此理解“这个
+    操作”等省略指代，而实时 Evidence 仍以独立字段进入状态并保持更高事实优先级。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_run_id: str = Field(min_length=1, max_length=100)
+    previous_user_query: str = Field(min_length=1, max_length=4000)
+    report_summary: str = Field(min_length=1, max_length=4000)
+    root_causes: list[RootCauseConclusion] = Field(default_factory=list)
+    remediation_steps: list[RemediationStep] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    report_degraded: bool = False
+
+    @model_validator(mode="after")
+    def validate_unique_references(self) -> SessionTurnContext:
+        """拒绝重复的报告级证据引用，避免 checkpoint 恢复后重复膨胀上下文。
+
+        根因和处置步骤可各自引用同一证据，因此这里只约束汇总字段自身；空列表表示上一轮安全
+        降级且没有可引用事实，是合法追问上下文而不是恢复失败。
+        """
+
+        if len(self.evidence_refs) != len(set(self.evidence_refs)):
+            raise ValueError("session turn context evidence_refs must not contain duplicates")
+        return self
+
+
 class MemoryStatus(StrEnum):
     """表示长期案例记忆候选的待确认、已确认和已拒绝状态。
 
@@ -404,6 +437,7 @@ class AgentState(BaseModel):
     run_id: str = Field(min_length=1, max_length=100)
     session_id: str = Field(min_length=1, max_length=100)
     user_query: str = Field(min_length=1, max_length=4000)
+    session_context: SessionTurnContext | None = None
     intent: str | None = Field(default=None, max_length=100)
     active_capabilities: list[str] = Field(default_factory=list)
     plan: list[str] = Field(default_factory=list)

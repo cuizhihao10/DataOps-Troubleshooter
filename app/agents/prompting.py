@@ -19,6 +19,7 @@ from app.domain.tooling import McpToolRequest
 _USER_TEMPLATE_FIELDS = frozenset(
     {
         "user_query",
+        "session_context",
         "plan",
         "active_capabilities",
         "hypotheses",
@@ -49,7 +50,7 @@ class PlannerPromptBundle(BaseModel):
 
 
 class PlannerPromptRenderer:
-    """使用 v2 模板和规范 JSON 将强类型 Planner 上下文渲染为两条消息。
+    """使用 v3 模板和规范 JSON 将强类型 Planner 上下文渲染为两条消息。
 
     构造时读取并审计模板占位符；`render` 每轮只替换批准字段。模板字段缺失或新增会显式失败，
     防止代码与 Prompt 文件静默漂移，也让 Golden Case 能按 prompt_id 重放。
@@ -110,6 +111,11 @@ class PlannerPromptRenderer:
         # 用户文本使用 JSON 字符串编码，换行和伪造章节标题只会作为 user 消息中的数据出现。
         values = {
             "user_query": _json_text(state.user_query),
+            "session_context": _json_text(
+                state.session_context.model_dump(mode="json")
+                if state.session_context is not None
+                else None
+            ),
             "plan": _json_text(state.plan),
             "active_capabilities": _json_text(context.capabilities.model_dump(mode="json")),
             "hypotheses": _json_text([item.model_dump(mode="json") for item in state.hypotheses]),

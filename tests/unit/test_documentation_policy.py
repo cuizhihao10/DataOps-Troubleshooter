@@ -214,8 +214,8 @@ def test_langgraph_react_runtime_contract_is_versioned_and_explicit() -> None:
     assert "planner_output_invalid" in prompt_contract
 
 
-def test_planner_v2_and_structured_output_repair_are_documented() -> None:
-    """确认 Prompt 契约记录 v2 角色隔离、Pydantic Schema 和一次修复语义。
+def test_planner_v3_and_structured_output_repair_are_documented() -> None:
+    """确认 Prompt 契约记录 v3 会话上下文、角色隔离、Pydantic Schema 和一次修复语义。
 
     测试锁定安全与可复现边界而非自然语言全文：用户数据不能进入 system，SDK 不发送 API tools，
     refusal 不修复，第二次失败停止；同时保留官方文档链接便于学习者核对原理。
@@ -223,7 +223,8 @@ def test_planner_v2_and_structured_output_repair_are_documented() -> None:
 
     prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
 
-    assert "planner-react:v2" in prompt_contract
+    assert "planner-react:v3" in prompt_contract
+    assert "session_context" in prompt_contract
     assert "system/user 两条消息" in prompt_contract
     assert "openai-compatible-planner:v1" in prompt_contract
     assert "chat.completions.parse(response_format=PlannerDecision)" in prompt_contract
@@ -289,7 +290,7 @@ def test_top_level_diagnosis_workflow_contract_orders_recall_audit_and_staging()
 
 
 def test_diagnosis_resource_contract_documents_persistence_events_and_failure_semantics() -> None:
-    """确认资源 API 契约记录同步执行、三表持久化、公开事件和安全失败查询方式。
+    """确认资源 API 契约记录同步执行、四表/checkpoint、公开事件和安全失败查询方式。
 
     该门禁防止后续把进程内 background task 宣称为可靠队列，或让 run_events 保存 Thought/原始异常。
     文档必须保留 `diagnosis-resources:v1`、running/completed/failed 状态和失败后凭 run_id 查询语义。
@@ -301,6 +302,9 @@ def test_diagnosis_resource_contract_documents_persistence_events_and_failure_se
     assert "diagnosis_sessions" in prompt_contract
     assert "agent_runs" in prompt_contract
     assert "run_events" in prompt_contract
+    assert "session_checkpoints" in prompt_contract
+    assert "session-checkpoint:v1" in prompt_contract
+    assert "失败 run 不覆盖旧快照" in prompt_contract
     assert "synchronous" in prompt_contract
     assert "running | completed | failed" in prompt_contract
     assert "不保存 Thought" in prompt_contract

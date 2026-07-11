@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.capabilities import DiagnosisIntent, HistoryTrigger
 from app.domain.models import Component
+from app.memory.checkpoint import SessionCheckpoint
 from app.orchestration.diagnosis_models import DiagnosisRunResult
 from app.orchestration.run_models import (
     AgentRunSnapshot,
@@ -22,7 +23,12 @@ from app.orchestration.run_models import (
     RunEventPhase,
     RunPublicEvent,
 )
-from app.persistence.models import AgentRunRecord, DiagnosisSessionRecord, RunEventRecord
+from app.persistence.models import (
+    AgentRunRecord,
+    DiagnosisSessionRecord,
+    RunEventRecord,
+    SessionCheckpointRecord,
+)
 
 
 class PostgresDiagnosisRunRepository:
@@ -120,24 +126,41 @@ class PostgresDiagnosisRunRepository:
         *,
         result: DiagnosisRunResult,
         events: tuple[RunPublicEvent, ...],
+        checkpoint: SessionCheckpoint,
         now: datetime,
     ) -> AgentRunSnapshot:
-        """把 running run 原子转换为 completed，并插入完整公开事件序列。
+        """把 running run 原子转换为 completed，并写事件与最新会话 checkpoint。
 
-        ``result`` 的 run/session 身份会在 AgentRunSnapshot 转换时再次验证；events 必须属于同一 run
-        且连续。非 running 或缺失 run 抛 LookupError，防止重复执行覆盖既有终态。
+        ``result``、events 与 checkpoint 必须属于同一 run/session；三者和 run 终态共用外层事务，
+        因而轮询者不会看到 completed 但追问仍读取旧快照。非 running、版本跳跃或身份不一致显式
+        失败，防止并发/重放覆盖更新的会话上下文。
         """
 
         # 先锁定并验证 running，再批量加入事件；外层事务让终态与时间线一起 commit/rollback。
         record = await self._lock_running_run(run_id)
         _validate_events(run_id, events)
+        if checkpoint.source_run_id != run_id or checkpoint.session_id != record.session_id:
+            raise ValueError("checkpoint must belong to the completed run and session")
         record.status = AgentRunStatus.COMPLETED.value
         record.result = result.model_dump(mode="json")
         record.completed_at = now
         record.updated_at = now
         self._session.add_all([_event_record(event) for event in events])
+        await self._save_checkpoint(checkpoint)
         await self._session.flush()
         return _run_from_record(record)
+
+    async def get_checkpoint(self, session_id: str) -> SessionCheckpoint | None:
+        """读取一个 session 最新的版本化 checkpoint，未生成时返回 None。
+
+        JSONB 必须重新通过 ``SessionCheckpoint`` 校验；损坏或旧版本数据不能静默当作无上下文。
+        方法不锁行，调用方只把返回值作为一次 run 的不可变输入快照，后续写入使用独立事务。
+        """
+
+        record = await self._session.get(SessionCheckpointRecord, session_id)
+        if record is None:
+            return None
+        return _checkpoint_from_record(record)
 
     async def fail_run(
         self,
@@ -212,6 +235,42 @@ class PostgresDiagnosisRunRepository:
         if record.status != AgentRunStatus.RUNNING.value:
             raise LookupError(f"agent run is already terminal: {run_id}")
         return record
+
+    async def _save_checkpoint(self, checkpoint: SessionCheckpoint) -> None:
+        """在当前完成事务内插入首版快照或单调覆盖同 session 的下一版本。
+
+        现有行使用 ``FOR UPDATE`` 串行化并发完成；新版本必须恰好加一，created_at 必须保持不变。
+        这会让基于旧快照完成的并发 run 明确失败，而不是倒退 source_run 或覆盖更新的上下文。
+        """
+
+        current = await self._session.scalar(
+            select(SessionCheckpointRecord)
+            .where(SessionCheckpointRecord.session_id == checkpoint.session_id)
+            .with_for_update()
+        )
+        if current is None:
+            if checkpoint.checkpoint_version != 1:
+                raise ValueError("first session checkpoint must use version one")
+            self._session.add(
+                SessionCheckpointRecord(
+                    session_id=checkpoint.session_id,
+                    source_run_id=checkpoint.source_run_id,
+                    checkpoint_version=checkpoint.checkpoint_version,
+                    snapshot=checkpoint.model_dump(mode="json"),
+                    created_at=checkpoint.created_at,
+                    updated_at=checkpoint.updated_at,
+                )
+            )
+            return
+        if checkpoint.checkpoint_version != current.checkpoint_version + 1:
+            raise ValueError("session checkpoint version must increase by exactly one")
+        if checkpoint.created_at != current.created_at:
+            raise ValueError("session checkpoint created_at must remain stable across updates")
+
+        current.source_run_id = checkpoint.source_run_id
+        current.checkpoint_version = checkpoint.checkpoint_version
+        current.snapshot = checkpoint.model_dump(mode="json")
+        current.updated_at = checkpoint.updated_at
 
 
 def _session_from_record(record: DiagnosisSessionRecord) -> DiagnosisSession:
@@ -292,6 +351,25 @@ def _event_from_record(record: RunEventRecord) -> RunPublicEvent:
         payload=dict(record.payload),
         created_at=record.created_at,
     )
+
+
+def _checkpoint_from_record(record: SessionCheckpointRecord) -> SessionCheckpoint:
+    """把 checkpoint JSONB 与关系列交叉校验后恢复为冻结领域模型。
+
+    snapshot 自带身份、版本和时间；关系列是数据库索引/外键事实。两者任何漂移都抛 ValueError，
+    防止只修改 JSONB 或只修改列后把错误上下文恢复到下一条用户消息。
+    """
+
+    checkpoint = SessionCheckpoint.model_validate(record.snapshot)
+    if checkpoint.session_id != record.session_id:
+        raise ValueError("checkpoint snapshot session_id does not match its row")
+    if checkpoint.source_run_id != record.source_run_id:
+        raise ValueError("checkpoint snapshot source_run_id does not match its row")
+    if checkpoint.checkpoint_version != record.checkpoint_version:
+        raise ValueError("checkpoint snapshot version does not match its row")
+    if checkpoint.created_at != record.created_at or checkpoint.updated_at != record.updated_at:
+        raise ValueError("checkpoint snapshot timestamps do not match its row")
+    return checkpoint
 
 
 def _validate_events(run_id: str, events: tuple[RunPublicEvent, ...]) -> None:

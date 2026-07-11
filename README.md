@@ -18,15 +18,16 @@
 - 版本控制的消融案例真实比较 vector-only 与 vector+graph；当前实测根因命中持平，必要因果链完整率由 0.0 提升至 1.0。
 - 五项 capability 以 `runtime-capabilities:v1` 输出 Prompt 片段、工具优先级、输入要求和输出规则；历史匹配仅按需启用，实时 Observation 始终优先。
 - `langgraph-react-loop:v1` 真实执行 capability 注入、Planner 决策、MCP Action、Observation 回写和回到 Planner，并拦截重复 Action、组件越界、无效引用与 trace 漂移。
-- `planner-react:v2` 将 system 规则与 user 运行数据隔离；官方异步 SDK 从 Pydantic 提交 strict Schema，首次无效输出最多修复一次，refusal 和 Provider 错误安全停止。
+- `planner-react:v3` 将 system 规则与 user 运行数据隔离，并显式注入同会话上一轮公开报告上下文；官方异步 SDK 从 Pydantic 提交 strict Schema，首次无效输出最多修复一次，refusal 和 Provider 错误安全停止。
 - 确定性 Builder 只把有有效支持引用且无反对证据的假设提升为根因；链路和建议分别引用 `path_id` 与知识节点证据。
 - `auditor-report:v1` 使用独立 Structured Outputs Agent；确定性问题可否决错误 accept，`audited-report-workflow:v1` 最多返工一次，二次未通过或 Provider 不可用时返回安全降级报告。
 - `case-memory:v1` 只接收 Auditor accepted 且含根因的报告，新候选默认为 pending；exact signature 优先、pgvector cosine 次之，同 run 重放不会重复增加 occurrence。
 - `POST /api/v1/memories/{memory_id}/confirm` 支持 confirm、reject 和重新 confirm；`GET /api/v1/memories/search` 只返回 confirmed 案例，数据库未启用时明确返回 503。
 - `audited-diagnosis-workflow:v1` 按 history trigger 执行 confirmed 案例召回，并固定串联 ReAct、独立 Auditor 和审计后 memory staging；依赖失败不会伪装为空召回。
 - `diagnosis-resources:v1` 提供 session/message/run/event PostgreSQL 资源；首版同步执行真实 GraphRAG 与双 Agent，失败先保存安全 run/event 再返回可查询的 `run_id`。
+- `session-checkpoint:v1` 在成功 run 的同一事务保存最新公开状态；同 session 追问恢复报告、证据、路径和工具事件，失败 run 不覆盖旧快照，跨 run 同参 Action 仍会被拦截。
 
-当前已完成全部 MCP 工具、GraphRAG 检索闭环、五项固定 runtime capabilities、Planner ReAct、独立 Auditor、长期案例记忆、顶层诊断工作流，以及 session/message/run/event 资源 API。默认模型 Provider 仍为 disabled，自动化测试使用真实 SDK + MockTransport，不宣称已经调用付费模型或取得模型质量成绩。会话 checkpoint、可靠后台 worker、已确认案例自动注册 GraphRAG、相似案例共同点/差异点生成和更多 Golden Case 仍待后续实现。
+当前已完成全部 MCP 工具、GraphRAG 检索闭环、五项固定 runtime capabilities、Planner ReAct、独立 Auditor、长期案例记忆、顶层诊断工作流、session/message/run/event 资源 API 和同 session checkpoint 追问恢复。默认模型 Provider 仍为 disabled，自动化测试使用真实 SDK + MockTransport，不宣称已经调用付费模型或取得模型质量成绩。可靠后台 worker、LangGraph 逐节点中断恢复、已确认案例自动注册 GraphRAG、相似案例共同点/差异点生成和更多 Golden Case 仍待后续实现。
 
 ## 本地启动
 

@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     knowledge_seed_file: Path = Path("data/knowledge/cross_chain_graph.json")
     database_url: SecretStr | None = None
 
-    planner_prompt_id: str = "planner-react:v2"
+    planner_prompt_id: str = "planner-react:v3"
     planner_provider_contract_id: str = "openai-compatible-planner:v1"
     auditor_prompt_id: str = "auditor-report:v1"
     auditor_provider_contract_id: str = "openai-compatible-auditor:v1"
@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     audited_report_workflow_contract_id: str = "audited-report-workflow:v1"
     diagnosis_workflow_contract_id: str = "audited-diagnosis-workflow:v1"
     diagnosis_api_contract_id: str = "diagnosis-resources:v1"
+    session_checkpoint_contract_id: str = "session-checkpoint:v1"
     case_memory_contract_id: str = "case-memory:v1"
     graphrag_retrieval_contract_id: str = "graphrag-retrieval:v2"
     graphrag_evidence_bundle_contract_id: str = "graphrag-evidence-bundle:v1"

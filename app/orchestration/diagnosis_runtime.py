@@ -1,7 +1,7 @@
 """协调 GraphRAG、顶层诊断 workflow 与 PostgreSQL session/run/event 资源持久化。
 
-首版在提交 message 的 HTTP 请求内同步执行，但先创建 running run，完成或失败后再原子写终态和公开
-事件。该设计提供真实资源 API 且不引入不可恢复的进程内后台队列；异步任务/checkpoint 后续演进。
+首版在提交 message 的 HTTP 请求内同步执行，但先创建 running run，完成后原子写终态、公开事件和
+版本化 session checkpoint；失败只写安全终态，不覆盖上一快照。可靠后台 worker 仍是后续演进。
 """
 
 from __future__ import annotations
@@ -14,7 +14,12 @@ from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.domain.models import AgentState
+from app.memory.checkpoint import (
+    SessionCheckpoint,
+    build_checkpoint_retrieval_query,
+    build_session_checkpoint,
+    restore_agent_state,
+)
 from app.orchestration.diagnosis_models import DiagnosisRunRequest, DiagnosisRunResult
 from app.orchestration.run_models import (
     DIAGNOSIS_API_CONTRACT_ID,
@@ -216,28 +221,47 @@ class DiagnosisApplicationRuntime:
                 message=message,
                 now=started_at,
             )
+            checkpoint = (
+                await repository.get_checkpoint(session_id) if running is not None else None
+            )
         if running is None:
             return None
 
         try:
-            # 检索先于两个 Agent 子图执行，返回空 Bundle 与依赖失败具有不同、可测试的语义。
-            evidence_bundle = await self._retriever.retrieve(message.content.strip())
+            # 当前追问排在检索查询首位，上一轮公开报告只负责补全省略主题，不注入隐藏模型输出。
+            retrieval_query = build_checkpoint_retrieval_query(
+                message.content,
+                checkpoint,
+            )
+            evidence_bundle = await self._retriever.retrieve(retrieval_query)
+            initial_state = restore_agent_state(
+                checkpoint,
+                run_id=run_id,
+                session_id=session_id,
+                user_query=message.content,
+            )
             result = await self._workflow.run(
                 DiagnosisRunRequest(
-                    state=AgentState(
-                        run_id=run_id,
-                        session_id=session_id,
-                        user_query=message.content.strip(),
-                    ),
+                    state=initial_state,
                     capability_request=message.capability_request(),
                     evidence_bundle=evidence_bundle,
                 )
             )
             completed_at = self._now_factory()
+            next_checkpoint = build_session_checkpoint(
+                result,
+                checkpoint_version=(
+                    1 if checkpoint is None else checkpoint.checkpoint_version + 1
+                ),
+                created_at=(completed_at if checkpoint is None else checkpoint.created_at),
+                updated_at=completed_at,
+            )
             events = _project_run_events(
                 run_id,
                 evidence_bundle=evidence_bundle,
                 result=result,
+                restored_checkpoint=checkpoint,
+                saved_checkpoint=next_checkpoint,
                 created_at=completed_at,
             )
             async with self._session_factory.begin() as session:
@@ -246,6 +270,7 @@ class DiagnosisApplicationRuntime:
                     run_id,
                     result=result,
                     events=events,
+                    checkpoint=next_checkpoint,
                     now=completed_at,
                 )
         except Exception as exc:
@@ -310,12 +335,14 @@ def _project_run_events(
     *,
     evidence_bundle: GraphEvidenceBundle,
     result: DiagnosisRunResult,
+    restored_checkpoint: SessionCheckpoint | None,
+    saved_checkpoint: SessionCheckpoint,
     created_at: datetime,
 ) -> tuple[RunPublicEvent, ...]:
-    """把检索、ReAct、报告和记忆结果投影为连续且不含原始模型输出的公开时间线。
+    """把检索、ReAct、报告、记忆和 checkpoint 投影为连续安全公开时间线。
 
-    检索先占 sequence=1，随后保持两个子图事件原顺序，最后追加 memory stage。payload 只选择有限
-    枚举、ID、计数和布尔值；不会序列化完整 AgentState、Prompt、embedding 或异常对象。
+    检索先占 sequence=1 并记录恢复来源，随后保持两个子图事件原顺序，最后追加 memory 与快照
+    保存事件。payload 只选有限枚举、ID、计数和布尔值，不序列化 AgentState、Prompt 或 embedding。
     """
 
     event_data: list[tuple[RunEventPhase, str, str, dict[str, object]]] = [
@@ -331,6 +358,16 @@ def _project_run_events(
                 "selected_node_ids": [item.node_id for item in evidence_bundle.selected_nodes],
                 "selected_path_ids": [item.path_id for item in evidence_bundle.selected_paths],
                 "truncated": evidence_bundle.truncated,
+                "restored_checkpoint_version": (
+                    restored_checkpoint.checkpoint_version
+                    if restored_checkpoint is not None
+                    else None
+                ),
+                "restored_from_run_id": (
+                    restored_checkpoint.source_run_id
+                    if restored_checkpoint is not None
+                    else None
+                ),
             },
         )
     ]
@@ -375,6 +412,18 @@ def _project_run_events(
                 "memory_id": stage.memory.memory_id if stage.memory is not None else None,
                 "duplicate_type": stage.duplicate_type.value,
                 "similarity": stage.similarity,
+            },
+        )
+    )
+    event_data.append(
+        (
+            RunEventPhase.SYSTEM,
+            "session_checkpoint_saved",
+            f"会话短期状态已保存为 checkpoint v{saved_checkpoint.checkpoint_version}。",
+            {
+                "checkpoint_contract_id": saved_checkpoint.contract_id,
+                "checkpoint_version": saved_checkpoint.checkpoint_version,
+                "source_run_id": saved_checkpoint.source_run_id,
             },
         )
     )

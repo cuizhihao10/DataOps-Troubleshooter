@@ -454,6 +454,40 @@ async def test_invalid_evidence_reference_and_trace_are_blocked() -> None:
 
 
 @pytest.mark.asyncio
+async def test_restored_tool_event_blocks_same_action_with_new_run_trace() -> None:
+    """验证 checkpoint 恢复后更换 run trace 仍不能重复同一语义工具查询。
+
+    上一轮 ToolEvent 使用旧 run_id，本轮 Planner 必须使用新 run_id 才能通过 trace 门禁；重复指纹
+    忽略这项审计身份差异，仍按工具、资源、时间窗和场景判定相同 Action，Executor 不应收到调用。
+    """
+
+    previous_decision = _action_decision(trace_id="run_previous_001")
+    assert previous_decision.action is not None
+    previous_observation = await RecordingExecutor().execute(previous_decision.action)
+    restored_state = _state().model_copy(
+        update={"tool_events": list(previous_observation.tool_events)}
+    )
+    request = ReactRunRequest(
+        state=restored_state,
+        capability_request=CapabilitySelectionRequest(
+            intent=DiagnosisIntent.SINGLE_COMPONENT_DIAGNOSIS,
+            components=(Component.LTS,),
+        ),
+    )
+    executor = RecordingExecutor()
+    loop = BoundedReactLoop(
+        planner=ScriptedPlanner([_action_decision(trace_id=restored_state.run_id)]),
+        executor=executor,
+        config=ReactLoopConfig(max_steps=6, total_timeout_seconds=2),
+    )
+
+    result = await loop.run(request)
+
+    assert result.state.stop_reason == ReactStopReason.DUPLICATE_ACTION_BLOCKED.value
+    assert executor.actions == []
+
+
+@pytest.mark.asyncio
 async def test_expected_planner_provider_error_becomes_public_loop_stop() -> None:
     """验证已净化 Provider 错误由 LangGraph 转换为终态而不是崩溃或执行工具。
 

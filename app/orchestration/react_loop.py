@@ -453,14 +453,18 @@ def _append_event(
 
 
 def _action_fingerprint(action: ToolAction) -> str:
-    """把工具名和规范化 JSON 参数转换为不可逆、稳定的重复检测指纹。
+    """把工具名和除 trace 外的规范化参数转换为跨 checkpoint 稳定指纹。
 
-    JSON 使用排序键、紧凑分隔符和 UTF-8，避免字典顺序或空格造成同参漏检；SHA-256 只用于
-    本地等价性，不承载凭据。trace_id 已由策略校验绑定 run_id，不能通过更换 trace 绕过门禁。
+    ``trace_id`` 是每个新 run 必须变化的审计身份，不属于查询语义；先移除它，才能在恢复上一轮
+    ToolEvent 后识别相同工具、资源、时间窗和场景。JSON 规范化避免键序/空格漏检，SHA-256 只做
+    本地等价性，不承载凭据或安全签名。
     """
 
+    payload_data = action.model_dump(mode="json")
+    # trace 仍由前置门禁严格绑定当前 run_id；这里只排除它，防止新 run ID 成为重复调用绕过路径。
+    payload_data["arguments"].pop("trace_id")
     payload = json.dumps(
-        action.model_dump(mode="json"),
+        payload_data,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

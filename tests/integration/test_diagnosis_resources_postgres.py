@@ -45,7 +45,7 @@ from app.orchestration.diagnosis_runtime import (
 )
 from app.orchestration.run_models import AgentRunStatus, RunEventPhase
 from app.persistence.database import create_database_engine, create_session_factory
-from app.persistence.models import DiagnosisSessionRecord
+from app.persistence.models import DiagnosisSessionRecord, SessionCheckpointRecord
 from app.retrieval.embeddings import DeterministicHashEmbeddingProvider
 from app.retrieval.models import (
     EvidenceBundleBudget,
@@ -61,7 +61,7 @@ NOW = datetime(2026, 7, 15, 10, 0, tzinfo=UTC)
 class IncrementingClock:
     """每次调用返回比前一次增加一分钟的 UTC 时间，稳定验证资源时间单调性。
 
-    时钟不读取系统时间或 sleep；调用次数超出也可继续生成，适合 success 与 failure 两个 run 共享。
+    时钟不读取系统时间或 sleep；调用次数超出也可继续生成，适合两次 success 与一次 failure 共享。
     """
 
     def __init__(self, start: datetime) -> None:
@@ -94,14 +94,18 @@ class PrefixIdSequence:
     """
 
     def __init__(self) -> None:
-        """初始化一个 session 和两个 run 的固定十六进制 ID 队列。
+        """初始化一个 session 和三个 run 的固定十六进制 ID 队列。
 
         队列按资源种类分开，调用顺序变化会通过空列表 AssertionError 暴露，不会重复最后 ID。
         """
 
         self._values = {
             "session": ["session_1111111111111111"],
-            "run": ["run_2222222222222222", "run_3333333333333333"],
+            "run": [
+                "run_2222222222222222",
+                "run_3333333333333333",
+                "run_4444444444444444",
+            ],
         }
 
     def __call__(self, prefix: str) -> str:
@@ -144,17 +148,17 @@ class EmptyGraphRetriever:
         )
 
 
-class SuccessfulThenFailingWorkflow:
-    """第一次返回合法无根因 accepted 结果，第二次抛含敏感样本文本的内部异常。
+class SuccessfulTwiceThenFailingWorkflow:
+    """前两次返回合法结果，第三次抛含敏感样本文本的内部异常。
 
-    成功结果足以生成 retrieval/react/report/memory 事件；失败文本用于证明数据库和 API 安全摘要不会
-    复制原始异常。contexts 保存请求以断言 run/session/route 输入。
+    两次成功用于证明 checkpoint v1→v2 恢复；失败文本用于证明错误不会覆盖 v2 或进入 API。
+    contexts 保存请求以断言第二轮获得上一轮公开会话上下文。
     """
 
     def __init__(self) -> None:
         """初始化空请求列表和零调用计数，不创建模型或数据库资源。
 
-        第一次/第二次行为完全由计数决定；第三次调用显式继续失败，不提供隐藏默认成功路径。
+        第一次/第二次成功，第三次及以后失败，不提供隐藏默认成功路径。
         实例由单个测试独占，避免调用计数跨事件循环或测试用例共享。
         """
 
@@ -170,7 +174,7 @@ class SuccessfulThenFailingWorkflow:
 
         self.requests.append(request)
         self._calls += 1
-        if self._calls > 1:
+        if self._calls > 2:
             raise RuntimeError("internal synthetic secret must not persist")
         selection = get_capability_registry().select(request.capability_request)
         react_state = request.state.model_copy(
@@ -241,7 +245,7 @@ class SuccessfulThenFailingWorkflow:
         )
 
 
-def _message() -> DiagnosisMessage:
+def _message(content: str = "检查 LTS 合成任务") -> DiagnosisMessage:
     """构造通过 capability 路由校验的 LTS 单组件合成消息。
 
     history 默认 not_requested，便于测试资源 runtime 而不依赖长期记忆数据；内容会同时进入 run 和
@@ -251,7 +255,7 @@ def _message() -> DiagnosisMessage:
     from app.domain.models import Component
 
     return DiagnosisMessage(
-        content="检查 LTS 合成任务",
+        content=content,
         intent=DiagnosisIntent.SINGLE_COMPONENT_DIAGNOSIS,
         components=(Component.LTS,),
         history_trigger=HistoryTrigger.NOT_REQUESTED,
@@ -261,10 +265,10 @@ def _message() -> DiagnosisMessage:
 @pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_postgres_diagnosis_resources_persist_success_failure_and_events() -> None:
-    """贯通真实三表迁移、同步 runtime、completed/failed 状态和连续事件轮询。
+    """贯通资源表与 checkpoint 迁移、追问恢复、失败保护和连续事件轮询。
 
-    首次 run 保存完整 DiagnosisRunResult 与四阶段事件；第二次 workflow 异常保存安全 failed/system
-    事件且不含内部文本。最后绕过仓储写非法 completed 组合，证明数据库 CheckConstraint 生效。
+    前两次 run 依次保存 checkpoint v1/v2，第二轮恢复上一公开报告；第三次异常保存安全 failed
+    事件且不覆盖 v2。最后绕过仓储写非法 completed 组合，证明数据库约束生效。
     """
 
     if DATABASE_URL is None:
@@ -272,7 +276,7 @@ async def test_postgres_diagnosis_resources_persist_success_failure_and_events()
     engine = create_database_engine(DATABASE_URL)
     factory = create_session_factory(engine)
     retriever = EmptyGraphRetriever()
-    workflow = SuccessfulThenFailingWorkflow()
+    workflow = SuccessfulTwiceThenFailingWorkflow()
     runtime = DiagnosisApplicationRuntime(
         factory,
         retriever=retriever,
@@ -282,8 +286,9 @@ async def test_postgres_diagnosis_resources_persist_success_failure_and_events()
     )
 
     try:
-        # 三表由本测试独占；按外键反序清理，不触碰知识图或长期记忆表。
+        # 四张资源表由本测试独占；按外键反序清理，不触碰知识图或长期记忆表。
         async with factory.begin() as session:
+            await session.execute(text("DELETE FROM session_checkpoints"))
             await session.execute(text("DELETE FROM run_events"))
             await session.execute(text("DELETE FROM agent_runs"))
             await session.execute(text("DELETE FROM diagnosis_sessions"))
@@ -306,7 +311,7 @@ async def test_postgres_diagnosis_resources_persist_success_failure_and_events()
         assert completed.status is AgentRunStatus.COMPLETED
         assert completed.result is not None
         assert completed.result.react.state.run_id == completed.run_id
-        assert retriever.queries == ["检查 LTS 合成任务"]
+        assert retriever.queries == ["当前问题: 检查 LTS 合成任务"]
 
         reread = await runtime.get_run(completed.run_id)
         assert reread == completed
@@ -319,8 +324,35 @@ async def test_postgres_diagnosis_resources_persist_success_failure_and_events()
             RunEventPhase.REPORT,
             RunEventPhase.REPORT,
             RunEventPhase.MEMORY,
+            RunEventPhase.SYSTEM,
         ]
-        assert [event.sequence for event in events.events] == list(range(1, 7))
+        assert [event.sequence for event in events.events] == list(range(1, 8))
+        assert events.events[-1].event_type == "session_checkpoint_saved"
+        assert events.events[-1].payload["checkpoint_version"] == 1
+
+        followup = await runtime.submit_message(
+            created.session_id,
+            _message("这个恢复操作风险高吗？"),
+        )
+        assert followup is not None and followup.status is AgentRunStatus.COMPLETED
+        assert len(workflow.requests) == 2
+        restored_state = workflow.requests[1].state
+        assert restored_state.run_id == followup.run_id
+        assert restored_state.react_step == 0
+        assert restored_state.session_context is not None
+        assert restored_state.session_context.source_run_id == completed.run_id
+        assert "上一报告摘要" in retriever.queries[1]
+        followup_events = await runtime.get_events(followup.run_id)
+        assert followup_events is not None
+        assert followup_events.events[0].payload["restored_checkpoint_version"] == 1
+        assert followup_events.events[-1].payload["checkpoint_version"] == 2
+
+        async with factory() as session:
+            checkpoint_record = await session.get(SessionCheckpointRecord, created.session_id)
+            assert checkpoint_record is not None
+            assert checkpoint_record.checkpoint_version == 2
+            assert checkpoint_record.source_run_id == followup.run_id
+            assert checkpoint_record.snapshot["contract_id"] == "session-checkpoint:v1"
 
         async with factory() as session:
             # 绕过仓储写内部 phase，证明数据库不会把未审查事件类别混入公开时间线。
@@ -351,6 +383,12 @@ async def test_postgres_diagnosis_resources_persist_success_failure_and_events()
         assert "internal synthetic secret" not in str(failed_events.model_dump())
 
         async with factory() as session:
+            unchanged_checkpoint = await session.get(SessionCheckpointRecord, created.session_id)
+            assert unchanged_checkpoint is not None
+            assert unchanged_checkpoint.checkpoint_version == 2
+            assert unchanged_checkpoint.source_run_id == followup.run_id
+
+        async with factory() as session:
             stored_session = await session.scalar(
                 select(DiagnosisSessionRecord).where(
                     DiagnosisSessionRecord.session_id == created.session_id
@@ -373,6 +411,7 @@ async def test_postgres_diagnosis_resources_persist_success_failure_and_events()
     finally:
         # 任一断言失败后仍反序清理资源并释放 asyncpg 池，避免污染其他 postgres marker。
         async with factory.begin() as session:
+            await session.execute(text("DELETE FROM session_checkpoints"))
             await session.execute(text("DELETE FROM run_events"))
             await session.execute(text("DELETE FROM agent_runs"))
             await session.execute(text("DELETE FROM diagnosis_sessions"))

@@ -256,6 +256,46 @@ class DiagnosisSessionRecord(Base):
     )
 
 
+class SessionCheckpointRecord(Base):
+    """映射每个诊断会话唯一的最新安全 checkpoint。
+
+    ``snapshot`` 保存 ``session-checkpoint:v1`` JSONB，不保存模型原始输出；session 主键保证一个
+    会话只有一个最新快照，source_run 唯一外键保证同一 completed run 不会被多个会话复用。
+    checkpoint_version 由应用按成功轮次单调递增，并由数据库正数约束提供最终防线。
+    """
+
+    __tablename__ = "session_checkpoints"
+    __table_args__ = (
+        CheckConstraint(
+            "checkpoint_version >= 1",
+            name="ck_session_checkpoints_version",
+        ),
+        UniqueConstraint("source_run_id", name="uq_session_checkpoints_source_run"),
+    )
+
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("diagnosis_sessions.session_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    source_run_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_runs.run_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    checkpoint_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class AgentRunRecord(Base):
     """映射一次诊断运行的输入路由、终态结果和安全失败摘要。
 

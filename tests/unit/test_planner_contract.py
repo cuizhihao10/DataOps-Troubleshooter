@@ -112,9 +112,10 @@ def test_versioned_prompt_contains_required_runtime_placeholders() -> None:
     """
 
     prompt = load_planner_prompt()
-    assert PLANNER_PROMPT_ID == "planner-react:v2"
+    assert PLANNER_PROMPT_ID == "planner-react:v3"
     for placeholder in (
         "{user_query}",
+        "{session_context}",
         "{hypotheses}",
         "{evidence_bundle}",
         "{tool_schemas}",
@@ -123,8 +124,8 @@ def test_versioned_prompt_contains_required_runtime_placeholders() -> None:
         assert placeholder in prompt
 
 
-def test_v2_prompt_separates_static_system_rules_from_runtime_placeholders() -> None:
-    """验证 v2 Prompt 的 system 模板不包含任何运行时用户数据占位符。
+def test_v3_prompt_separates_static_system_rules_from_runtime_placeholders() -> None:
+    """验证 v3 Prompt 的 system 模板不包含任何运行时用户数据占位符。
 
     system/user 分离防止用户问题被提升到系统优先级；测试同时确认 user 模板承担问题、证据、
     capability 和预算字段，并且旧 v1 文件不再是运行时加载入口。
@@ -137,6 +138,7 @@ def test_v2_prompt_separates_static_system_rules_from_runtime_placeholders() -> 
     assert "不可信运行数据" in system_prompt
     for placeholder in (
         "{user_query}",
+        "{session_context}",
         "{active_capabilities}",
         "{tool_evidence}",
         "{confirmed_case_memories}",

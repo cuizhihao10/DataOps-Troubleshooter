@@ -36,6 +36,7 @@ from app.memory import (
     MemoryDecision,
     PostgresMemoryRuntime,
 )
+from app.memory.checkpoint import SESSION_CHECKPOINT_CONTRACT_ID
 from app.orchestration import (
     AUDITED_REPORT_WORKFLOW_CONTRACT_ID,
     DIAGNOSIS_API_CONTRACT_ID,
@@ -92,6 +93,7 @@ class ContractVersions(BaseModel):
     audited_report_workflow: str
     diagnosis_workflow: str
     diagnosis_api: str
+    session_checkpoint: str
     case_memory: str
     graph_retrieval: str
     graph_evidence_bundle: str
@@ -193,6 +195,7 @@ class DiagnosisApiConfiguration(BaseModel):
 
     status: Literal["disabled", "configured"]
     contract_id: str
+    checkpoint_contract_id: str
     execution_mode: Literal["synchronous"]
     retrieval_seed_limit: int
 
@@ -369,6 +372,8 @@ async def lifespan(app: FastAPI):
         raise ValueError("configured diagnosis workflow contract ID does not match the package")
     if settings.diagnosis_api_contract_id != DIAGNOSIS_API_CONTRACT_ID:
         raise ValueError("configured diagnosis API contract ID does not match the package")
+    if settings.session_checkpoint_contract_id != SESSION_CHECKPOINT_CONTRACT_ID:
+        raise ValueError("configured session checkpoint contract ID does not match the package")
     if settings.case_memory_contract_id != CASE_MEMORY_CONTRACT_ID:
         raise ValueError("configured case memory contract ID does not match the package")
 
@@ -550,6 +555,7 @@ async def health(request: Request) -> HealthResponse:
             audited_report_workflow=settings.audited_report_workflow_contract_id,
             diagnosis_workflow=settings.diagnosis_workflow_contract_id,
             diagnosis_api=settings.diagnosis_api_contract_id,
+            session_checkpoint=settings.session_checkpoint_contract_id,
             case_memory=settings.case_memory_contract_id,
             graph_retrieval=settings.graphrag_retrieval_contract_id,
             graph_evidence_bundle=settings.graphrag_evidence_bundle_contract_id,
@@ -590,6 +596,7 @@ async def health(request: Request) -> HealthResponse:
         diagnosis_api=DiagnosisApiConfiguration(
             status=("disabled" if request.app.state.diagnosis_runtime is None else "configured"),
             contract_id=settings.diagnosis_api_contract_id,
+            checkpoint_contract_id=settings.session_checkpoint_contract_id,
             execution_mode="synchronous",
             retrieval_seed_limit=settings.diagnosis_retrieval_seed_limit,
         ),
