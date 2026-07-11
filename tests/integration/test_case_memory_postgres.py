@@ -30,7 +30,12 @@ from app.domain.models import (
     RootCauseConclusion,
 )
 from app.memory.graph_registration import CASE_GRAPH_SOURCE_ID, case_graph_node_id
-from app.memory.models import MemoryDecision, MemoryDuplicateType, MemoryStageStatus
+from app.memory.models import (
+    MemoryDecision,
+    MemoryDuplicateType,
+    MemoryRetrievalChannel,
+    MemoryStageStatus,
+)
 from app.memory.runtime import PostgresMemoryRuntime
 from app.orchestration import (
     AUDITED_REPORT_WORKFLOW_CONTRACT_ID,
@@ -92,6 +97,57 @@ class ConstantEmbeddingProvider:
         if any(not item.strip() for item in texts):
             raise ValueError("constant test embedding input must not be blank")
         return [[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] for _ in texts]
+
+
+class DirectedGraphEmbeddingProvider:
+    """用二维单位方向嵌入八维数组，制造可证明图邻居改变 top-k 的测试几何关系。
+
+    查询方向为 0°；案例 A/B/C 分别为 30°、-45°、60°。直接排序是 A>B>C，但 A→C 的
+    ``0.866 * 0.866 = 0.75`` 图传播分高于 B 的约 0.707，使 C 在 limit=2 时替换 B。所有案例间
+    相似度低于 0.99 去重阈值，测试不会因 staging 合并而失去三个独立节点。
+    """
+
+    @property
+    def provider_id(self) -> str:
+        """返回与其他测试/知识种子隔离的稳定向量空间标识。
+
+        PostgreSQL 查询必须同时匹配该 ID 和八维长度；属性不执行 I/O，也不随文本变化。若生产
+        仓储忽略 Provider 过滤，本测试会混入默认知识节点并使候选顺序断言失败。
+        """
+
+        return "directed-case-graph-test:v1"
+
+    @property
+    def dimensions(self) -> int:
+        """返回满足生产最低维度约束的固定八维长度。
+
+        实际几何只使用前两维，其余补零；这样仍由真实 pgvector cosine 执行，而不是在 Python 中
+        伪造数据库分数。
+        """
+
+        return 8
+
+    async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+        """按文本中的合成标识选择单位方向，并保持批次顺序和数量。
+
+        ``图案例 A/B/C`` 映射到三个案例方向，``graph-neighbor-query`` 映射到查询方向；其他非空
+        文本使用查询方向以支持测试流程中的普通搜索。空白输入显式失败，不访问模型或网络。
+        """
+
+        vectors: list[list[float]] = []
+        for item in texts:
+            if not item.strip():
+                raise ValueError("directed test embedding input must not be blank")
+            if "图案例 A" in item:
+                vector = [0.8660254038, 0.5]
+            elif "图案例 B" in item:
+                vector = [0.7071067812, -0.7071067812]
+            elif "图案例 C" in item:
+                vector = [0.5, 0.8660254038]
+            else:
+                vector = [1.0, 0.0]
+            vectors.append([*vector, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        return vectors
 
 
 def _accepted_result(
@@ -533,6 +589,87 @@ async def test_graph_node_collision_rolls_back_memory_confirmation() -> None:
                     "DELETE FROM knowledge_nodes "
                     "WHERE node_id LIKE 'case_%' AND "
                     "(source_id LIKE 'mem_%' OR source_id = 'manual-test-source')"
+                )
+            )
+            await session.execute(text("DELETE FROM memory_evidence"))
+            await session.execute(text("DELETE FROM case_memories"))
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_memory_search_merges_graph_neighbor_and_reject_removes_it() -> None:
+    """验证真实 pgvector top-k 与 SIMILAR_TO 邻居合并后，图候选改变最终搜索结果。
+
+    三个同组件 confirmed 案例使用受控方向：直接 top-2 为 A/B，A→C 图传播分高于 B，因此最终
+    返回 A/C，且 C 是 graph-only 并携带稳定 edge 引用。reject C 后节点/边级联删除，下一次搜索
+    恢复 A/B，证明状态过滤和图清理即时生效。
+    """
+
+    if DATABASE_URL is None:
+        pytest.fail("DATAOPS_TEST_DATABASE_URL is required for postgres tests")
+    engine = create_database_engine(DATABASE_URL)
+    factory = create_session_factory(engine)
+    provider = DirectedGraphEmbeddingProvider()
+    runtime = PostgresMemoryRuntime(
+        factory,
+        provider,
+        dedup_similarity_threshold=0.99,
+        graph_similarity_threshold=0.8,
+        default_search_limit=5,
+    )
+    try:
+        async with factory.begin() as session:
+            await session.execute(
+                text(
+                    "DELETE FROM knowledge_nodes "
+                    "WHERE node_type = 'case' AND source_id LIKE 'mem_%'"
+                )
+            )
+            await session.execute(text("DELETE FROM memory_evidence"))
+            await session.execute(text("DELETE FROM case_memories"))
+
+        staged = []
+        for index, label in enumerate(("A", "B", "C"), start=1):
+            result = await runtime.stage(
+                _accepted_result(
+                    run_id=f"run_graph_recall_pg_00{index}",
+                    evidence_id=f"ev_graph_recall_pg_00{index}",
+                    root_cause=f"图案例 {label}",
+                    component=Component.LTS,
+                    observed_at=NOW + timedelta(minutes=index),
+                )
+            )
+            assert result.memory is not None
+            staged.append(result.memory)
+            await runtime.decide(result.memory.memory_id, MemoryDecision.CONFIRM)
+
+        matches = await runtime.search("graph-neighbor-query", limit=2)
+        assert [match.memory.root_cause for match in matches] == ["图案例 A", "图案例 C"]
+        assert matches[0].retrieval_channels == [MemoryRetrievalChannel.VECTOR]
+        assert matches[0].direct_similarity == pytest.approx(0.8660254, abs=1e-5)
+        graph_match = matches[1]
+        assert graph_match.retrieval_channels == [MemoryRetrievalChannel.GRAPH]
+        assert graph_match.direct_similarity is None
+        assert graph_match.graph_score == pytest.approx(0.75, abs=1e-5)
+        assert len(graph_match.graph_edge_refs) == 1
+        assert graph_match.graph_edge_refs[0].startswith("edge_case_similar_")
+
+        case_c = next(memory for memory in staged if memory.root_cause == "图案例 C")
+        rejected = await runtime.decide(case_c.memory_id, MemoryDecision.REJECT)
+        assert rejected is not None and rejected.status is MemoryStatus.REJECTED
+        after_reject = await runtime.search("graph-neighbor-query", limit=2)
+        assert [match.memory.root_cause for match in after_reject] == ["图案例 A", "图案例 B"]
+        assert all(
+            MemoryRetrievalChannel.GRAPH not in match.retrieval_channels for match in after_reject
+        )
+    finally:
+        # 先删除动态节点级联清边，再清关联和案例，保证失败中断也不污染后续 PostgreSQL 专项。
+        async with factory.begin() as session:
+            await session.execute(
+                text(
+                    "DELETE FROM knowledge_nodes "
+                    "WHERE node_type = 'case' AND source_id LIKE 'mem_%'"
                 )
             )
             await session.execute(text("DELETE FROM memory_evidence"))

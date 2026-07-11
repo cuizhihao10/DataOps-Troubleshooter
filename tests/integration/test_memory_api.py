@@ -11,7 +11,12 @@ import pytest
 
 from app.api.main import app
 from app.domain.models import CaseMemory, Component, MemoryStatus
-from app.memory.models import CaseMemoryMatch, MemoryCounts, MemoryDecision
+from app.memory.models import (
+    CaseMemoryMatch,
+    MemoryCounts,
+    MemoryDecision,
+    MemoryRetrievalChannel,
+)
 
 NOW = datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
 
@@ -77,7 +82,14 @@ class FakeMemoryRuntime:
         self.searches.append((query, limit))
         if self.memory.status is not MemoryStatus.CONFIRMED:
             return []
-        return [CaseMemoryMatch(memory=self.memory, similarity=0.91)]
+        return [
+            CaseMemoryMatch(
+                memory=self.memory,
+                similarity=0.91,
+                retrieval_channels=[MemoryRetrievalChannel.VECTOR],
+                direct_similarity=0.91,
+            )
+        ]
 
     async def counts(self) -> MemoryCounts:
         """根据当前单案例状态返回三类计数，供决策路由刷新健康快照。
@@ -122,7 +134,7 @@ async def test_memory_api_confirms_rejects_and_searches_only_visible_case() -> N
     """验证产品路径可确认、搜索、拒绝并立即改变默认召回可见性。
 
     先注入 pending runtime，confirm 后搜索返回 confirmed 案例和相似度；reject 后搜索为空。响应均
-    携带 `case-memory:v1`，且 API 把 query/limit 原样传给 runtime。
+    携带 `case-memory:v2` 和向量/图评分来源，且 API 把 query/limit 原样传给 runtime。
     """
 
     runtime = FakeMemoryRuntime()
@@ -150,9 +162,13 @@ async def test_memory_api_confirms_rejects_and_searches_only_visible_case() -> N
     assert confirmed.status_code == 200
     assert confirmed.json()["memory"]["status"] == "confirmed"
     assert visible.status_code == 200
-    assert visible.json()["contract_id"] == "case-memory:v1"
+    assert visible.json()["contract_id"] == "case-memory:v2"
     assert visible.json()["matches"][0]["memory"]["memory_id"] == "mem_api_001"
     assert visible.json()["matches"][0]["similarity"] == 0.91
+    assert visible.json()["matches"][0]["retrieval_channels"] == ["vector"]
+    assert visible.json()["matches"][0]["direct_similarity"] == 0.91
+    assert visible.json()["matches"][0]["graph_score"] is None
+    assert visible.json()["matches"][0]["graph_edge_refs"] == []
     assert rejected.status_code == 200
     assert rejected.json()["memory"]["status"] == "rejected"
     assert hidden.json()["matches"] == []

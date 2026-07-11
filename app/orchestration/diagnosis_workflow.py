@@ -75,10 +75,11 @@ class CaseMemoryWorkflow(Protocol):
         *,
         limit: int | None = None,
     ) -> list[CaseMemoryMatch]:
-        """按查询返回 confirmed 案例及相似度，未命中返回空列表。
+        """按查询返回 confirmed 案例及向量/图检索分量，未命中返回空列表。
 
         ``limit`` 是顶层上下文预算；实现必须在存储层排除 pending/rejected，并在 Provider 或数据库
-        失败时抛出异常，不能把依赖故障解释为真实的零命中。
+        失败时抛出异常，不能把依赖故障解释为真实的零命中。raw match 的 edge refs 仅解释来源，
+        不自动成为实时 Evidence。
         """
 
         ...

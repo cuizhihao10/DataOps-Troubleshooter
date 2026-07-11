@@ -1,7 +1,8 @@
 """实现 Auditor 通过后的确定性案例候选构建、去重合并、状态决策和搜索。
 
 Service 不调用 Chat 模型，也不把 pending 案例注入 Planner。它组合 ReportRunResult、Embedding
-Provider 和仓储事务：精确签名优先，随后同组件 pgvector cosine，最终只搜索 confirmed。
+Provider 和仓储事务：精确签名优先，随后同组件 pgvector cosine，最终只搜索 confirmed 并由仓储
+合并向量直接候选与 SIMILAR_TO 图邻居。
 """
 
 from __future__ import annotations
@@ -122,10 +123,11 @@ class CaseMemoryRepository(Protocol):
         provider_id: str,
         limit: int,
     ) -> list[CaseMemoryMatch]:
-        """只返回当前 Provider 空间内 confirmed 案例的有界向量匹配列表。
+        """只返回当前 Provider 空间内 confirmed 案例的有界向量/图融合匹配列表。
 
-        ``embedding`` 是查询向量，``provider_id`` 隔离数学空间，``limit`` 控制响应预算；无命中
-        返回空列表。实现必须在 SQL 层过滤状态，维度或数据库错误则显式抛出而非泄露 pending。
+        ``embedding`` 是查询向量，``provider_id`` 隔离数学空间，``limit`` 同时控制直接种子和最终
+        响应预算；无命中返回空列表。实现必须在直接/图 SQL 层过滤状态，维度或数据库错误则显式
+        抛出而非泄露 pending。
         """
 
         ...
@@ -240,10 +242,10 @@ class CaseMemoryService:
         return await self._repository.set_status(memory_id, target)
 
     async def search_confirmed(self, query: str, *, limit: int = 5) -> list[CaseMemoryMatch]:
-        """嵌入非空查询并只召回当前 Provider 空间中的 confirmed 案例。
+        """嵌入非空查询并召回当前 Provider 空间中的 confirmed 向量/图融合案例。
 
         limit 限制 1..20；Provider 必须返回恰好一个固定维度向量。历史结果仅供后续 capability
-        参考，调用方仍必须让本次实时 Observation 优先。
+        参考，仓储会解释 direct/graph 分量；调用方仍必须让本次实时 Observation 优先。
         """
 
         normalized_query = query.strip()

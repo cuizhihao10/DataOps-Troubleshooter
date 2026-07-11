@@ -1,8 +1,8 @@
 """把 confirmed 案例召回结果确定性解释为共同点、差异点、参考方案和避坑提示。
 
-pgvector 相似度只说明文本空间接近，不能直接证明两次故障等价。本模块比较当前组件、问题、假设、
-实时 Evidence 和历史案例结构，生成可审计 ``SimilarCaseReference``；它不调用第三个 Agent，也不
-改变候选集合或相似度，从而保持“检索决定候选、确定性规则解释边界、实时事实优先”的职责分离。
+向量直接分与 SIMILAR_TO 图传播分都只说明检索相关，不能证明两次故障等价。本模块比较当前组件、
+问题、假设、实时 Evidence 和历史结构，生成可审计 ``SimilarCaseReference``；它不调用第三个
+Agent，也不改变候选集合或分数，保持“检索决定候选、规则解释边界、实时事实优先”的职责分离。
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from app.domain.models import (
     HypothesisStatus,
     SimilarCaseReference,
 )
-from app.memory.models import CaseMemoryMatch
+from app.memory.models import CaseMemoryMatch, MemoryRetrievalChannel
 
 _WHITESPACE = re.compile(r"\s+")
 
@@ -29,7 +29,7 @@ def explain_case_matches(
 ) -> tuple[SimilarCaseReference, ...]:
     """按原召回顺序把 confirmed raw matches 转换为完整可解释历史匹配。
 
-    输入候选已由 pgvector 仓储排序和 confirmed 门禁验证；函数不重新排序、过滤或修改 similarity。
+    输入候选已由向量/图仓储排序和 confirmed 门禁验证；函数不重新排序、过滤或修改 similarity。
     每个输出至少包含一个共同点、一个差异/未确认边界、参考动作、避坑提示和案例引用。状态中的
     TOOL Evidence 优先进入引用，帮助 Auditor 检查历史结论是否与本次实时 Observation 冲突。
     """
@@ -40,8 +40,7 @@ def explain_case_matches(
         raise ValueError("history comparison requires current components when matches exist")
 
     return tuple(
-        _explain_one_match(match, state, current_components=current_components)
-        for match in matches
+        _explain_one_match(match, state, current_components=current_components) for match in matches
     )
 
 
@@ -64,7 +63,15 @@ def _explain_one_match(
     current_only = sorted(current_component_values - memory_component_values)
     memory_only = sorted(memory_component_values - current_component_values)
 
-    common_points = [f"pgvector 语义相似度为 {match.similarity:.3f}，该分数只用于候选排序。"]
+    common_points = [f"历史候选最终排序分为 {match.similarity:.3f}，该分数不等于事实置信度。"]
+    if MemoryRetrievalChannel.VECTOR in match.retrieval_channels:
+        common_points.append(f"案例直接 pgvector cosine 相似度为 {match.direct_similarity:.3f}。")
+    if MemoryRetrievalChannel.GRAPH in match.retrieval_channels:
+        common_points.append(
+            "案例由已确认先例沿 SIMILAR_TO 关系扩展，"
+            f"查询相关度与边权相乘后的图传播分为 {match.graph_score:.3f}；"
+            f"关系引用：{', '.join(match.graph_edge_refs)}。"
+        )
     if overlap:
         common_points.append(f"本次与历史案例共同涉及组件：{', '.join(overlap)}。")
 

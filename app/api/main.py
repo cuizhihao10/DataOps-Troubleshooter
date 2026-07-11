@@ -307,10 +307,10 @@ class MemoryDecisionResponse(BaseModel):
 
 
 class MemorySearchResponse(BaseModel):
-    """返回查询文本和仅包含 confirmed 案例的有界相似度列表。
+    """返回查询文本和仅包含 confirmed 案例的有界向量/图融合候选列表。
 
-    Pydantic `CaseMemoryMatch` 会再次拒绝 pending/rejected；query 原样回显便于演示和审计，不包含
-    查询 embedding。
+    Pydantic `CaseMemoryMatch` 会再次拒绝 pending/rejected，并解释 vector/graph 通道、直接分、
+    图传播分和 edge 引用；query 原样回显便于演示和审计，不包含查询 embedding。
     """
 
     model_config = ConfigDict(extra="forbid")

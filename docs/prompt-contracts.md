@@ -522,9 +522,9 @@ CAUSED_BY, RESOLVED_BY, SIMILAR_TO
 
 ## 5. 历史案例匹配 capability 契约
 
-### 5.1 `case-memory:v1` 写入与可见性契约
+### 5.1 `case-memory:v2` 写入、可见性与检索来源契约
 
-长期案例记忆运行契约版本为 `case-memory:v1`。它是确定性存储协议，不是第三个 Agent，也不允许
+长期案例记忆运行契约版本为 `case-memory:v2`。它是确定性存储协议，不是第三个 Agent，也不允许
 模型直接执行 SQL。只有最终 `ReportRunResult` 同时满足 workflow outcome=`accepted`、Auditor
 status=`accept` 且报告至少有一个根因时，才能投影候选；degraded、revise、Provider 失败或无根因
 报告必须安全跳过。新候选固定为 `pending`，不能仅因 Auditor 通过就进入默认检索。
@@ -543,13 +543,34 @@ embedding 只保存在内部存储模型和 pgvector 列，不进入 Planner Pro
 confirm 还会在同一数据库事务把案例注册为 GraphRAG `case` 节点，并按独立阈值写入双向
 `SIMILAR_TO`；reject 删除节点并级联清边。图同步失败必须回滚状态，不能返回部分成功。
 
+v2 搜索先取 confirmed-only pgvector 直接 top-k，再从这些种子的动态 `case` 节点沿本组件拥有的
+`SIMILAR_TO` 出边扩展邻居。图传播分固定为 `seed_similarity * edge.weight`，防止与本次查询无关
+但彼此相似的历史案例仅凭图结构获得高分。两路按 memory ID 去重，最终 similarity 取
+`max(direct_similarity, graph_score)`，再按最终分、直接分、图分、新鲜度和 ID 稳定排序并裁剪 limit。
+
+raw `CaseMemoryMatch` 必须公开以下检索解释字段，但仍不包含 embedding：
+
+```json
+{
+  "memory": {"memory_id": "mem_xxx", "status": "confirmed"},
+  "similarity": 0.82,
+  "retrieval_channels": ["vector", "graph"],
+  "direct_similarity": 0.80,
+  "graph_score": 0.82,
+  "graph_edge_refs": ["edge_case_similar_xxx"]
+}
+```
+
+vector 通道必须有 direct_similarity；graph 通道必须有 graph_score 和稳定 `graph_edge_refs`；最终分
+必须等于最强分量。pending/rejected 在直接 SQL、图邻居 SQL 和 Pydantic 三层排除。
+
 ### 5.2 历史匹配输出契约
 
-历史案例匹配当前首先使用 confirmed-only pgvector 相似度确定候选；confirmed 案例已经注册为
-GraphRAG `case` 节点并建立 `SIMILAR_TO`，通用 GraphRAG 可沿该关系扩展，但 history matcher 尚未
-把图邻居合并进候选集。当前
+历史案例匹配使用 confirmed-only pgvector 直接种子与 `SIMILAR_TO` 图邻居的 v2 合并结果确定候选。
+当前
 `explain_case_matches` 使用确定性规则比较组件、症状、候选根因和 TOOL Evidence，生成共同点、
-差异点、参考方案和避坑提示。它不调用第三个 Agent，不重新排序、过滤或修改 similarity。
+差异点、参考方案和避坑提示，并说明最终分、直接分或图传播分。它不调用第三个 Agent，不重新
+排序、过滤或修改 similarity；edge ID 只作为 raw 检索来源和共同点说明，不冒充实时 Evidence。
 
 ```json
 {
@@ -574,8 +595,8 @@ pitfall_warnings 和 evidence_refs；evidence_refs 必须包含 case_id，并最
 根因不一致时 differences 明确写出冲突，pitfall_warnings 禁止直接复用历史方案。
 
 当前顶层诊断图已把 raw CaseMemory 和确定性解释同时接入 Planner/Auditor，并投影进最终报告。
-`SIMILAR_TO` 已由确定性注册器写入并可被 GraphRAG 路径召回；matcher 仍只使用 pgvector 候选，
-其文本重叠规则也不冒充 LLM 语义判断或事实证明。
+`SIMILAR_TO` 已由确定性注册器写入，并能真实改变 history matcher 候选；其文本重叠规则仍不冒充
+LLM 语义判断或事实证明，历史结论继续服从本次实时 Observation。
 
 ## 6. 顶层诊断编排运行契约
 
@@ -602,7 +623,7 @@ recall_case_memories
 - 同一批 raw confirmed CaseMemory 与最终 history_case_matches 同时进入 Auditor。确定性 Validator
   要求报告相似案例与 matcher 完全相同，模型不能提高分数、删除冲突或改写历史方案。
 - report 子图先完成 deterministic Builder、规则门禁、独立 Auditor 和最多一次返工，随后才允许
-  `stage_case_memory`。顶层不复制 accepted 判定，而是调用 `case-memory:v1` 返回 staged/merged、
+  `stage_case_memory`。顶层不复制 accepted 判定，而是调用 `case-memory:v2` 返回 staged/merged、
   skipped_no_root_cause 或 `skipped_not_accepted`。
 - 历史搜索、ReAct、报告或 staging 的未预期异常必须传播，不能伪装为空召回或完成结果。最终结果
   校验 ReAct/report 的 run_id、session_id，以及 report outcome 与 memory stage 状态的一致性。

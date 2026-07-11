@@ -85,7 +85,7 @@ class Settings(BaseSettings):
     diagnosis_workflow_contract_id: str = "audited-diagnosis-workflow:v2"
     diagnosis_api_contract_id: str = "diagnosis-resources:v2"
     session_checkpoint_contract_id: str = "session-checkpoint:v1"
-    case_memory_contract_id: str = "case-memory:v1"
+    case_memory_contract_id: str = "case-memory:v2"
     graphrag_retrieval_contract_id: str = "graphrag-retrieval:v2"
     graphrag_evidence_bundle_contract_id: str = "graphrag-evidence-bundle:v1"
 

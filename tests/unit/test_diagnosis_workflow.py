@@ -34,6 +34,7 @@ from app.domain.models import (
 )
 from app.memory.models import (
     CaseMemoryMatch,
+    MemoryRetrievalChannel,
     MemoryStageResult,
     MemoryStageStatus,
 )
@@ -331,7 +332,39 @@ def _confirmed_match() -> CaseMemoryMatch:
         created_at=NOW,
         updated_at=NOW,
     )
-    return CaseMemoryMatch(memory=memory, similarity=0.94)
+    return CaseMemoryMatch(
+        memory=memory,
+        similarity=0.94,
+        retrieval_channels=[MemoryRetrievalChannel.VECTOR],
+        direct_similarity=0.94,
+    )
+
+
+def _graph_confirmed_match() -> CaseMemoryMatch:
+    """构造一个仅由 SIMILAR_TO 图传播进入候选集的 confirmed 合成案例。
+
+    raw match 保存 graph-only 通道、传播分和稳定 edge ID；顶层工作流应把其 memory 投影给 Planner
+    与 Auditor，并由 matcher 在共同点中解释图来源，而不把 edge ID 伪装为实时 Evidence。
+    """
+
+    memory = CaseMemory(
+        memory_id="mem_graph_history_001",
+        symptoms=["LTS 任务等待关联案例"],
+        root_cause="相似案例图邻居根因",
+        components=[Component.LTS],
+        evidence_refs=["ev_graph_history_001"],
+        status=MemoryStatus.CONFIRMED,
+        occurrence_count=1,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    return CaseMemoryMatch(
+        memory=memory,
+        similarity=0.78,
+        retrieval_channels=[MemoryRetrievalChannel.GRAPH],
+        graph_score=0.78,
+        graph_edge_refs=["edge_case_similar_0123456789abcdef"],
+    )
 
 
 def _pending_stage_result() -> MemoryStageResult:
@@ -406,6 +439,45 @@ async def test_diagnosis_workflow_recalls_once_reuses_context_and_stages_accepte
     assert result.report.state.draft_report.similar_cases == list(result.history_case_matches)
     assert result.memory_stage.status is MemoryStageStatus.STAGED
     assert result.report.state.memory_candidate == result.memory_stage.memory
+
+
+@pytest.mark.asyncio
+async def test_diagnosis_workflow_passes_graph_only_match_to_both_agents() -> None:
+    """验证图邻居 raw match 经确定性解释后被同批注入 Planner、Auditor 和最终报告。
+
+    工作流不重新搜索或丢弃 graph-only 候选；Planner 的初步比较和 Auditor 的最终比较都应说明
+    SIMILAR_TO 图传播来源，同时报告 evidence_refs 仍以 confirmed case ID 与实时 Evidence 为准。
+    """
+
+    react = RecordingReactWorkflow()
+    report = RecordingReportWorkflow(ReportWorkflowOutcome.ACCEPTED)
+    memory = RecordingMemoryWorkflow(
+        matches=[_graph_confirmed_match()],
+        stage_result=_pending_stage_result(),
+    )
+    workflow = AuditedDiagnosisWorkflow(
+        react=react,
+        report=report,
+        memory=memory,
+        config=DiagnosisWorkflowConfig(memory_search_limit=2, memory_query_max_chars=512),
+    )
+
+    result = await workflow.run(
+        DiagnosisRunRequest(
+            state=_initial_state(run_id="run_diagnosis_graph_unit_001"),
+            capability_request=_capability_request(HistoryTrigger.USER_REQUESTED),
+        )
+    )
+
+    assert result.recalled_memories == (_graph_confirmed_match(),)
+    assert react.requests[0].confirmed_case_memories == (_graph_confirmed_match().memory,)
+    assert report.requests[0].confirmed_case_memories == (_graph_confirmed_match().memory,)
+    assert any(
+        "SIMILAR_TO" in point for point in react.requests[0].history_case_matches[0].common_points
+    )
+    assert report.requests[0].history_case_matches == result.history_case_matches
+    assert result.history_case_matches[0].evidence_refs[0] == "mem_graph_history_001"
+    assert "edge_case_similar_0123456789abcdef" not in result.history_case_matches[0].evidence_refs
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,7 @@
 """定义长期记忆服务、PostgreSQL 仓储和 API 共享的强类型结果模型。
 
 CaseMemory 本身不携带 embedding，避免大向量进入 Planner Prompt；内部 StoredCaseMemory 单独保存
-向量空间元数据。所有状态和匹配类型使用有限枚举，API 无需解析自然语言。
+向量空间元数据。检索模型显式区分 vector/graph 通道和评分分量，API 无需从自然语言猜测来源。
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.models import CaseMemory, MemoryStatus
 
-CASE_MEMORY_CONTRACT_ID = "case-memory:v1"
+CASE_MEMORY_CONTRACT_ID = "case-memory:v2"
 
 
 class MemoryDecision(StrEnum):
@@ -49,6 +49,18 @@ class MemoryDuplicateType(StrEnum):
     NONE = "none"
     EXACT_SIGNATURE = "exact_signature"
     VECTOR_SIMILARITY = "vector_similarity"
+
+
+class MemoryRetrievalChannel(StrEnum):
+    """标记历史案例候选由查询向量、案例图关系或两者共同召回。
+
+    ``vector`` 表示案例直接进入 pgvector top-k；``graph`` 表示它由直接种子沿已审计
+    ``SIMILAR_TO`` 边扩展。有限枚举进入 API 与测试，使作品集能够解释图关系是否真正影响候选，
+    而不是只返回一个来源不明的最终分数。
+    """
+
+    VECTOR = "vector"
+    GRAPH = "graph"
 
 
 class StoredCaseMemory(BaseModel):
@@ -139,27 +151,57 @@ class MemoryStageResult(BaseModel):
 
 
 class CaseMemoryMatch(BaseModel):
-    """表示默认历史检索返回的一个 confirmed 案例和 cosine 相似度。
+    """表示 confirmed 案例的向量/图召回来源、评分分量和最终排序分。
 
     模型拒绝 pending/rejected 记录，从响应 Schema 层保证历史 capability 不会看到未确认记忆；
-    embedding 不进入输出，后续比较共同点/差异点时只使用结构化案例字段。
+    embedding 不进入输出。``similarity`` 是直接相似度与图传播分的最大值，图传播分由直接种子
+    相似度乘 ``SIMILAR_TO`` 边权得到，避免仅凭历史关系无条件提高候选。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     memory: CaseMemory
     similarity: float = Field(ge=0, le=1)
+    retrieval_channels: list[MemoryRetrievalChannel] = Field(min_length=1, max_length=2)
+    direct_similarity: float | None = Field(default=None, ge=0, le=1)
+    graph_score: float | None = Field(default=None, ge=0, le=1)
+    graph_edge_refs: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_confirmed_memory(self) -> CaseMemoryMatch:
-        """保证搜索命中只能是 confirmed，避免仓储过滤漂移污染 Planner。
+        """联合校验 confirmed 状态、通道分量、图引用和最终排序分一致性。
 
-        相似度零仍是合法有界结果，但仓储通常按 limit 返回最高分；状态错误直接抛出而不是静默
-        过滤，使数据库或查询缺陷能被测试发现。
+        vector 通道必须携带 direct_similarity；graph 通道必须携带 graph_score 和至少一个 edge ID，
+        未声明的通道不得残留对应分量。``similarity`` 必须等于可用分量最大值；任何矛盾都直接失败，
+        避免 API、Planner 与评测对同一候选采用不同排序解释。
         """
 
         if self.memory.status is not MemoryStatus.CONFIRMED:
             raise ValueError("default memory matches must be confirmed")
+        if len(self.retrieval_channels) != len(set(self.retrieval_channels)):
+            raise ValueError("memory retrieval channels must not contain duplicates")
+        if len(self.graph_edge_refs) != len(set(self.graph_edge_refs)):
+            raise ValueError("memory graph edge refs must not contain duplicates")
+
+        has_vector = MemoryRetrievalChannel.VECTOR in self.retrieval_channels
+        has_graph = MemoryRetrievalChannel.GRAPH in self.retrieval_channels
+        if has_vector != (self.direct_similarity is not None):
+            raise ValueError("vector retrieval channel must match direct_similarity")
+        if has_graph != (self.graph_score is not None):
+            raise ValueError("graph retrieval channel must match graph_score")
+        if has_graph != bool(self.graph_edge_refs):
+            raise ValueError("graph retrieval channel must match graph edge refs")
+        if any(
+            not reference.startswith("edge_case_similar_") for reference in self.graph_edge_refs
+        ):
+            raise ValueError("memory graph edge refs must use stable case similarity IDs")
+
+        component_scores = [
+            score for score in (self.direct_similarity, self.graph_score) if score is not None
+        ]
+        expected = max(component_scores)
+        if abs(self.similarity - expected) > 1e-9:
+            raise ValueError("memory match similarity must equal the strongest retrieval score")
         return self
 
 

@@ -36,7 +36,7 @@ CASE_GRAPH_MAX_NEIGHBORS = 20
 class CaseGraphRegistrationResult(BaseModel):
     """描述一次内部图同步实际产生的节点和相似边结果。
 
-    该模型只用于 runtime 测试与可观测性扩展，不进入公开 ``case-memory:v1`` API。``node_id`` 是
+    该模型只用于 runtime 测试与可观测性扩展，不进入公开 ``case-memory:v2`` API。``node_id`` 是
     稳定的案例图标识，``neighbor_node_ids`` 与 ``edge_ids`` 均按确定性顺序返回；数据库或校验失败
     时不会构造部分结果，而是向上抛错并由外层事务回滚。
     """

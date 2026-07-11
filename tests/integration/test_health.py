@@ -55,7 +55,7 @@ async def test_health_reports_validated_contract_baseline() -> None:
         "diagnosis_workflow": "audited-diagnosis-workflow:v2",
         "diagnosis_api": "diagnosis-resources:v2",
         "session_checkpoint": "session-checkpoint:v1",
-        "case_memory": "case-memory:v1",
+        "case_memory": "case-memory:v2",
         "graph_retrieval": "graphrag-retrieval:v2",
         "graph_evidence_bundle": "graphrag-evidence-bundle:v1",
     }
@@ -84,7 +84,7 @@ async def test_health_reports_validated_contract_baseline() -> None:
     }
     assert payload["memory"] == {
         "status": "disabled",
-        "contract_id": "case-memory:v1",
+        "contract_id": "case-memory:v2",
         "embedding_provider": "deterministic-hash:v1",
         "embedding_dimensions": 128,
         "dedup_similarity_threshold": 0.92,

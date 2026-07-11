@@ -32,6 +32,7 @@ from app.memory.models import (
     MemoryDecision,
     MemoryDuplicateMatch,
     MemoryDuplicateType,
+    MemoryRetrievalChannel,
     MemoryStageStatus,
     StoredCaseMemory,
 )
@@ -251,7 +252,12 @@ class InMemoryMemoryRepository:
         assert embedding
         assert provider_id
         return [
-            CaseMemoryMatch(memory=item.memory, similarity=0.9)
+            CaseMemoryMatch(
+                memory=item.memory,
+                similarity=0.9,
+                retrieval_channels=[MemoryRetrievalChannel.VECTOR],
+                direct_similarity=0.9,
+            )
             for item in self.records.values()
             if item.memory.status is MemoryStatus.CONFIRMED
         ][:limit]
@@ -481,9 +487,7 @@ async def test_memory_candidate_excludes_recalled_case_ids_from_its_own_evidence
         }
     )
     result_with_history = accepted.model_copy(
-        update={
-            "state": accepted.state.model_copy(update={"draft_report": report_with_history})
-        }
+        update={"state": accepted.state.model_copy(update={"draft_report": report_with_history})}
     )
     repository = InMemoryMemoryRepository()
     service = CaseMemoryService(

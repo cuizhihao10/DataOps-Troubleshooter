@@ -1,7 +1,7 @@
-"""实现案例记忆的 PostgreSQL/pgvector 去重、状态更新和 confirmed 检索仓储。
+"""实现案例记忆的 PostgreSQL/pgvector 去重、状态更新和 confirmed 向量/图融合检索仓储。
 
 仓储只负责 SQL 与 ORM/领域转换，不决定报告是否可写入。AsyncSession 由调用方管理事务；精确签名
-和向量检索均在数据库执行，memory_evidence 保留每个来源 run 的审计关联。
+和向量检索均在数据库执行，SIMILAR_TO join 补充图邻居，memory_evidence 保留来源 run 审计关联。
 """
 
 from __future__ import annotations
@@ -11,16 +11,25 @@ from math import isfinite
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.domain.models import CaseMemory, Component, MemoryStatus
+from app.memory.graph_registration import CASE_GRAPH_SOURCE_ID
 from app.memory.models import (
     CaseMemoryMatch,
     MemoryCounts,
     MemoryDuplicateMatch,
     MemoryDuplicateType,
+    MemoryRetrievalChannel,
     StoredCaseMemory,
 )
-from app.persistence.models import CaseMemoryRecord, MemoryEvidenceRecord
+from app.persistence.models import (
+    CaseMemoryRecord,
+    KnowledgeEdgeRecord,
+    KnowledgeNodeRecord,
+    MemoryEvidenceRecord,
+)
+from app.retrieval.models import KnowledgeNodeType, KnowledgeRelationType
 
 
 class PostgresCaseMemoryRepository:
@@ -286,10 +295,11 @@ class PostgresCaseMemoryRepository:
         provider_id: str,
         limit: int,
     ) -> list[CaseMemoryMatch]:
-        """在 compatible 向量空间中仅召回 confirmed 案例并按 cosine 相似度排序。
+        """合并 confirmed pgvector 直接命中与 ``SIMILAR_TO`` 图邻居并返回最终 top-k。
 
-        pending/rejected 在 SQL WHERE 层排除，不依赖 Service 后过滤；limit 为 1..20。返回模型再次
-        校验 status=confirmed，形成数据库与领域双重防线。
+        第一阶段在 compatible Provider/维度空间取直接 top-k；第二阶段只从这些种子的动态 case
+        节点沿本组件拥有的相似边扩展 confirmed 邻居。图传播分为种子直接分乘边权，两路按 memory
+        ID 去重后取较强分并稳定排序。pending/rejected 在两条 SQL 路径均被排除。
         """
 
         _validate_embedding(embedding, provider_id=provider_id)
@@ -306,13 +316,95 @@ class PostgresCaseMemoryRepository:
             .order_by(distance, CaseMemoryRecord.updated_at.desc(), CaseMemoryRecord.memory_id)
             .limit(limit)
         )
-        return [
+        direct_matches = [
             CaseMemoryMatch(
                 memory=_memory_from_record(record),
-                similarity=_similarity(raw_distance),
+                similarity=(similarity := _similarity(raw_distance)),
+                retrieval_channels=[MemoryRetrievalChannel.VECTOR],
+                direct_similarity=similarity,
             )
             for record, raw_distance in result
         ]
+        graph_neighbors = await self._search_graph_neighbors(
+            direct_matches,
+            provider_id=provider_id,
+            dimensions=len(embedding),
+        )
+        return merge_case_memory_matches(
+            direct_matches,
+            graph_neighbors,
+            limit=limit,
+        )
+
+    async def _search_graph_neighbors(
+        self,
+        direct_matches: list[CaseMemoryMatch],
+        *,
+        provider_id: str,
+        dimensions: int,
+    ) -> list[tuple[CaseMemory, float, str]]:
+        """从直接向量种子的动态 case 节点扩展 confirmed 相似邻居。
+
+        返回三元组为邻居领域案例、``seed_similarity * edge.weight`` 图传播分和稳定 edge ID。查询
+        同时校验边来源/类型、两端 case 节点、邻居状态及向量空间；缺少已注册节点时仅没有图候选，
+        SQL 或枚举污染仍显式失败。零传播分被排除，因为它不能提供排序增益。
+        """
+
+        if not direct_matches:
+            return []
+        seed_scores = {
+            match.memory.memory_id: match.direct_similarity
+            for match in direct_matches
+            if match.direct_similarity is not None
+        }
+        if not seed_scores:
+            return []
+
+        seed_node = aliased(KnowledgeNodeRecord)
+        neighbor_node = aliased(KnowledgeNodeRecord)
+        neighbor_memory = aliased(CaseMemoryRecord)
+        result = await self._session.execute(
+            select(
+                neighbor_memory,
+                KnowledgeEdgeRecord.edge_id,
+                KnowledgeEdgeRecord.weight,
+                seed_node.source_id.label("seed_memory_id"),
+            )
+            .join(seed_node, KnowledgeEdgeRecord.from_node_id == seed_node.node_id)
+            .join(neighbor_node, KnowledgeEdgeRecord.to_node_id == neighbor_node.node_id)
+            .join(neighbor_memory, neighbor_node.source_id == neighbor_memory.memory_id)
+            .where(
+                KnowledgeEdgeRecord.relation_type == KnowledgeRelationType.SIMILAR_TO.value,
+                KnowledgeEdgeRecord.source_id == CASE_GRAPH_SOURCE_ID,
+                seed_node.node_type == KnowledgeNodeType.CASE.value,
+                seed_node.source_id.in_(list(seed_scores)),
+                neighbor_node.node_type == KnowledgeNodeType.CASE.value,
+                neighbor_memory.status == MemoryStatus.CONFIRMED.value,
+                neighbor_memory.embedding_provider == provider_id,
+                neighbor_memory.embedding_dimensions == dimensions,
+            )
+            .order_by(
+                seed_node.source_id,
+                KnowledgeEdgeRecord.weight.desc(),
+                KnowledgeEdgeRecord.edge_id,
+            )
+        )
+
+        neighbors: list[tuple[CaseMemory, float, str]] = []
+        for record, edge_id, edge_weight, seed_memory_id in result:
+            # 边权只描述两个历史案例的接近程度，必须乘当前查询对种子的直接相似度，防止与本次
+            # 问题无关但彼此相似的旧案例仅凭图结构获得高排名。
+            graph_score = seed_scores[str(seed_memory_id)] * float(edge_weight)
+            if graph_score <= 0:
+                continue
+            neighbors.append(
+                (
+                    _memory_from_record(record),
+                    max(0.0, min(1.0, graph_score)),
+                    str(edge_id),
+                )
+            )
+        return neighbors
 
     async def count_by_status(self) -> MemoryCounts:
         """在当前事务快照中统计三种记忆状态，供健康检查公开规模。
@@ -330,6 +422,105 @@ class PostgresCaseMemoryRepository:
             confirmed=counts.get(MemoryStatus.CONFIRMED.value, 0),
             rejected=counts.get(MemoryStatus.REJECTED.value, 0),
         )
+
+
+def merge_case_memory_matches(
+    direct_matches: list[CaseMemoryMatch],
+    graph_neighbors: list[tuple[CaseMemory, float, str]],
+    *,
+    limit: int,
+) -> list[CaseMemoryMatch]:
+    """按 memory ID 合并向量直接候选和图邻居，并生成可解释稳定 top-k。
+
+    ``graph_neighbors`` 的元组依次为 confirmed 案例、图传播分和 edge ID。相同案例可由多条种子边
+    到达：只保留最高图分，分数并列时保留全部稳定 edge 引用；若它也直接命中，则通道同时包含
+    vector/graph，最终 similarity 取两个分量最大值。非法 limit、非 confirmed 或坏 edge ID 会由
+    本函数/Pydantic 显式失败。
+    """
+
+    if not 1 <= limit <= 20:
+        raise ValueError("memory match merge limit must be between 1 and 20")
+
+    # 中间字典只保存生成最终强类型模型所需的最小分量；先放直接命中，保证同 ID 的公开案例快照
+    # 与查询 SQL 一致，图查询只为缺失候选补充 memory。
+    candidates: dict[str, dict[str, object]] = {}
+    for match in direct_matches:
+        candidates[match.memory.memory_id] = {
+            "memory": match.memory,
+            "direct_similarity": match.direct_similarity,
+            "graph_score": None,
+            "graph_edge_refs": [],
+        }
+
+    for memory, graph_score, edge_id in graph_neighbors:
+        if memory.status is not MemoryStatus.CONFIRMED:
+            raise ValueError("graph memory neighbors must be confirmed")
+        if not 0 <= graph_score <= 1:
+            raise ValueError("graph memory score must be between zero and one")
+        if not edge_id.startswith("edge_case_similar_"):
+            raise ValueError("graph memory edge must use a stable case similarity ID")
+
+        candidate = candidates.setdefault(
+            memory.memory_id,
+            {
+                "memory": memory,
+                "direct_similarity": None,
+                "graph_score": None,
+                "graph_edge_refs": [],
+            },
+        )
+        current_graph_score = candidate["graph_score"]
+        if current_graph_score is None or graph_score > float(current_graph_score):
+            candidate["graph_score"] = graph_score
+            candidate["graph_edge_refs"] = [edge_id]
+        elif abs(graph_score - float(current_graph_score)) <= 1e-9:
+            edge_refs = candidate["graph_edge_refs"]
+            if not isinstance(edge_refs, list):  # pragma: no cover - internal invariant.
+                raise TypeError("graph edge accumulator must be a list")
+            if edge_id not in edge_refs:
+                edge_refs.append(edge_id)
+
+    merged: list[CaseMemoryMatch] = []
+    for candidate in candidates.values():
+        memory = candidate["memory"]
+        if not isinstance(memory, CaseMemory):  # pragma: no cover - internal invariant.
+            raise TypeError("memory candidate accumulator must contain CaseMemory")
+        direct_similarity = candidate["direct_similarity"]
+        graph_score = candidate["graph_score"]
+        graph_edge_refs = candidate["graph_edge_refs"]
+        channels = []
+        component_scores: list[float] = []
+        if direct_similarity is not None:
+            channels.append(MemoryRetrievalChannel.VECTOR)
+            component_scores.append(float(direct_similarity))
+        if graph_score is not None:
+            channels.append(MemoryRetrievalChannel.GRAPH)
+            component_scores.append(float(graph_score))
+        if not isinstance(graph_edge_refs, list):  # pragma: no cover - internal invariant.
+            raise TypeError("graph edge accumulator must be a list")
+        merged.append(
+            CaseMemoryMatch(
+                memory=memory,
+                similarity=max(component_scores),
+                retrieval_channels=channels,
+                direct_similarity=(None if direct_similarity is None else float(direct_similarity)),
+                graph_score=None if graph_score is None else float(graph_score),
+                graph_edge_refs=sorted(str(reference) for reference in graph_edge_refs),
+            )
+        )
+
+    # 最终分优先；分数相同时直接命中优先于纯图扩展，再比较图分、新鲜度和稳定 ID，保证分页/测试
+    # 不依赖 PostgreSQL 未声明的行顺序。
+    return sorted(
+        merged,
+        key=lambda match: (
+            -match.similarity,
+            -(match.direct_similarity if match.direct_similarity is not None else -1),
+            -(match.graph_score if match.graph_score is not None else -1),
+            -match.memory.updated_at.timestamp(),
+            match.memory.memory_id,
+        ),
+    )[:limit]
 
 
 def _record_from_stored(stored: StoredCaseMemory) -> CaseMemoryRecord:

@@ -259,12 +259,12 @@ def test_case_memory_contract_is_versioned_audited_and_confirmed_only() -> None:
 
     该测试读取 Prompt/运行契约而不是实现源码，防止后续重构在代码仍能运行时悄悄把 pending 候选
     暴露给 Planner，或遗漏 ``memory_evidence`` 对同 run 重放和证据审计的约束。缺少任一关键术语
-    都表示学习文档没有与 ``case-memory:v1`` 实现同步，应在合并前失败。
+    都表示学习文档没有与 ``case-memory:v2`` 实现同步，应在合并前失败。
     """
 
     prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
 
-    assert "case-memory:v1" in prompt_contract
+    assert "case-memory:v2" in prompt_contract
     assert "pending" in prompt_contract
     assert "exact signature" in prompt_contract
     assert "pgvector cosine" in prompt_contract
@@ -274,6 +274,8 @@ def test_case_memory_contract_is_versioned_audited_and_confirmed_only() -> None:
     assert "GraphRAG `case` 节点" in prompt_contract
     assert "双向" in prompt_contract
     assert "图同步失败必须回滚状态" in prompt_contract
+    assert "seed_similarity * edge.weight" in prompt_contract
+    assert "graph_edge_refs" in prompt_contract
 
 
 def test_top_level_diagnosis_workflow_contract_orders_recall_audit_and_staging() -> None:

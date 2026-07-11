@@ -120,9 +120,10 @@ class PostgresMemoryRuntime:
         *,
         limit: int | None = None,
     ) -> list[CaseMemoryMatch]:
-        """在短只读会话中搜索 confirmed 案例，缺省使用集中配置 limit。
+        """在短只读会话中搜索 confirmed 向量/图融合案例，缺省使用集中配置 limit。
 
-        只读路径不显式 commit；离开会话释放连接，SQL/Provider 异常原样传播给 API 错误边界。
+        直接 pgvector 与 SIMILAR_TO join 共享同一事务快照且不显式 commit；离开会话释放连接，
+        SQL/Provider 异常原样传播给 API 错误边界，不能伪装为空历史。
         """
 
         selected_limit = self.default_search_limit if limit is None else limit

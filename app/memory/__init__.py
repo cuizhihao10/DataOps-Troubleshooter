@@ -11,6 +11,7 @@ from app.memory.models import (
     MemoryCounts,
     MemoryDecision,
     MemoryDuplicateType,
+    MemoryRetrievalChannel,
     MemoryStageResult,
     MemoryStageStatus,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "MemoryCounts",
     "MemoryDecision",
     "MemoryDuplicateType",
+    "MemoryRetrievalChannel",
     "MemoryStageResult",
     "MemoryStageStatus",
     "PostgresMemoryRuntime",

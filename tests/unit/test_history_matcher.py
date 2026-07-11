@@ -22,7 +22,7 @@ from app.domain.models import (
     SimilarCaseReference,
 )
 from app.memory.matcher import explain_case_matches
-from app.memory.models import CaseMemoryMatch
+from app.memory.models import CaseMemoryMatch, MemoryRetrievalChannel
 from app.reporting import DeterministicReportBuilder, ReportPolicyValidator
 
 NOW = datetime(2026, 7, 17, 9, 0, tzinfo=UTC)
@@ -51,6 +51,8 @@ def _raw_match() -> CaseMemoryMatch:
             updated_at=NOW,
         ),
         similarity=0.91,
+        retrieval_channels=[MemoryRetrievalChannel.VECTOR],
+        direct_similarity=0.91,
     )
 
 
@@ -175,12 +177,15 @@ def test_report_policy_rejects_similarity_or_explanation_drift() -> None:
         history_case_matches=(match,),
     )
     validator = ReportPolicyValidator()
-    assert validator.validate(
-        report,
-        state,
-        confirmed_case_memories=(raw.memory,),
-        history_case_matches=(match,),
-    ) == ()
+    assert (
+        validator.validate(
+            report,
+            state,
+            confirmed_case_memories=(raw.memory,),
+            history_case_matches=(match,),
+        )
+        == ()
+    )
 
     drifted = DiagnosisReport.model_validate(
         {
