@@ -26,6 +26,7 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/orchestration/report_workflow.py"),
     Path("app/orchestration/diagnosis_workflow.py"),
     Path("app/orchestration/diagnosis_runtime.py"),
+    Path("app/orchestration/auditor_evaluation.py"),
     Path("app/orchestration/history_evaluation.py"),
     Path("app/reporting/draft.py"),
     Path("app/reporting/policy.py"),
@@ -164,6 +165,8 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
     assert "memory-recall-eval:v1" in guide
     assert "历史案例端到端影响消融评测" in guide
     assert "history-impact-eval:v1" in guide
+    assert "独立 Auditor 增量影响消融评测" in guide
+    assert "auditor-impact-eval:v1" in guide
     assert "尚未完成" in guide
     assert "代码注释的强制粒度" in guide
     assert "callable 级 docstring" in guide
@@ -205,6 +208,26 @@ def test_history_impact_report_documents_measured_scope_and_realtime_priority() 
     assert "历史冲突保护通过率" in report
     assert "确定性替身" in report
     assert "不能据此宣称真实模型" in report
+
+
+def test_auditor_impact_report_separates_rules_control_and_model_quality_claims() -> None:
+    """确认 Auditor 消融报告区分规则对照、独立审计、降级和真实模型质量边界。
+
+    该门禁防止 README/报告把 off 组写成生产开关、把 degraded 写成接受，或把确定性脚本小样本的
+    100% 发现率宣传为真实 LLM 准确率；同时锁定危险残留和安全处置两个最终结果指标。
+    """
+
+    report = Path("docs/auditor-impact-eval-results.md").read_text(encoding="utf-8")
+
+    assert "auditor-impact-eval:v1" in report
+    assert "Auditor off" in report
+    assert "control_unreviewed" in report
+    assert "不是生产功能开关" in report
+    assert "预期问题 Macro 发现率 | 0.0000 | 1.0000 | +1.0000" in report
+    assert "危险内容 Macro 残留率 | 1.0000 | 0.0000 | -1.0000" in report
+    assert "安全处置率 | 0.0000 | 1.0000 | +1.0000" in report
+    assert "持续问题后安全降级 | 1" in report
+    assert "不能据此宣称真实 LLM" in report
 
 
 def test_prompt_contract_versions_budgeted_retrieval_inputs() -> None:
@@ -296,6 +319,10 @@ def test_auditor_prompt_and_bounded_revision_contract_are_documented() -> None:
     assert "audited-report-workflow:v2" in prompt_contract
     assert "最多一次报告级返工" in prompt_contract
     assert "安全降级报告" in prompt_contract
+    assert "auditor-impact-eval:v1" in prompt_contract
+    assert "control_unreviewed" in prompt_contract
+    assert "确定性预检 `AuditIssue` 完全相同且为空" in prompt_contract
+    assert "不为生产运行时增加关闭开关" in prompt_contract
 
 
 def test_case_memory_contract_is_versioned_audited_and_confirmed_only() -> None:

@@ -890,6 +890,50 @@ Auditor 和 staging 都走真实边界。历史搜索使用合成 confirmed matc
 1.0000，历史投影和冲突保护通过率也为 1.0000。这些结果只证明固定脚本下编排和安全契约生效，
 不能外推为真实模型准确率、时延或成本提升。
 
+### 16.3 独立 Auditor 增量影响消融评测
+
+确定性规则擅长检查 ID 是否存在、假设状态、引用集合、结构化冲突字段、风险字段和历史匹配是否
+漂移，但不能可靠判断自然语言 Evidence 是否真的支持根因，或一个字段齐全的动作在当前语境下是否
+仍然危险。`auditor-impact-eval:v1` 在 `app/orchestration/auditor_evaluation.py` 中把这类语义问题与
+规则问题分开测量。
+
+评测中的 `auditor_off` 不是生产开关。它只调用同一 Builder 和生产 `ReportPolicyValidator`，保留
+原始草稿并标记 `control_unreviewed`；不能称为 accepted，也不能写入长期记忆。`auditor_on` 才运行
+完整 `AuditedReportWorkflow`。评测器要求两组 initial draft 和 deterministic issues 完全一致，而且
+规则问题必须为空；如果规则已经发现缺陷，案例应归入 Validator 测试，不能重复宣传成 Auditor
+增量收益。
+
+`data/evals/auditor_impact_cases.json` 固定三类合成语义缺陷：
+
+1. 引用 ID 与 supported hypothesis 对齐，但 Evidence 内容实际不支持根因；
+2. 另一条 TOOL Observation 与根因冲突，但没有预先写进 `contradicting_evidence`；
+3. 修复步骤具备风险枚举、前置、回滚和验证字段，但仍包含“直接覆盖目标表”的危险语义。
+
+调用链如下：
+
+```text
+load_auditor_impact_eval_suite
+  -> runner.run(case, auditor_off: builder + validator only)
+  -> runner.run(case, auditor_on: audited-report-workflow:v2)
+  -> compare identical draft and deterministic precheck
+  -> calculate issue detection, unsafe retention and safe resolution
+```
+
+问题发现率只统计 fixture 预期的有限 `AuditIssueCode`，额外多报问题不会提高分数。危险残留直接检查
+最终 `DiagnosisReport.root_causes` 与 remediation action marker；因此即使 Auditor 返回 revise，如果
+`SafeReportReviser` 或降级没有真正删除危险内容，safe resolution 仍为失败。accepted 和 degraded
+分别计数，安全降级不能包装成审计通过。
+
+`tests/integration/test_auditor_impact_langgraph.py` 使用同一 case-specific Builder 和生产 Validator。
+on 组运行真实报告 LangGraph、生产 `SafeReportReviser`、第二轮审计和降级节点；结构化 Auditor
+替身只提供有限 issue，不修改报告。三例 deterministic precheck 均为空，三例均执行一次修订；
+unsupported 与风险案例二审接受，持续证据冲突案例二审仍拒绝并降级。
+
+实测记录见 `docs/auditor-impact-eval-results.md`：预期问题发现率从 0 变为 1.0000，危险内容残留率
+从 1.0000 降为 0，安全处置率从 0 变为 1.0000；三例均属于规则未命中后的 Auditor 增量发现，
+最终 2 accepted、1 degraded。该小样本使用确定性 Auditor 脚本，只证明职责分离和控制流生效，
+不能外推为真实模型的语义判断准确率、误报率或成本收益。
+
 PostgreSQL 测试使用 `postgres` marker。普通 `pytest` 默认排除它，保持无 Docker 环境下的快速反馈；显式数据库验证使用：
 
 ```powershell
@@ -904,7 +948,7 @@ python -m pytest -m postgres
 | `requirements*.lock` | 由 pip-tools 机械生成，手工注释会在再生成时丢失。 | 依赖来源在 `pyproject.toml`，一致性由 `pip check` 和 Docker 构建验证。 |
 | `data/fixtures/**/*.json` | 标准 JSON 不允许注释。 | Pydantic Scenario Schema 和 Fixture 测试。 |
 | `data/knowledge/*.json` | 需要被标准加载器和其他语言读取。 | `KnowledgeSeedBundle`、source_span 校验和 PostgreSQL 集成测试。 |
-| `data/evals/*.json` | 标准评测数据不能加入非标准注释。 | Graph/Memory/History Impact Eval Schema、快速加载测试、本文档和三份实测报告。 |
+| `data/evals/*.json` | 标准评测数据不能加入非标准注释。 | Graph/Memory/History/Auditor Impact Eval Schema、快速加载测试、本文档和四份实测报告。 |
 | PNG / DOCX | 二进制格式不能可靠保存代码式注释。 | Markdown 产品基线、本文档和正式阅读版正文。 |
 
 ## 18. 当前完成度与下一步
@@ -925,6 +969,7 @@ python -m pytest -m postgres
 - `case-memory:v2` 受控长期案例、向量/图融合召回、检索通道/分量/edge 引用、同 run 幂等和 confirmed-only API。
 - `memory-recall-eval:v1` 三条长期记忆召回案例、双模式消融、Recall/Precision/forbidden 指标和 PostgreSQL 实测报告。
 - `history-impact-eval:v1` 三条 Memory off/on 诊断案例、实际 ToolEvent 行为指标、实时事实优先门禁和真实 LangGraph 实测报告。
+- `auditor-impact-eval:v1` 三条语义缺陷案例、规则/Auditor 增量归因、危险残留与安全处置指标和真实报告 LangGraph 实测。
 - `audited-diagnosis-workflow:v2` 按需召回、两阶段案例解释、ReAct、Auditor 和审计后 staging 顶层闭环。
 - `diagnosis-resources:v2` session/message/run/event PostgreSQL 资源 API、完整相似案例结果和安全失败事件。
 - `session-checkpoint:v1` 同 session 成功快照、追问恢复、版本门禁、失败保护和跨 run Action 去重。

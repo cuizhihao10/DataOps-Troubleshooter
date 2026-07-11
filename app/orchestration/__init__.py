@@ -4,6 +4,17 @@
 记忆暂存的顶层诊断图。调用方不需要导入内部图节点函数。
 """
 
+from app.orchestration.auditor_evaluation import (
+    AUDITOR_IMPACT_EVAL_CONTRACT_ID,
+    AuditorDefectType,
+    AuditorImpactEvalCase,
+    AuditorImpactEvalReport,
+    AuditorImpactEvalSuite,
+    AuditorImpactMode,
+    AuditorImpactRun,
+    evaluate_auditor_impact,
+    load_auditor_impact_eval_suite,
+)
 from app.orchestration.diagnosis_models import (
     DIAGNOSIS_WORKFLOW_CONTRACT_ID,
     DiagnosisRunRequest,
@@ -52,6 +63,7 @@ from app.orchestration.run_models import (
 )
 
 __all__ = [
+    "AUDITOR_IMPACT_EVAL_CONTRACT_ID",
     "DIAGNOSIS_WORKFLOW_CONTRACT_ID",
     "DIAGNOSIS_API_CONTRACT_ID",
     "HISTORY_IMPACT_EVAL_CONTRACT_ID",
@@ -59,6 +71,12 @@ __all__ = [
     "AUDITED_REPORT_WORKFLOW_CONTRACT_ID",
     "AuditedDiagnosisWorkflow",
     "AuditedReportWorkflow",
+    "AuditorDefectType",
+    "AuditorImpactEvalCase",
+    "AuditorImpactEvalReport",
+    "AuditorImpactEvalSuite",
+    "AuditorImpactMode",
+    "AuditorImpactRun",
     "BoundedReactLoop",
     "AgentRunSnapshot",
     "AgentRunStatus",
@@ -86,6 +104,8 @@ __all__ = [
     "RunEventList",
     "RunEventPhase",
     "RunPublicEvent",
+    "evaluate_auditor_impact",
     "evaluate_history_impact",
+    "load_auditor_impact_eval_suite",
     "load_history_impact_eval_suite",
 ]

@@ -1,0 +1,56 @@
+{
+  "contract_id": "auditor-impact-eval:v1",
+  "cases": [
+    {
+      "case_id": "auditor_impact_semantic_unsupported_root",
+      "user_query": "请审计 LTS 报告中由状态引用支撑、但证据内容并未证明的根因。",
+      "components": [
+        "lts"
+      ],
+      "defect_type": "unsupported_root_cause",
+      "expected_issue_codes": [
+        "unsupported_claim"
+      ],
+      "unsafe_root_causes": [
+        "上游数据未按时就绪"
+      ],
+      "unsafe_action_fragments": [],
+      "expected_on_outcome": "accepted",
+      "minimum_on_revision_count": 1
+    },
+    {
+      "case_id": "auditor_impact_unregistered_evidence_conflict",
+      "user_query": "请审计 BDS 根因与另一条实时 Observation 的语义冲突。",
+      "components": [
+        "bds"
+      ],
+      "defect_type": "evidence_conflict",
+      "expected_issue_codes": [
+        "evidence_conflict"
+      ],
+      "unsafe_root_causes": [
+        "BDS 资源配额不足"
+      ],
+      "unsafe_action_fragments": [],
+      "expected_on_outcome": "degraded",
+      "minimum_on_revision_count": 1
+    },
+    {
+      "case_id": "auditor_impact_semantic_risk_control",
+      "user_query": "请审计 FlashSync 建议中字段齐全但仍不应直接执行的覆盖动作。",
+      "components": [
+        "flashsync"
+      ],
+      "defect_type": "unsafe_remediation",
+      "expected_issue_codes": [
+        "missing_risk_control"
+      ],
+      "unsafe_root_causes": [],
+      "unsafe_action_fragments": [
+        "直接覆盖目标表"
+      ],
+      "expected_on_outcome": "accepted",
+      "minimum_on_revision_count": 1
+    }
+  ]
+}
