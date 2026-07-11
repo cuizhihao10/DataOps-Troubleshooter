@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     planner_prompt_id: str = "planner-react:v1"
     mcp_contract_id: str = "mcp-tools:v1"
     golden_case_contract_id: str = "golden-case:v1"
+    capabilities_contract_id: str = "runtime-capabilities:v1"
     graphrag_retrieval_contract_id: str = "graphrag-retrieval:v2"
     graphrag_evidence_bundle_contract_id: str = "graphrag-evidence-bundle:v1"
 

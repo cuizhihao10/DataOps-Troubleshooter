@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from app.api.main import app
+from app.capabilities import CapabilityName
 from app.domain.tooling import ToolName
 
 
@@ -36,6 +37,7 @@ async def test_health_reports_validated_contract_baseline() -> None:
     assert payload["fixtures_loaded"] == 5
     assert payload["golden_cases_loaded"] == 5
     assert payload["mcp_tools_available"] == sorted(tool.value for tool in ToolName)
+    assert payload["capabilities_available"] == [name.value for name in CapabilityName]
     assert payload["database_status"] == "disabled"
     assert payload["knowledge_nodes_loaded"] == 0
     assert payload["knowledge_edges_loaded"] == 0
@@ -44,6 +46,7 @@ async def test_health_reports_validated_contract_baseline() -> None:
         "planner_prompt": "planner-react:v1",
         "mcp": "mcp-tools:v1",
         "golden_case": "golden-case:v1",
+        "runtime_capabilities": "runtime-capabilities:v1",
         "graph_retrieval": "graphrag-retrieval:v2",
         "graph_evidence_bundle": "graphrag-evidence-bundle:v1",
     }

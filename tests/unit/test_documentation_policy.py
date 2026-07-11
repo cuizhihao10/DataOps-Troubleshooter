@@ -15,6 +15,7 @@ MIN_MODULE_DOCSTRING_LENGTH = 60
 MIN_CALLABLE_DOCSTRING_LENGTH = 80
 CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/api/main.py"),
+    Path("app/capabilities/registry.py"),
     Path("app/mcp/client.py"),
     Path("app/mcp/executor.py"),
     Path("app/mcp/observation.py"),
@@ -36,6 +37,7 @@ REQUIRED_GUIDE_SECTIONS = (
     "FastAPI lifespan",
     "PostgreSQL、SQLAlchemy、Alembic 与 pgvector",
     "显式 GraphRAG 路径",
+    "固定 runtime capability registry",
     "测试分层",
 )
 
@@ -148,6 +150,25 @@ def test_prompt_contract_versions_budgeted_retrieval_inputs() -> None:
     assert "graphrag-evidence-bundle:v1" in prompt_contract
     assert "路径只有在其全部节点、边和来源能一起进入预算" in prompt_contract
     assert "truncated=true" in prompt_contract
+
+
+def test_runtime_capability_prompt_contract_is_versioned_and_bounded() -> None:
+    """确认 Planner capability 上下文拥有版本、固定集合和历史按需触发边界。
+
+    测试锁定的是数据契约与安全原则而非整段自然语言，防止后续删除固定 registry、把历史召回
+    变成每轮默认步骤，或允许 capability 自行调用 LLM/MCP 却未提升版本和更新设计。
+    """
+
+    prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
+
+    assert "runtime-capabilities:v1" in prompt_contract
+    assert "单组件诊断、跨组件链路溯源、历史案例匹配、风险评估和结构化报告" in prompt_contract
+    assert (
+        "not_requested | user_requested | planner_validation | reusable_signature"
+        in prompt_contract
+    )
+    assert "registry 不解析自然语言，也不调用 LLM、MCP、检索或记忆服务" in prompt_contract
+    assert "实时 Observation 都高于案例和知识证据" in prompt_contract
 
 
 def test_ablation_report_labels_measured_values_and_honest_zero_gain() -> None:

@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app import __version__
 from app.agents.prompts import PLANNER_PROMPT_ID, load_planner_prompt
+from app.capabilities import CAPABILITY_CONTRACT_ID, get_capability_registry
 from app.core.fixture_registry import FixtureRegistry, load_golden_cases
 from app.core.settings import get_settings
 from app.domain.tooling import ToolName
@@ -34,10 +35,10 @@ from app.retrieval.repository import PostgresGraphRepository
 
 
 class ContractVersions(BaseModel):
-    """描述健康检查公开的 Prompt、工具、评测和两类 GraphRAG 契约标识。
+    """描述健康检查公开的 Prompt、工具、评测、capability 和 GraphRAG 契约标识。
 
-    客户端可判断 Planner、MCP、Golden Case、完整检索和预算 Bundle 是否与预期环境一致；
-    `extra="forbid"` 阻止服务端无意增加未约定字段，避免展示脚本静默依赖漂移后的响应。
+    客户端可判断 Planner、MCP、Golden Case、固定能力组合和两类检索上下文是否与预期环境
+    一致；严格额外字段策略避免展示脚本静默依赖已经漂移的响应。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -45,6 +46,7 @@ class ContractVersions(BaseModel):
     planner_prompt: str
     mcp: str
     golden_case: str
+    runtime_capabilities: str
     graph_retrieval: str
     graph_evidence_bundle: str
 
@@ -96,6 +98,7 @@ class HealthResponse(BaseModel):
     golden_cases_loaded: int
     scenario_ids: list[str]
     mcp_tools_available: list[str]
+    capabilities_available: list[str]
     database_status: Literal["disabled", "ok"]
     knowledge_nodes_loaded: int
     knowledge_edges_loaded: int
@@ -136,6 +139,11 @@ async def lifespan(app: FastAPI):
         raise ValueError(
             "configured GraphRAG evidence bundle contract ID does not match the package"
         )
+
+    # capability 注册表是 Planner 的策略边界，必须在模型或工具初始化前完成固定集合审计。
+    capability_registry = get_capability_registry()
+    if settings.capabilities_contract_id != CAPABILITY_CONTRACT_ID:
+        raise ValueError("configured capability contract ID does not match the package")
 
     # Provider 工厂在任何部署模式都执行，使未知 ID 或非法维度不能等到首次检索才失败。
     embedding_provider = create_embedding_provider(
@@ -179,6 +187,7 @@ async def lifespan(app: FastAPI):
     app.state.fixture_registry = fixture_registry
     app.state.golden_cases = golden_cases
     app.state.mcp_tools_available = mcp_tools_available
+    app.state.capability_registry = capability_registry
     app.state.database_engine = database_engine
     app.state.database_status = database_status
     app.state.knowledge_nodes_loaded = knowledge_nodes_loaded
@@ -212,6 +221,7 @@ async def health(request: Request) -> HealthResponse:
     fixture_registry = request.app.state.fixture_registry
     golden_cases = request.app.state.golden_cases
     mcp_tools_available = request.app.state.mcp_tools_available
+    capability_registry = request.app.state.capability_registry
     return HealthResponse(
         status="ok",
         service=settings.app_name,
@@ -221,6 +231,9 @@ async def health(request: Request) -> HealthResponse:
         golden_cases_loaded=len(golden_cases),
         scenario_ids=list(fixture_registry.scenario_ids),
         mcp_tools_available=list(mcp_tools_available),
+        capabilities_available=[
+            definition.name.value for definition in capability_registry.definitions()
+        ],
         database_status=request.app.state.database_status,
         knowledge_nodes_loaded=request.app.state.knowledge_nodes_loaded,
         knowledge_edges_loaded=request.app.state.knowledge_edges_loaded,
@@ -229,6 +242,7 @@ async def health(request: Request) -> HealthResponse:
             planner_prompt=settings.planner_prompt_id,
             mcp=settings.mcp_contract_id,
             golden_case=settings.golden_case_contract_id,
+            runtime_capabilities=settings.capabilities_contract_id,
             graph_retrieval=settings.graphrag_retrieval_contract_id,
             graph_evidence_bundle=settings.graphrag_evidence_bundle_contract_id,
         ),

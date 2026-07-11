@@ -1,6 +1,6 @@
 # DataOps Troubleshooter
 
-面向公开作品集的、证据驱动的大数据链路智能排障 Agent。当前已经完成领域契约、九工具真实 MCP 边界，以及 GraphRAG 的可替换 Embedding Provider、pgvector/全文双路召回、混合评分、两跳路径、预算化 Evidence Bundle 和消融评测。
+面向公开作品集的、证据驱动的大数据链路智能排障 Agent。当前已经完成领域契约、九工具真实 MCP 边界、GraphRAG 的混合检索与消融，以及五项固定 runtime capability 和确定性 registry。
 
 本项目同时是学习与求职展示项目。代码中的模块级说明、每个 callable 的详细 docstring 和复杂函数关键步骤注释负责解释局部设计，完整技术原理、数据流、设计取舍和验证方法统一维护在 [`docs/implementation-guide.md`](docs/implementation-guide.md)。
 
@@ -16,8 +16,9 @@
 - PostgreSQL + pgvector 保存显式知识节点、关系边和带 Provider 溯源的向量，支持全文/向量混合召回、五项可解释评分与 1–2 跳路径扩展。
 - Evidence Bundle 按 UTF-8 JSON 字节、节点数和路径数三重预算原子选择证据，并返回稳定 `kn_*` / `path_*` 引用与 omitted IDs。
 - 版本控制的消融案例真实比较 vector-only 与 vector+graph；当前实测根因命中持平，必要因果链完整率由 0.0 提升至 1.0。
+- 五项 capability 以 `runtime-capabilities:v1` 输出 Prompt 片段、工具优先级、输入要求和输出规则；历史匹配仅按需启用，实时 Observation 始终优先。
 
-当前已完成全部 MCP 工具，以及 GraphRAG 的 PostgreSQL 图存储、人工知识种子、离线确定性 Embedding Provider、真实 cosine 查询、全文/向量融合评分、路径扩展、上下文预算和首个消融案例。模型级 Embedding Provider、更多 Golden Case 消融、LangGraph ReAct、Planner/Auditor 和长期记忆仍待后续实现。
+当前已完成全部 MCP 工具、GraphRAG 检索闭环与五项固定 runtime capabilities。模型级 Embedding Provider、更多 Golden Case 消融、LangGraph ReAct、Planner/Auditor 和长期记忆服务仍待后续实现；当前 history capability 只定义触发与输出策略，不冒充已经完成案例数据库召回。
 
 ## 本地启动
 
