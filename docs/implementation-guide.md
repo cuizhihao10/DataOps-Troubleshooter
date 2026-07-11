@@ -830,6 +830,27 @@ observation_refs 和最终公开 DiagnosisReport。它不直接序列化 AgentSt
 - PostgreSQL 集成测试：迁移、pgvector 扩展、带 Provider 溯源的幂等种子、cosine/全文双路检索、混合评分、预算 Bundle、vector-only/vector+graph、删边消融，以及案例记忆去重/幂等/确认召回。
 - Docker 验证：从镜像安装依赖，等待 PostgreSQL 健康，执行迁移/种子，再检查 API `/health`。
 
+### 16.1 长期记忆召回消融评测
+
+`data/evals/memory_recall_cases.json` 使用 `memory-recall-eval:v1` 定义五条合成 corpus 和三条查询：
+图邻居救回、直接向量基线、rejected 案例隔离。corpus 的 root cause 与查询分别绑定确定性角度键；
+集成测试 Provider 把角度转为八维单位向量，但距离、直接 top-k、图边 join、传播分和最终排序仍由
+生产 PostgreSQL/pgvector 与 `PostgresMemoryRuntime` 执行。
+
+`MemoryRetrievalMode` 只有 `vector_only` 与 `vector_graph`。Runtime 默认始终是后者；公开 API 不
+接受 mode 参数，因此消融能力不会让用户绕过生产图召回。评测器对每条 case 顺序运行两个模式，
+唯一变量是是否沿 `SIMILAR_TO` 扩展，query、limit、corpus、Provider、阈值均保持一致。若
+vector-only 返回 graph 通道，评测立即失败，防止对照组名义关闭、实际仍扩图。
+
+指标定义如下：Recall@K 是 expected 命中数除以 expected 总数；Precision@K 是 expected 命中数
+除以实际返回数；graph-only hit 要求候选有 graph 通道且没有 vector 通道；forbidden hit 单独统计
+rejected 等安全负样本。逐案例还记录 graph rescued label 与 regression label，suite 使用 macro 平均
+让三条查询等权。所有报告固定 `metric_kind=measured`，不调用 LLM，不声称最终报告准确率。
+
+真实 PostgreSQL 实测记录见 `docs/memory-recall-eval-results.md`：当前固定三案例中 Macro Recall@K
+和 Precision@K 均从 0.8333 变为 1.0000，禁止案例命中为零。该 +0.1667 只适用于小型角度 fixture，
+不能外推为通用提升；替换模型、数据或预算后必须重跑。
+
 PostgreSQL 测试使用 `postgres` marker。普通 `pytest` 默认排除它，保持无 Docker 环境下的快速反馈；显式数据库验证使用：
 
 ```powershell
@@ -844,7 +865,7 @@ python -m pytest -m postgres
 | `requirements*.lock` | 由 pip-tools 机械生成，手工注释会在再生成时丢失。 | 依赖来源在 `pyproject.toml`，一致性由 `pip check` 和 Docker 构建验证。 |
 | `data/fixtures/**/*.json` | 标准 JSON 不允许注释。 | Pydantic Scenario Schema 和 Fixture 测试。 |
 | `data/knowledge/*.json` | 需要被标准加载器和其他语言读取。 | `KnowledgeSeedBundle`、source_span 校验和 PostgreSQL 集成测试。 |
-| `data/evals/*.json` | 标准评测数据不能加入非标准注释。 | `GraphAblationCase` Schema、快速加载测试、本文档和实测报告。 |
+| `data/evals/*.json` | 标准评测数据不能加入非标准注释。 | Graph/Memory Eval Schema、快速加载测试、本文档和两份实测报告。 |
 | PNG / DOCX | 二进制格式不能可靠保存代码式注释。 | Markdown 产品基线、本文档和正式阅读版正文。 |
 
 ## 18. 当前完成度与下一步
@@ -863,6 +884,7 @@ python -m pytest -m postgres
 - Planner v4 双消息 Prompt、会话上下文、确定性历史解释、OpenAI-compatible Structured Outputs Provider 与一次 Schema 修复。
 - 确定性报告草稿、引用/风险门禁、独立 Auditor Structured Outputs 与最多一次报告级返工。
 - `case-memory:v2` 受控长期案例、向量/图融合召回、检索通道/分量/edge 引用、同 run 幂等和 confirmed-only API。
+- `memory-recall-eval:v1` 三条长期记忆召回案例、双模式消融、Recall/Precision/forbidden 指标和 PostgreSQL 实测报告。
 - `audited-diagnosis-workflow:v2` 按需召回、两阶段案例解释、ReAct、Auditor 和审计后 staging 顶层闭环。
 - `diagnosis-resources:v2` session/message/run/event PostgreSQL 资源 API、完整相似案例结果和安全失败事件。
 - `session-checkpoint:v1` 同 session 成功快照、追问恢复、版本门禁、失败保护和跨 run Action 去重。
@@ -872,4 +894,4 @@ python -m pytest -m postgres
 - 模型级 Embedding Provider（当前默认实现是离线 feature hashing 基线）。
 - LangGraph 逐节点中断恢复、可靠后台 run worker/取消/重试，以及超长会话滚动摘要归档。
 - 模型级复杂历史语义对比。
-- 删除案例 API、28 个完整 Golden Cases 和长期记忆召回评测。
+- 删除案例 API、28 个完整诊断 Golden Cases 和更大规模长期记忆召回评测集。

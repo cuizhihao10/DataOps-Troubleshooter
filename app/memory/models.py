@@ -63,6 +63,18 @@ class MemoryRetrievalChannel(StrEnum):
     GRAPH = "graph"
 
 
+class MemoryRetrievalMode(StrEnum):
+    """定义长期记忆召回评测允许的向量基线与生产向量+图模式。
+
+    ``vector_only`` 只返回 pgvector 直接 top-k；``vector_graph`` 继续沿 ``SIMILAR_TO`` 扩展并是
+    runtime/API 默认值。显式枚举让消融实验可重放，避免用隐藏布尔开关改变检索条件；公开 API
+    不接受该参数，普通用户不能关闭生产图召回。
+    """
+
+    VECTOR_ONLY = "vector_only"
+    VECTOR_GRAPH = "vector_graph"
+
+
 class StoredCaseMemory(BaseModel):
     """封装数据库内部 CaseMemory、签名和不进入 Prompt 的 embedding 元数据。
 

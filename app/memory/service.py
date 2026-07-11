@@ -23,6 +23,7 @@ from app.memory.models import (
     MemoryCounts,
     MemoryDecision,
     MemoryDuplicateMatch,
+    MemoryRetrievalMode,
     MemoryStageResult,
     MemoryStageStatus,
     StoredCaseMemory,
@@ -122,12 +123,13 @@ class CaseMemoryRepository(Protocol):
         *,
         provider_id: str,
         limit: int,
+        mode: MemoryRetrievalMode = MemoryRetrievalMode.VECTOR_GRAPH,
     ) -> list[CaseMemoryMatch]:
         """只返回当前 Provider 空间内 confirmed 案例的有界向量/图融合匹配列表。
 
         ``embedding`` 是查询向量，``provider_id`` 隔离数学空间，``limit`` 同时控制直接种子和最终
-        响应预算；无命中返回空列表。实现必须在直接/图 SQL 层过滤状态，维度或数据库错误则显式
-        抛出而非泄露 pending。
+        响应预算；``mode`` 仅供确定性消融选择是否扩图。无命中返回空列表；实现必须在直接/图 SQL
+        层过滤状态，维度或数据库错误则显式抛出而非泄露 pending。
         """
 
         ...
@@ -241,7 +243,13 @@ class CaseMemoryService:
         )
         return await self._repository.set_status(memory_id, target)
 
-    async def search_confirmed(self, query: str, *, limit: int = 5) -> list[CaseMemoryMatch]:
+    async def search_confirmed(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        mode: MemoryRetrievalMode = MemoryRetrievalMode.VECTOR_GRAPH,
+    ) -> list[CaseMemoryMatch]:
         """嵌入非空查询并召回当前 Provider 空间中的 confirmed 向量/图融合案例。
 
         limit 限制 1..20；Provider 必须返回恰好一个固定维度向量。历史结果仅供后续 capability
@@ -260,6 +268,7 @@ class CaseMemoryService:
             vectors[0],
             provider_id=self._embedding_provider.provider_id,
             limit=limit,
+            mode=mode,
         )
 
     async def count_by_status(self) -> MemoryCounts:

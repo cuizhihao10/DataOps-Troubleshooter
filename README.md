@@ -25,11 +25,12 @@
 - `POST /api/v1/memories/{memory_id}/confirm` 支持 confirm、reject 和重新 confirm；`GET /api/v1/memories/search` 只返回 confirmed 案例，数据库未启用时明确返回 503。
 - confirmed 案例在同一事务注册为 GraphRAG `case` 节点，复用记忆 embedding，并按独立阈值建立稳定双向 `SIMILAR_TO`；reject 删除节点并级联清边。
 - 历史召回合并 pgvector 直接 top-k 与 `SIMILAR_TO` 图邻居，公开 vector/graph 通道、直接相似度、图传播分和稳定 edge 引用。
+- `memory-recall-eval:v1` 使用 3 条合成查询真实比较 vector-only/vector+graph；当前小样本 Macro Recall@K 与 Precision@K 实测从 0.8333 变为 1.0000，禁止案例命中为 0。
 - `audited-diagnosis-workflow:v2` 按 history trigger 召回 confirmed 案例，在 ReAct 前后两次确定性比较同批候选，再串联独立 Auditor 和审计后 memory staging。
 - `diagnosis-resources:v2` 提供 session/message/run/event PostgreSQL 资源；最终报告可直接展示相似度、共同点、差异点、参考方案、避坑提示与引用。
 - `session-checkpoint:v1` 在成功 run 的同一事务保存最新公开状态；同 session 追问恢复报告、证据、路径和工具事件，失败 run 不覆盖旧快照，跨 run 同参 Action 仍会被拦截。
 
-当前已完成全部 MCP 工具、GraphRAG 检索闭环、五项固定 runtime capabilities、Planner ReAct、独立 Auditor、长期案例记忆、confirmed 案例图注册、图邻居历史召回、可解释历史匹配、顶层诊断工作流、资源 API 和同 session checkpoint 追问恢复。默认模型 Provider 仍为 disabled，自动化测试使用真实 SDK + MockTransport，不宣称已经调用付费模型或取得模型质量成绩。可靠后台 worker、LangGraph 逐节点中断恢复、模型级复杂语义对比和更多 Golden Case 仍待后续实现。
+当前已完成全部 MCP 工具、GraphRAG 检索闭环、五项固定 runtime capabilities、Planner ReAct、独立 Auditor、长期案例记忆、图邻居历史召回及小样本实测、顶层诊断工作流、资源 API 和同 session checkpoint 追问恢复。默认模型 Provider 仍为 disabled，自动化测试使用真实 SDK + MockTransport，不宣称已经调用付费模型或取得模型质量成绩。可靠后台 worker、LangGraph 逐节点中断恢复、模型级复杂语义对比和更多 Golden Case 仍待后续实现。
 
 ## 本地启动
 

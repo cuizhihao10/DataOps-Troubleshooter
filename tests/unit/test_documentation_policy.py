@@ -45,6 +45,7 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/memory/repository.py"),
     Path("app/memory/runtime.py"),
     Path("app/memory/graph_registration.py"),
+    Path("app/memory/evaluation.py"),
     Path("app/persistence/migrations/versions/20260713_0003_case_memories.py"),
     Path("app/persistence/migrations/versions/20260715_0004_diagnosis_resources.py"),
     Path("app/persistence/run_repository.py"),
@@ -158,9 +159,29 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
     assert "五项混合评分" in guide
     assert "Evidence Bundle 上下文预算" in guide
     assert "Vector-only / Vector+Graph 消融" in guide
+    assert "长期记忆召回消融评测" in guide
+    assert "memory-recall-eval:v1" in guide
     assert "尚未完成" in guide
     assert "代码注释的强制粒度" in guide
     assert "callable 级 docstring" in guide
+
+
+def test_memory_recall_measured_report_documents_scope_and_no_generalized_claim() -> None:
+    """确认长期记忆实测报告标明固定条件、实测属性、禁止命中和不可外推边界。
+
+    该测试防止 README/作品集只保留漂亮增益数字却删除小样本限制；报告必须记录版本化契约、两种
+    模式、Macro 指标、forbidden hit 和“不能外推”声明，缺任一项都应阻止合并。
+    """
+
+    report = Path("docs/memory-recall-eval-results.md").read_text(encoding="utf-8")
+
+    assert "memory-recall-eval:v1" in report
+    assert "Vector-only" in report
+    assert "Vector+Graph" in report
+    assert "Macro Recall@K" in report
+    assert "Macro Precision@K" in report
+    assert "Forbidden hit" in report
+    assert "不能外推" in report
 
 
 def test_prompt_contract_versions_budgeted_retrieval_inputs() -> None:

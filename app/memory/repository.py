@@ -21,6 +21,7 @@ from app.memory.models import (
     MemoryDuplicateMatch,
     MemoryDuplicateType,
     MemoryRetrievalChannel,
+    MemoryRetrievalMode,
     StoredCaseMemory,
 )
 from app.persistence.models import (
@@ -294,6 +295,7 @@ class PostgresCaseMemoryRepository:
         *,
         provider_id: str,
         limit: int,
+        mode: MemoryRetrievalMode = MemoryRetrievalMode.VECTOR_GRAPH,
     ) -> list[CaseMemoryMatch]:
         """合并 confirmed pgvector 直接命中与 ``SIMILAR_TO`` 图邻居并返回最终 top-k。
 
@@ -325,11 +327,13 @@ class PostgresCaseMemoryRepository:
             )
             for record, raw_distance in result
         ]
-        graph_neighbors = await self._search_graph_neighbors(
-            direct_matches,
-            provider_id=provider_id,
-            dimensions=len(embedding),
-        )
+        graph_neighbors = []
+        if mode is MemoryRetrievalMode.VECTOR_GRAPH:
+            graph_neighbors = await self._search_graph_neighbors(
+                direct_matches,
+                provider_id=provider_id,
+                dimensions=len(embedding),
+            )
         return merge_case_memory_matches(
             direct_matches,
             graph_neighbors,

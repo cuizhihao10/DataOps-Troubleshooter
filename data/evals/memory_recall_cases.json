@@ -1,0 +1,69 @@
+{
+  "contract_id": "memory-recall-eval:v1",
+  "corpus": [
+    {
+      "label": "memory_case_a",
+      "root_cause": "记忆评测 A：上游分区延迟",
+      "component": "lts",
+      "embedding_key": "angle_30",
+      "status": "confirmed"
+    },
+    {
+      "label": "memory_case_b",
+      "root_cause": "记忆评测 B：调度资源排队",
+      "component": "lts",
+      "embedding_key": "angle_315",
+      "status": "confirmed"
+    },
+    {
+      "label": "memory_case_c",
+      "root_cause": "记忆评测 C：关联依赖未就绪",
+      "component": "lts",
+      "embedding_key": "angle_60",
+      "status": "confirmed"
+    },
+    {
+      "label": "memory_case_d",
+      "root_cause": "记忆评测 D：独立反向故障",
+      "component": "lts",
+      "embedding_key": "angle_180",
+      "status": "confirmed"
+    },
+    {
+      "label": "memory_case_e",
+      "root_cause": "记忆评测 E：已撤销错误案例",
+      "component": "lts",
+      "embedding_key": "angle_120",
+      "status": "rejected"
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "memory_recall_graph_rescue",
+      "query": "记忆召回查询：调度链路关联故障",
+      "query_embedding_key": "angle_0",
+      "limit": 2,
+      "expected_labels": ["memory_case_a", "memory_case_c"],
+      "forbidden_labels": ["memory_case_e"],
+      "expected_graph_only_labels": ["memory_case_c"]
+    },
+    {
+      "case_id": "memory_recall_direct_baseline",
+      "query": "记忆召回查询：反向独立故障",
+      "query_embedding_key": "angle_180",
+      "limit": 1,
+      "expected_labels": ["memory_case_d"],
+      "forbidden_labels": ["memory_case_e"],
+      "expected_graph_only_labels": []
+    },
+    {
+      "case_id": "memory_recall_rejected_guard",
+      "query": "记忆召回查询：撤销案例隔离",
+      "query_embedding_key": "angle_100",
+      "limit": 1,
+      "expected_labels": ["memory_case_c"],
+      "forbidden_labels": ["memory_case_e"],
+      "expected_graph_only_labels": []
+    }
+  ]
+}

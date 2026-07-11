@@ -598,6 +598,17 @@ pitfall_warnings 和 evidence_refs；evidence_refs 必须包含 case_id，并最
 `SIMILAR_TO` 已由确定性注册器写入，并能真实改变 history matcher 候选；其文本重叠规则仍不冒充
 LLM 语义判断或事实证明，历史结论继续服从本次实时 Observation。
 
+### 5.3 长期记忆召回评测契约
+
+`memory-recall-eval:v1` 是确定性检索层评测，不修改 Planner/Auditor Prompt，也不新增 Agent。
+同一条合成 case 必须使用相同 query、top-k、corpus、Provider 和阈值分别运行 `vector_only` 与
+`vector_graph`，唯一变量是是否沿 `SIMILAR_TO` 扩展。若 vector-only raw match 含 graph 通道，
+评测必须失败，不能把未关闭图扩展的对照组用于计算增益。
+
+逐模式输出有序 label、expected/missing/false-positive/forbidden 命中、graph-only 命中、Recall@K
+和 Precision@K；逐案例输出 graph rescued/regressed label；suite 输出 macro 平均和差值。报告固定
+`metric_kind=measured`，只描述当前小型合成检索集，不得写成最终诊断准确率或通用模型提升。
+
 ## 6. 顶层诊断编排运行契约
 
 顶层契约版本为 `audited-diagnosis-workflow:v2`，固定顺序为：

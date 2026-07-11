@@ -14,6 +14,7 @@ from app.memory.models import (
     CaseMemoryMatch,
     MemoryCounts,
     MemoryDecision,
+    MemoryRetrievalMode,
     MemoryStageResult,
 )
 from app.memory.repository import PostgresCaseMemoryRepository
@@ -119,11 +120,13 @@ class PostgresMemoryRuntime:
         query: str,
         *,
         limit: int | None = None,
+        mode: MemoryRetrievalMode = MemoryRetrievalMode.VECTOR_GRAPH,
     ) -> list[CaseMemoryMatch]:
         """在短只读会话中搜索 confirmed 向量/图融合案例，缺省使用集中配置 limit。
 
-        直接 pgvector 与 SIMILAR_TO join 共享同一事务快照且不显式 commit；离开会话释放连接，
-        SQL/Provider 异常原样传播给 API 错误边界，不能伪装为空历史。
+        直接 pgvector 与可选 SIMILAR_TO join 共享同一事务快照且不显式 commit；``mode`` 仅供内部
+        评测显式关闭图扩展，API 不透传它。离开会话释放连接，SQL/Provider 异常原样传播给错误
+        边界，不能伪装为空历史。
         """
 
         selected_limit = self.default_search_limit if limit is None else limit
@@ -131,7 +134,7 @@ class PostgresMemoryRuntime:
         # 并发请求复用同一个非线程安全 AsyncSession。
         async with self._session_factory() as session:
             service = self._service(session)
-            return await service.search_confirmed(query, limit=selected_limit)
+            return await service.search_confirmed(query, limit=selected_limit, mode=mode)
 
     async def counts(self) -> MemoryCounts:
         """在短只读会话中返回三种状态计数，供健康接口和测试使用。

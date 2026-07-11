@@ -5,6 +5,11 @@
 本次实时 Observation。
 """
 
+from app.memory.evaluation import (
+    MEMORY_RECALL_EVAL_CONTRACT_ID,
+    evaluate_memory_recall,
+    load_memory_recall_eval_suite,
+)
 from app.memory.models import (
     CASE_MEMORY_CONTRACT_ID,
     CaseMemoryMatch,
@@ -12,6 +17,7 @@ from app.memory.models import (
     MemoryDecision,
     MemoryDuplicateType,
     MemoryRetrievalChannel,
+    MemoryRetrievalMode,
     MemoryStageResult,
     MemoryStageStatus,
 )
@@ -20,13 +26,17 @@ from app.memory.service import CaseMemoryService
 
 __all__ = [
     "CASE_MEMORY_CONTRACT_ID",
+    "MEMORY_RECALL_EVAL_CONTRACT_ID",
     "CaseMemoryMatch",
     "CaseMemoryService",
     "MemoryCounts",
     "MemoryDecision",
     "MemoryDuplicateType",
     "MemoryRetrievalChannel",
+    "MemoryRetrievalMode",
     "MemoryStageResult",
     "MemoryStageStatus",
     "PostgresMemoryRuntime",
+    "evaluate_memory_recall",
+    "load_memory_recall_eval_suite",
 ]

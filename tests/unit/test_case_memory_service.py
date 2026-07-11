@@ -33,6 +33,7 @@ from app.memory.models import (
     MemoryDuplicateMatch,
     MemoryDuplicateType,
     MemoryRetrievalChannel,
+    MemoryRetrievalMode,
     MemoryStageStatus,
     StoredCaseMemory,
 )
@@ -243,14 +244,17 @@ class InMemoryMemoryRepository:
         *,
         provider_id: str,
         limit: int,
+        mode: MemoryRetrievalMode = MemoryRetrievalMode.VECTOR_GRAPH,
     ) -> list[CaseMemoryMatch]:
         """返回最多 limit 条 confirmed 内存记录并赋固定相似度。
 
         pending/rejected 在替身中先过滤，模拟 SQL WHERE；参数断言证明 Service 已生成正确向量空间。
+        mode 被接受但内存替身没有图，两个模式都返回相同直接候选，符合消融基线语义。
         """
 
         assert embedding
         assert provider_id
+        assert mode in set(MemoryRetrievalMode)
         return [
             CaseMemoryMatch(
                 memory=item.memory,
