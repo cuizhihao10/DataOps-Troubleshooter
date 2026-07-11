@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.agents.planner import PlannerTurnContext
+from app.agents.planner import PlannerProviderError, PlannerTurnContext
 from app.capabilities import CapabilityName, CapabilitySelectionRequest, DiagnosisIntent
 from app.domain.models import AgentState, Component
 from app.domain.planner import PlannerDecision, PlannerStatus, ToolAction
@@ -35,7 +35,7 @@ class ScriptedPlanner:
     却被默认 finish 掩盖。contexts 可验证 Observation 和 capability 是否进入下一轮。
     """
 
-    def __init__(self, decisions: list[PlannerDecision]) -> None:
+    def __init__(self, decisions: list[PlannerDecision | Exception]) -> None:
         """复制预设决策列表并初始化空的调用上下文记录。
 
         复制输入避免测试在运行后观察到原列表被就地消费；输出通过 PlannerDecision 构造时已完成
@@ -55,7 +55,10 @@ class ScriptedPlanner:
         self.contexts.append(context)
         if not self._decisions:
             raise AssertionError("planner was called more times than expected")
-        return self._decisions.pop(0)
+        outcome = self._decisions.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
 
 class BlockingPlanner:
@@ -448,3 +451,34 @@ async def test_invalid_evidence_reference_and_trace_are_blocked() -> None:
     assert trace_result.state.stop_reason == ReactStopReason.TRACE_ID_MISMATCH.value
     assert invalid_ref_executor.actions == []
     assert trace_executor.actions == []
+
+
+@pytest.mark.asyncio
+async def test_expected_planner_provider_error_becomes_public_loop_stop() -> None:
+    """验证已净化 Provider 错误由 LangGraph 转换为终态而不是崩溃或执行工具。
+
+    ScriptedPlanner 抛出稳定 PlannerProviderError；结果必须使用 planner_provider_error 和安全摘要，
+    executor 保持空。未预期异常仍不在本测试覆盖范围，控制器应继续传播它们。
+    """
+
+    planner = ScriptedPlanner(
+        [
+            PlannerProviderError(
+                error_code="timeout",
+                public_summary="Planner 模型请求超过配置超时。",
+                retryable=True,
+            )
+        ]
+    )
+    executor = RecordingExecutor()
+    loop = BoundedReactLoop(
+        planner=planner,
+        executor=executor,
+        config=ReactLoopConfig(max_steps=6, total_timeout_seconds=2),
+    )
+
+    result = await loop.run(_run_request())
+
+    assert result.state.stop_reason == "planner_provider_error"
+    assert result.events[-1].summary == "Planner 模型请求超过配置超时。"
+    assert executor.actions == []

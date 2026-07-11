@@ -18,6 +18,8 @@ dependencies = [
   "langgraph>=1.2,<2",
   # Official MCP SDK provides the real stdio protocol boundary used by tests.
   "mcp>=1.28,<2",
+  # Official async SDK supplies the OpenAI-compatible structured Chat boundary.
+  "openai>=2.45,<3",
   "pgvector>=0.4,<1",
   # Pydantic validates every external boundary before data reaches workflow code.
   "pydantic>=2.11,<3",

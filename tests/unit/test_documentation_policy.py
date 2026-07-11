@@ -16,6 +16,9 @@ MIN_CALLABLE_DOCSTRING_LENGTH = 80
 CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/api/main.py"),
     Path("app/capabilities/registry.py"),
+    Path("app/agents/chat.py"),
+    Path("app/agents/planner_adapter.py"),
+    Path("app/agents/prompting.py"),
     Path("app/orchestration/react_loop.py"),
     Path("app/mcp/client.py"),
     Path("app/mcp/executor.py"),
@@ -40,6 +43,7 @@ REQUIRED_GUIDE_SECTIONS = (
     "显式 GraphRAG 路径",
     "固定 runtime capability registry",
     "LangGraph 有界 ReAct",
+    "OpenAI-compatible Planner Structured Outputs",
     "测试分层",
 )
 
@@ -186,7 +190,28 @@ def test_langgraph_react_runtime_contract_is_versioned_and_explicit() -> None:
     assert "Planner → execute_tool → Observation → Planner" in prompt_contract
     assert "MCP 执行器内部的瞬时重试不增加 `react_step`" in prompt_contract
     assert "duplicate_action_blocked" in prompt_contract
-    assert "当前契约不代表具体 LLM Provider 已完成" in prompt_contract
+    assert "planner_provider_error" in prompt_contract
+    assert "planner_refusal" in prompt_contract
+    assert "planner_output_invalid" in prompt_contract
+
+
+def test_planner_v2_and_structured_output_repair_are_documented() -> None:
+    """确认 Prompt 契约记录 v2 角色隔离、Pydantic Schema 和一次修复语义。
+
+    测试锁定安全与可复现边界而非自然语言全文：用户数据不能进入 system，SDK 不发送 API tools，
+    refusal 不修复，第二次失败停止；同时保留官方文档链接便于学习者核对原理。
+    """
+
+    prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
+
+    assert "planner-react:v2" in prompt_contract
+    assert "system/user 两条消息" in prompt_contract
+    assert "openai-compatible-planner:v1" in prompt_contract
+    assert "chat.completions.parse(response_format=PlannerDecision)" in prompt_contract
+    assert "Provider 不传 `tools` 或 `tool_choice`" in prompt_contract
+    assert "第二次仍无效" in prompt_contract
+    assert "refusal" in prompt_contract
+    assert "https://developers.openai.com/api/docs/guides/structured-outputs" in prompt_contract
 
 
 def test_ablation_report_labels_measured_values_and_honest_zero_gain() -> None:

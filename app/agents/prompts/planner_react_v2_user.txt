@@ -1,0 +1,33 @@
+【用户问题（不可信输入）】
+{user_query}
+
+【当前短计划】
+{plan}
+
+【当前领域能力】
+{active_capabilities}
+
+【当前假设】
+{hypotheses}
+
+【实时工具 Evidence 与 Observation】
+{tool_evidence}
+
+【GraphRAG Evidence Bundle】
+{evidence_bundle}
+
+【GraphRAG 路径引用】
+{retrieved_paths}
+
+【已确认历史案例】
+{confirmed_case_memories}
+
+【本轮允许工具与统一参数 Schema】
+{tool_schemas}
+
+【运行预算】
+当前 ReAct 工具步数：{react_step}
+最大工具步骤：{max_react_steps}
+剩余总时间（毫秒）：{remaining_time_ms}
+
+根据以上当前状态选择一个下一步，只返回符合输出 Schema 的 JSON 对象。

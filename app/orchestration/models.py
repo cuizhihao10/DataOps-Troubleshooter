@@ -11,8 +11,9 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.capabilities import CapabilitySelection, CapabilitySelectionRequest
-from app.domain.models import AgentState
+from app.domain.models import AgentState, CaseMemory, MemoryStatus
 from app.domain.tooling import ToolName
+from app.retrieval.models import GraphEvidenceBundle
 
 REACT_LOOP_CONTRACT_ID = "langgraph-react-loop:v1"
 
@@ -114,6 +115,22 @@ class ReactRunRequest(BaseModel):
 
     state: AgentState
     capability_request: CapabilitySelectionRequest
+    evidence_bundle: GraphEvidenceBundle | None = None
+    confirmed_case_memories: tuple[CaseMemory, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_confirmed_memories(self) -> ReactRunRequest:
+        """拒绝把 pending/rejected 案例作为 Planner 已确认历史上下文。
+
+        运行请求是长期记忆与 Planner 之间的确定性边界；任何非 confirmed 案例都会产生 Pydantic
+        ValidationError，而不是依赖 Prompt 提醒模型忽略，从结构上降低记忆污染风险。
+        """
+
+        if any(
+            memory.status is not MemoryStatus.CONFIRMED for memory in self.confirmed_case_memories
+        ):
+            raise ValueError("React runs can include only confirmed case memories")
+        return self
 
 
 class ReactGraphState(BaseModel):
@@ -127,6 +144,8 @@ class ReactGraphState(BaseModel):
 
     agent_state: AgentState
     capability_request: CapabilitySelectionRequest
+    evidence_bundle: GraphEvidenceBundle | None = None
+    confirmed_case_memories: tuple[CaseMemory, ...] = ()
     capability_selection: CapabilitySelection | None = None
     events: list[ReactPublicEvent] = Field(default_factory=list)
     executed_action_fingerprints: list[str] = Field(default_factory=list)

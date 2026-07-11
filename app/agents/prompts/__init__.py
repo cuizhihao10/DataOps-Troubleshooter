@@ -6,8 +6,22 @@ Prompt ID 与文本文件分离，便于 Golden Case 回归记录具体版本。
 
 from pathlib import Path
 
-PLANNER_PROMPT_ID = "planner-react:v1"
-PLANNER_PROMPT_PATH = Path(__file__).with_name("planner_react_v1.txt")
+PLANNER_PROMPT_ID = "planner-react:v2"
+PLANNER_SYSTEM_PROMPT_PATH = Path(__file__).with_name("planner_react_v2_system.txt")
+PLANNER_USER_PROMPT_PATH = Path(__file__).with_name("planner_react_v2_user.txt")
+
+
+def load_planner_prompt_parts() -> tuple[str, str]:
+    """读取 v2 Planner 的 system 与 user 两个受版本控制模板。
+
+    system 模板只保存不可被运行数据覆盖的角色和安全规则，user 模板保存所有占位符；返回元组
+    保留消息优先级边界。任一文件缺失或编码错误都会直接抛出 I/O 异常，不静默回退到 v1。
+    """
+
+    return (
+        PLANNER_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8"),
+        PLANNER_USER_PROMPT_PATH.read_text(encoding="utf-8"),
+    )
 
 
 def load_planner_prompt() -> str:
@@ -18,7 +32,8 @@ def load_planner_prompt() -> str:
     文件缺失或编码损坏会直接抛出标准 I/O 异常，避免静默退回未经审计的默认 Prompt。
     """
 
-    return PLANNER_PROMPT_PATH.read_text(encoding="utf-8")
+    system_prompt, user_prompt = load_planner_prompt_parts()
+    return f"{system_prompt}\n\n{user_prompt}"
 
 
-__all__ = ["PLANNER_PROMPT_ID", "load_planner_prompt"]
+__all__ = ["PLANNER_PROMPT_ID", "load_planner_prompt", "load_planner_prompt_parts"]

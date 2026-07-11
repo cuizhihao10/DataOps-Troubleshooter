@@ -13,6 +13,8 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict
 
 from app import __version__
+from app.agents.chat import PLANNER_PROVIDER_CONTRACT_ID
+from app.agents.factory import create_planner_runtime
 from app.agents.prompts import PLANNER_PROMPT_ID, load_planner_prompt
 from app.capabilities import CAPABILITY_CONTRACT_ID, get_capability_registry
 from app.core.fixture_registry import FixtureRegistry, load_golden_cases
@@ -45,6 +47,7 @@ class ContractVersions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     planner_prompt: str
+    planner_provider: str
     mcp: str
     golden_case: str
     runtime_capabilities: str
@@ -84,6 +87,23 @@ class RetrievalConfiguration(BaseModel):
     evidence_budget: EvidenceBundleBudget
 
 
+class PlannerConfiguration(BaseModel):
+    """公开 Planner Provider 的非敏感配置与启用状态。
+
+    响应只包含 disabled/configured、Provider ID、模型、端点主机、超时和修复预算，不包含 API key、
+    URL 用户信息或远端响应。configured 表示本地配置可构造，不冒充远端连接已经探测成功。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["disabled", "configured"]
+    provider: str
+    model: str
+    endpoint_host: str
+    timeout_seconds: float
+    schema_repair_count: int
+
+
 class HealthResponse(BaseModel):
     """定义 `/health` 返回的已验证依赖、数据规模与契约快照。
 
@@ -108,6 +128,7 @@ class HealthResponse(BaseModel):
     knowledge_nodes_embedded: int
     contracts: ContractVersions
     limits: RuntimeLimits
+    planner: PlannerConfiguration
     retrieval: RetrievalConfiguration
 
 
@@ -135,6 +156,8 @@ async def lifespan(app: FastAPI):
         raise ValueError("configured planner prompt ID does not match the packaged prompt")
     if not load_planner_prompt().strip():
         raise ValueError("planner prompt must not be empty")
+    if settings.planner_provider_contract_id != PLANNER_PROVIDER_CONTRACT_ID:
+        raise ValueError("configured Planner provider contract ID does not match the package")
     if settings.graphrag_retrieval_contract_id != GRAPH_RETRIEVAL_CONTRACT_ID:
         raise ValueError("configured GraphRAG retrieval contract ID does not match the package")
     if settings.graphrag_evidence_bundle_contract_id != GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID:
@@ -186,12 +209,17 @@ async def lifespan(app: FastAPI):
                 )
         database_status = "ok"
 
+    # 放在所有远程/数据库启动检查之后构造，避免后续初始化失败遗留尚未进入 lifespan 的 HTTP 池。
+    # disabled 返回 None；启用时只构造 SDK/Prompt 边界，不发送付费或有副作用的探测请求。
+    planner_runtime = create_planner_runtime(settings)
+
     # 只有所有检查完成后才发布共享状态，避免路由观察到半初始化的依赖集合。
     app.state.settings = settings
     app.state.fixture_registry = fixture_registry
     app.state.golden_cases = golden_cases
     app.state.mcp_tools_available = mcp_tools_available
     app.state.capability_registry = capability_registry
+    app.state.planner_runtime = planner_runtime
     app.state.database_engine = database_engine
     app.state.database_status = database_status
     app.state.knowledge_nodes_loaded = knowledge_nodes_loaded
@@ -200,7 +228,9 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        # dispose 会关闭连接池中的底层 asyncpg 连接；None 分支保持无数据库模式轻量可测。
+        # 先关闭模型 HTTP 池，再释放数据库池；两者均不吞异常，避免测试重启后遗留资源。
+        if planner_runtime is not None:
+            await planner_runtime.aclose()
         if database_engine is not None:
             await database_engine.dispose()
 
@@ -244,6 +274,7 @@ async def health(request: Request) -> HealthResponse:
         knowledge_nodes_embedded=request.app.state.knowledge_nodes_embedded,
         contracts=ContractVersions(
             planner_prompt=settings.planner_prompt_id,
+            planner_provider=settings.planner_provider_contract_id,
             mcp=settings.mcp_contract_id,
             golden_case=settings.golden_case_contract_id,
             runtime_capabilities=settings.capabilities_contract_id,
@@ -257,6 +288,14 @@ async def health(request: Request) -> HealthResponse:
             max_graph_hops=settings.max_graph_hops,
             max_audit_revisions=settings.max_audit_revisions,
             tool_retry_count=settings.tool_retry_count,
+        ),
+        planner=PlannerConfiguration(
+            status=("disabled" if request.app.state.planner_runtime is None else "configured"),
+            provider=settings.chat_provider,
+            model=settings.chat_model,
+            endpoint_host=settings.chat_base_url.host or "",
+            timeout_seconds=settings.chat_timeout_seconds,
+            schema_repair_count=settings.planner_schema_repair_count,
         ),
         retrieval=RetrievalConfiguration(
             embedding_provider=settings.embedding_provider,

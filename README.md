@@ -1,6 +1,6 @@
 # DataOps Troubleshooter
 
-面向公开作品集的、证据驱动的大数据链路智能排障 Agent。当前已经完成领域契约、九工具真实 MCP 边界、GraphRAG 混合检索、五项固定 capability，以及 LangGraph 有界 Action/Observation 控制器。
+面向公开作品集的、证据驱动的大数据链路智能排障 Agent。当前已经完成领域契约、九工具真实 MCP、GraphRAG、五项固定 capability、LangGraph 有界循环，以及 OpenAI-compatible Planner Structured Outputs。
 
 本项目同时是学习与求职展示项目。代码中的模块级说明、每个 callable 的详细 docstring 和复杂函数关键步骤注释负责解释局部设计，完整技术原理、数据流、设计取舍和验证方法统一维护在 [`docs/implementation-guide.md`](docs/implementation-guide.md)。
 
@@ -18,8 +18,9 @@
 - 版本控制的消融案例真实比较 vector-only 与 vector+graph；当前实测根因命中持平，必要因果链完整率由 0.0 提升至 1.0。
 - 五项 capability 以 `runtime-capabilities:v1` 输出 Prompt 片段、工具优先级、输入要求和输出规则；历史匹配仅按需启用，实时 Observation 始终优先。
 - `langgraph-react-loop:v1` 真实执行 capability 注入、Planner 决策、MCP Action、Observation 回写和回到 Planner，并拦截重复 Action、组件越界、无效引用与 trace 漂移。
+- `planner-react:v2` 将 system 规则与 user 运行数据隔离；官方异步 SDK 从 Pydantic 提交 strict Schema，首次无效输出最多修复一次，refusal 和 Provider 错误安全停止。
 
-当前已完成全部 MCP 工具、GraphRAG 检索闭环、五项固定 runtime capabilities 和 LangGraph 有界控制器。OpenAI-compatible Planner 模型适配器、Prompt 渲染/修复、报告草稿、Auditor、长期记忆服务和更多 Golden Case 仍待后续实现；当前集成测试使用 Scripted Planner 验证真实控制流，不冒充生产模型诊断能力。
+当前已完成全部 MCP 工具、GraphRAG 检索闭环、五项固定 runtime capabilities、LangGraph 控制器和可配置 Planner 模型协议。默认模型 Provider 仍为 disabled，自动化测试使用真实 SDK + MockTransport，不宣称已经调用付费模型或取得模型质量成绩。报告草稿、Auditor、长期记忆和更多 Golden Case 仍待后续实现。
 
 ## 本地启动
 

@@ -43,7 +43,8 @@ async def test_health_reports_validated_contract_baseline() -> None:
     assert payload["knowledge_edges_loaded"] == 0
     assert payload["knowledge_nodes_embedded"] == 0
     assert payload["contracts"] == {
-        "planner_prompt": "planner-react:v1",
+        "planner_prompt": "planner-react:v2",
+        "planner_provider": "openai-compatible-planner:v1",
         "mcp": "mcp-tools:v1",
         "golden_case": "golden-case:v1",
         "runtime_capabilities": "runtime-capabilities:v1",
@@ -57,6 +58,14 @@ async def test_health_reports_validated_contract_baseline() -> None:
         "max_graph_hops": 2,
         "max_audit_revisions": 1,
         "tool_retry_count": 1,
+    }
+    assert payload["planner"] == {
+        "status": "disabled",
+        "provider": "disabled",
+        "model": "gpt-5.6",
+        "endpoint_host": "api.openai.com",
+        "timeout_seconds": 30.0,
+        "schema_repair_count": 1,
     }
     assert payload["retrieval"] == {
         "embedding_provider": "deterministic-hash:v1",

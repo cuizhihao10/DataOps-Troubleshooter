@@ -16,7 +16,7 @@ from typing import Protocol
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 
-from app.agents.planner import PlannerAgent, PlannerTurnContext
+from app.agents.planner import PlannerAgent, PlannerAgentError, PlannerTurnContext
 from app.capabilities import CapabilityRegistry, get_capability_registry
 from app.domain.models import Evidence, ToolEvent
 from app.domain.planner import PlannerStatus, ToolAction
@@ -105,6 +105,8 @@ class BoundedReactLoop:
         initial_state = ReactGraphState(
             agent_state=request.state,
             capability_request=request.capability_request,
+            evidence_bundle=request.evidence_bundle,
+            confirmed_case_memories=request.confirmed_case_memories,
             executed_action_fingerprints=_fingerprints_from_tool_events(request.state.tool_events),
         )
         runtime_context = ReactGraphRuntime(
@@ -237,10 +239,21 @@ async def _planner_react(
     context = PlannerTurnContext(
         state=graph_state.agent_state,
         capabilities=selection,
+        evidence_bundle=graph_state.evidence_bundle,
+        confirmed_case_memories=graph_state.confirmed_case_memories,
         max_react_steps=runtime.context.config.max_steps,
         remaining_time_ms=remaining_time_ms,
     )
-    decision = await runtime.context.planner.decide(context)
+    try:
+        decision = await runtime.context.planner.decide(context)
+    except PlannerAgentError as exc:
+        # 只把适配层已净化的预期失败转换成终态；编程异常继续传播，避免隐藏真实缺陷。
+        return _stop_graph_state(
+            graph_state,
+            reason=exc.stop_reason,
+            summary=exc.public_summary,
+            event_type=ReactEventType.LOOP_STOPPED,
+        )
     agent_state = graph_state.agent_state.model_copy(update={"next_action": decision})
     updated = _append_event(
         graph_state.model_copy(update={"agent_state": agent_state}),

@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.retrieval.models import EvidenceBundleBudget, HybridScoringWeights
@@ -43,6 +44,13 @@ class Settings(BaseSettings):
     tool_timeout_seconds: float = Field(default=5, gt=0, le=60)
     tool_retry_count: int = Field(default=1, ge=0, le=1)
 
+    chat_provider: Literal["disabled", "openai-compatible"] = "disabled"
+    chat_model: str = Field(default="gpt-5.6", min_length=1, max_length=200)
+    chat_base_url: AnyHttpUrl = AnyHttpUrl("https://api.openai.com/v1")
+    chat_api_key: SecretStr | None = None
+    chat_timeout_seconds: float = Field(default=30, gt=0, le=300)
+    planner_schema_repair_count: int = Field(default=1, ge=0, le=1)
+
     embedding_provider: str = "deterministic-hash:v1"
     embedding_dimensions: int = Field(default=128, ge=8, le=4096)
     retrieval_semantic_weight: float = Field(default=0.45, ge=0, le=1)
@@ -59,7 +67,8 @@ class Settings(BaseSettings):
     knowledge_seed_file: Path = Path("data/knowledge/cross_chain_graph.json")
     database_url: SecretStr | None = None
 
-    planner_prompt_id: str = "planner-react:v1"
+    planner_prompt_id: str = "planner-react:v2"
+    planner_provider_contract_id: str = "openai-compatible-planner:v1"
     mcp_contract_id: str = "mcp-tools:v1"
     golden_case_contract_id: str = "golden-case:v1"
     capabilities_contract_id: str = "runtime-capabilities:v1"
@@ -68,15 +77,20 @@ class Settings(BaseSettings):
     graphrag_evidence_bundle_contract_id: str = "graphrag-evidence-bundle:v1"
 
     @model_validator(mode="after")
-    def validate_retrieval_configuration(self) -> Settings:
-        """在应用启动时校验混合评分和上下文预算，而不是等到首次检索才暴露错误。
+    def validate_runtime_configuration(self) -> Settings:
+        """在启动时联合校验检索预算和可选 Planner Provider 的安全配置。
 
-        两个 Pydantic 配置模型复用总和与范围契约；Provider 名称和维度由工厂继续校验，从而把
-        通用配置一致性与具体 Provider 支持范围分开，任一错误都会阻止半配置实例启动。
+        检索模型复用权重/预算契约；Chat 端点禁止 URL 凭据，启用模型时强制 SecretStr key。
+        任一错误都会阻止半配置实例启动，而不是延迟到首次检索或模型请求。
         """
 
         self.hybrid_scoring_weights()
         self.evidence_bundle_budget()
+        # 模型端点不得在 URL 中携带用户名/密码；凭据只能进入 SecretStr chat_api_key。
+        if self.chat_base_url.username or self.chat_base_url.password:
+            raise ValueError("chat_base_url must not include user information")
+        if self.chat_provider != "disabled" and self.chat_api_key is None:
+            raise ValueError("chat_api_key is required when chat_provider is enabled")
         return self
 
     def hybrid_scoring_weights(self) -> HybridScoringWeights:
