@@ -25,6 +25,7 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/orchestration/react_loop.py"),
     Path("app/orchestration/report_workflow.py"),
     Path("app/orchestration/diagnosis_workflow.py"),
+    Path("app/orchestration/diagnosis_runtime.py"),
     Path("app/reporting/draft.py"),
     Path("app/reporting/policy.py"),
     Path("app/reporting/revision.py"),
@@ -44,6 +45,8 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/memory/repository.py"),
     Path("app/memory/runtime.py"),
     Path("app/persistence/migrations/versions/20260713_0003_case_memories.py"),
+    Path("app/persistence/migrations/versions/20260715_0004_diagnosis_resources.py"),
+    Path("app/persistence/run_repository.py"),
     Path("mcp_server/repository.py"),
 )
 REQUIRED_GUIDE_SECTIONS = (
@@ -59,6 +62,7 @@ REQUIRED_GUIDE_SECTIONS = (
     "确定性报告草稿与 Auditor Structured Outputs",
     "受控长期案例记忆",
     "端到端诊断编排",
+    "资源化诊断 API",
     "测试分层",
 )
 
@@ -282,6 +286,24 @@ def test_top_level_diagnosis_workflow_contract_orders_recall_audit_and_staging()
     assert "Planner 与 Auditor" in prompt_contract
     assert "stage_case_memory" in prompt_contract
     assert "skipped_not_accepted" in prompt_contract
+
+
+def test_diagnosis_resource_contract_documents_persistence_events_and_failure_semantics() -> None:
+    """确认资源 API 契约记录同步执行、三表持久化、公开事件和安全失败查询方式。
+
+    该门禁防止后续把进程内 background task 宣称为可靠队列，或让 run_events 保存 Thought/原始异常。
+    文档必须保留 `diagnosis-resources:v1`、running/completed/failed 状态和失败后凭 run_id 查询语义。
+    """
+
+    prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
+
+    assert "diagnosis-resources:v1" in prompt_contract
+    assert "diagnosis_sessions" in prompt_contract
+    assert "agent_runs" in prompt_contract
+    assert "run_events" in prompt_contract
+    assert "synchronous" in prompt_contract
+    assert "running | completed | failed" in prompt_contract
+    assert "不保存 Thought" in prompt_contract
 
 
 def test_ablation_report_labels_measured_values_and_honest_zero_gain() -> None:

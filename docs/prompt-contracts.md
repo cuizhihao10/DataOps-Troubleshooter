@@ -579,5 +579,40 @@ recall_case_memories
 - 历史搜索、ReAct、报告或 staging 的未预期异常必须传播，不能伪装为空召回或完成结果。最终结果
   校验 ReAct/report 的 run_id、session_id，以及 report outcome 与 memory stage 状态的一致性。
 
-该契约当前作为内部应用工作流供测试和后续资源化 API 复用；尚未实现会话/run 持久化、HTTP 诊断
-入口、checkpoint，也未把 similarity/common points/differences 投影进最终 DiagnosisReport。
+该契约现由 `diagnosis-resources:v1` HTTP 入口复用并持久化 run/events；checkpoint 和同 session 状态
+恢复尚未实现，也未把 similarity/common points/differences 投影进最终 DiagnosisReport。
+
+## 7. 资源化诊断 API 与公开事件契约
+
+资源契约版本为 `diagnosis-resources:v1`，对应：
+
+```text
+POST /api/v1/sessions
+POST /api/v1/sessions/{session_id}/messages
+GET  /api/v1/runs/{run_id}
+GET  /api/v1/runs/{run_id}/events
+```
+
+首版 execution mode 明确为 `synchronous`：message 请求内依次执行 GraphRAG 和
+`audited-diagnosis-workflow:v1`，成功后返回 completed run。它仍先创建 running 资源并持久化终态，
+所以结果可通过 GET 重复读取；当前不使用不可恢复的进程内 background task 冒充队列。
+
+PostgreSQL 使用三张表：
+
+- `diagnosis_sessions`：标题、最后问题公开摘要和活动时间。
+- `agent_runs`：输入路由、`running | completed | failed` 状态、版本化 DiagnosisRunResult 或安全错误。
+- `run_events`：按 run/sequence 连续保存 retrieval、react、report、memory、system 五阶段公开事件。
+
+run 约束如下：running 不含结果、错误和完成时间；completed 必须含完整结果且无错误；failed 只含
+稳定 error_code/公开摘要且无部分结果。message 执行失败时先持久化 failed run 和 system event，再
+向 HTTP 返回包含 `run_id` 的安全错误，客户端可继续 GET run/events；原异常仅通过 exception chain
+留给受控日志。
+
+事件 payload 只允许工具名、Evidence/path/case ID、停止原因、审计 issue code、返工次数、记忆状态
+和检索裁剪元数据。不保存 Thought、Prompt、模型原始输出、embedding、供应商响应体、traceback、
+数据库 URL 或凭据。检索、模型/MCP 和记忆 I/O 期间不持有 run 行事务锁；完成结果与整批事件在新
+事务中原子提交，防止轮询观察到 completed 但事件缺失。
+
+当前 message 明确要求 intent、components 和 history_trigger，因为自然语言路由分类器尚未实现；
+同 session 的旧 AgentState/checkpoint 也尚未加载，因此资源可承载多次独立 run，但还不能宣称完成
+真正追问恢复。可靠后台执行、取消、重试、session 列表与 checkpoint 需要后续升级契约。

@@ -53,6 +53,7 @@ async def test_health_reports_validated_contract_baseline() -> None:
         "react_loop": "langgraph-react-loop:v1",
         "audited_report_workflow": "audited-report-workflow:v1",
         "diagnosis_workflow": "audited-diagnosis-workflow:v1",
+        "diagnosis_api": "diagnosis-resources:v1",
         "case_memory": "case-memory:v1",
         "graph_retrieval": "graphrag-retrieval:v2",
         "graph_evidence_bundle": "graphrag-evidence-bundle:v1",
@@ -89,6 +90,12 @@ async def test_health_reports_validated_contract_baseline() -> None:
         "default_search_limit": 5,
         "query_max_chars": 4000,
         "counts": {"pending": 0, "confirmed": 0, "rejected": 0},
+    }
+    assert payload["diagnosis_api"] == {
+        "status": "disabled",
+        "contract_id": "diagnosis-resources:v1",
+        "execution_mode": "synchronous",
+        "retrieval_seed_limit": 5,
     }
     assert payload["retrieval"] == {
         "embedding_provider": "deterministic-hash:v1",

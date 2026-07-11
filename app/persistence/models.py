@@ -228,3 +228,135 @@ class MemoryEvidenceRecord(Base):
         nullable=False,
         server_default=func.now(),
     )
+
+
+class DiagnosisSessionRecord(Base):
+    """映射资源化诊断会话及最后一次用户问题摘要。
+
+    会话只保存公开标题和截断摘要，不复制完整 Prompt 或模型输出；updated_at 在每次创建 run 时刷新，
+    便于列表按最近活动排序。具体 run 通过外键表关联。
+    """
+
+    __tablename__ = "diagnosis_sessions"
+    __table_args__ = (Index("ix_diagnosis_sessions_updated_at", "updated_at"),)
+
+    session_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    last_user_query_summary: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class AgentRunRecord(Base):
+    """映射一次诊断运行的输入路由、终态结果和安全失败摘要。
+
+    JSONB result 保存版本化 DiagnosisRunResult，便于首版轮询读取；状态 CheckConstraint 防止
+    running、completed、failed 的结果/错误字段组合互相矛盾。原异常和 Thought 不进入表。
+    """
+
+    __tablename__ = "agent_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running','completed','failed')",
+            name="ck_agent_runs_status",
+        ),
+        CheckConstraint(
+            "history_trigger IN "
+            "('not_requested','user_requested','planner_validation','reusable_signature')",
+            name="ck_agent_runs_history_trigger",
+        ),
+        CheckConstraint(
+            "intent IN ('single_component_diagnosis','cross_component_diagnosis')",
+            name="ck_agent_runs_intent",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(components) = 'array' AND jsonb_array_length(components) >= 1",
+            name="ck_agent_runs_components",
+        ),
+        CheckConstraint(
+            "(status = 'running' AND result IS NULL AND error_code IS NULL "
+            "AND error_message IS NULL AND completed_at IS NULL) OR "
+            "(status = 'completed' AND result IS NOT NULL AND error_code IS NULL "
+            "AND error_message IS NULL AND completed_at IS NOT NULL) OR "
+            "(status = 'failed' AND result IS NULL AND error_code IS NOT NULL "
+            "AND error_message IS NOT NULL AND completed_at IS NOT NULL)",
+            name="ck_agent_runs_terminal_payload",
+        ),
+        Index("ix_agent_runs_session_created", "session_id", "created_at"),
+        Index("ix_agent_runs_status", "status"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("diagnosis_sessions.session_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    user_query: Mapped[str] = mapped_column(Text, nullable=False)
+    intent: Mapped[str] = mapped_column(String(50), nullable=False)
+    components: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    history_trigger: Mapped[str] = mapped_column(String(30), nullable=False)
+    result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class RunEventRecord(Base):
+    """映射按 run/sequence 排序的公开检索、ReAct、报告、记忆和系统事件。
+
+    payload 只保存确定性安全投影；唯一约束阻止同一 run 出现重复序号。删除 session 会级联删除 run，
+    再级联清理事件，避免孤立时间线。
+    """
+
+    __tablename__ = "run_events"
+    __table_args__ = (
+        CheckConstraint(
+            "phase IN ('retrieval','react','report','memory','system')",
+            name="ck_run_events_phase",
+        ),
+        CheckConstraint("sequence >= 1", name="ck_run_events_sequence"),
+        UniqueConstraint("run_id", "sequence", name="uq_run_events_run_sequence"),
+        Index("ix_run_events_run_sequence", "run_id", "sequence"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_runs.run_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    phase: Mapped[str] = mapped_column(String(20), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    summary: Mapped[str] = mapped_column(String(500), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )

@@ -31,16 +31,31 @@ from app.orchestration.report_models import (
     ReportWorkflowOutcome,
 )
 from app.orchestration.report_workflow import AuditedReportWorkflow
+from app.orchestration.run_models import (
+    DIAGNOSIS_API_CONTRACT_ID,
+    AgentRunSnapshot,
+    AgentRunStatus,
+    DiagnosisMessage,
+    DiagnosisSession,
+    RunEventList,
+    RunEventPhase,
+    RunPublicEvent,
+)
 
 __all__ = [
     "DIAGNOSIS_WORKFLOW_CONTRACT_ID",
+    "DIAGNOSIS_API_CONTRACT_ID",
     "REACT_LOOP_CONTRACT_ID",
     "AUDITED_REPORT_WORKFLOW_CONTRACT_ID",
     "AuditedDiagnosisWorkflow",
     "AuditedReportWorkflow",
     "BoundedReactLoop",
+    "AgentRunSnapshot",
+    "AgentRunStatus",
+    "DiagnosisMessage",
     "DiagnosisRunRequest",
     "DiagnosisRunResult",
+    "DiagnosisSession",
     "DiagnosisWorkflowConfig",
     "ReactEventType",
     "ReactLoopConfig",
@@ -54,4 +69,7 @@ __all__ = [
     "ReportRunResult",
     "ReportWorkflowConfig",
     "ReportWorkflowOutcome",
+    "RunEventList",
+    "RunEventPhase",
+    "RunPublicEvent",
 ]
