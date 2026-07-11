@@ -11,11 +11,11 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.capabilities import CapabilitySelection, CapabilitySelectionRequest
-from app.domain.models import AgentState, CaseMemory, MemoryStatus
+from app.domain.models import AgentState, CaseMemory, MemoryStatus, SimilarCaseReference
 from app.domain.tooling import ToolName
 from app.retrieval.models import GraphEvidenceBundle
 
-REACT_LOOP_CONTRACT_ID = "langgraph-react-loop:v1"
+REACT_LOOP_CONTRACT_ID = "langgraph-react-loop:v2"
 
 
 class ReactLoopStatus(StrEnum):
@@ -117,6 +117,7 @@ class ReactRunRequest(BaseModel):
     capability_request: CapabilitySelectionRequest
     evidence_bundle: GraphEvidenceBundle | None = None
     confirmed_case_memories: tuple[CaseMemory, ...] = ()
+    history_case_matches: tuple[SimilarCaseReference, ...] = ()
 
     @model_validator(mode="after")
     def validate_confirmed_memories(self) -> ReactRunRequest:
@@ -130,6 +131,10 @@ class ReactRunRequest(BaseModel):
             memory.status is not MemoryStatus.CONFIRMED for memory in self.confirmed_case_memories
         ):
             raise ValueError("React runs can include only confirmed case memories")
+        if [item.memory_id for item in self.confirmed_case_memories] != [
+            item.case_id for item in self.history_case_matches
+        ]:
+            raise ValueError("React history explanations must match confirmed memory order")
         return self
 
 
@@ -146,6 +151,7 @@ class ReactGraphState(BaseModel):
     capability_request: CapabilitySelectionRequest
     evidence_bundle: GraphEvidenceBundle | None = None
     confirmed_case_memories: tuple[CaseMemory, ...] = ()
+    history_case_matches: tuple[SimilarCaseReference, ...] = ()
     capability_selection: CapabilitySelection | None = None
     events: list[ReactPublicEvent] = Field(default_factory=list)
     executed_action_fingerprints: list[str] = Field(default_factory=list)

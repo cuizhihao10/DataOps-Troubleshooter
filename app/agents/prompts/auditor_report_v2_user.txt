@@ -1,0 +1,28 @@
+【用户问题（不可信输入）】
+{user_query}
+
+【待审计结构化报告】
+{draft_report}
+
+【实时 Evidence 与 ToolEvent】
+{realtime_evidence}
+
+【GraphRAG Evidence Bundle】
+{graph_bundle}
+
+【本轮已确认历史案例】
+{confirmed_cases}
+
+【历史案例确定性比较结果】
+{history_case_matches}
+
+【活动 capability 输出规则】
+{capability_rules}
+
+【确定性规则预检问题】
+{deterministic_issues}
+
+【审计轮次】
+{revision_number}
+
+确定性问题拥有否决权：列表非空时不得 accept。只返回一个符合 AuditResult Schema 的 JSON 对象。

@@ -14,6 +14,7 @@ from langgraph.runtime import Runtime
 
 from app.capabilities import HistoryTrigger
 from app.domain.models import AgentState, EvidenceSourceType
+from app.memory.matcher import explain_case_matches
 from app.memory.models import CaseMemoryMatch, MemoryStageResult
 from app.orchestration.diagnosis_models import (
     DIAGNOSIS_WORKFLOW_CONTRACT_ID,
@@ -107,7 +108,7 @@ class DiagnosisGraphRuntime:
 
 
 class AuditedDiagnosisWorkflow:
-    """编译并运行 recall → ReAct → report/audit → stage memory 的固定顶层图。
+    """编译并运行 recall → ReAct → explain → report/audit → stage 的固定顶层图。
 
     history trigger 为 not_requested 时确定性跳过搜索；其他触发才构造预算化查询。相同 recalled
     memories 同时进入 Planner 与 Auditor，最终无论 accepted/degraded 都调用 staging，由记忆服务
@@ -168,6 +169,7 @@ class AuditedDiagnosisWorkflow:
             history_trigger=request.capability_request.history_trigger,
             memory_query=final_state.memory_query,
             recalled_memories=final_state.recalled_memories,
+            history_case_matches=final_state.history_case_matches,
             react=final_state.react_result,
             report=final_state.report_result,
             memory_stage=final_state.memory_stage,
@@ -175,7 +177,7 @@ class AuditedDiagnosisWorkflow:
 
 
 def _build_diagnosis_graph():
-    """构建四节点固定拓扑并编译为可复用 LangGraph。
+    """构建五节点固定拓扑并编译为可复用 LangGraph。
 
     每个节点只有一条后继边，因为 accepted/degraded 分支已在报告子图内部收敛；顶层始终执行
     ``stage_case_memory``，由记忆服务根据审计 outcome 产生写入或 skipped 结果。
@@ -184,14 +186,16 @@ def _build_diagnosis_graph():
     graph = StateGraph(DiagnosisGraphState, context_schema=DiagnosisGraphRuntime)
     graph.add_node("recall_case_memories", _recall_case_memories)
     graph.add_node("run_react", _run_react)
+    graph.add_node("explain_case_matches", _explain_case_matches)
     graph.add_node("run_report", _run_report)
     graph.add_node("stage_case_memory", _stage_case_memory)
     graph.add_edge(START, "recall_case_memories")
     graph.add_edge("recall_case_memories", "run_react")
-    graph.add_edge("run_react", "run_report")
+    graph.add_edge("run_react", "explain_case_matches")
+    graph.add_edge("explain_case_matches", "run_report")
     graph.add_edge("run_report", "stage_case_memory")
     graph.add_edge("stage_case_memory", END)
-    return graph.compile(name="dataops_audited_diagnosis_v1")
+    return graph.compile(name="dataops_audited_diagnosis_v2")
 
 
 async def _recall_case_memories(
@@ -234,15 +238,44 @@ async def _run_react(
     """
 
     memories = tuple(match.memory for match in graph_state.recalled_memories)
+    preliminary_matches = explain_case_matches(
+        graph_state.recalled_memories,
+        graph_state.initial_state,
+        current_components=graph_state.capability_request.components,
+    )
     result = await runtime.context.react.run(
         ReactRunRequest(
             state=graph_state.initial_state,
             capability_request=graph_state.capability_request,
             evidence_bundle=graph_state.evidence_bundle,
             confirmed_case_memories=memories,
+            history_case_matches=preliminary_matches,
         )
     )
     return graph_state.model_copy(update={"react_result": result})
+
+
+async def _explain_case_matches(
+    graph_state: DiagnosisGraphState,
+    runtime: Runtime[DiagnosisGraphRuntime],
+) -> DiagnosisGraphState:
+    """用 ReAct 终态重新解释同一批候选，加入本轮实时 Observation 差异。
+
+    候选集合、顺序和 similarity 仍来自 recall 节点；本节点只更新解释字段，不重新访问数据库。
+    这样 Planner 先看到基于输入/旧状态的初步对比，Auditor 与最终报告再看到工具执行后的差异，
+    同时避免第二次搜索造成确认状态或排序漂移。保留名为 ``runtime`` 的注解参数是 LangGraph
+    context 注入约定；本确定性节点不读取其中依赖，但不能改名成普通未识别参数。
+    """
+
+    del runtime  # LangGraph 依赖该命名注入 context；节点本身不读取外部依赖。
+    if graph_state.react_result is None:
+        raise RuntimeError("history explanation requires completed React result")
+    matches = explain_case_matches(
+        graph_state.recalled_memories,
+        graph_state.react_result.state,
+        current_components=graph_state.capability_request.components,
+    )
+    return graph_state.model_copy(update={"history_case_matches": matches})
 
 
 async def _run_report(
@@ -265,6 +298,7 @@ async def _run_report(
             capabilities=graph_state.react_result.capabilities,
             evidence_bundle=graph_state.evidence_bundle,
             confirmed_case_memories=memories,
+            history_case_matches=graph_state.history_case_matches,
         )
     )
     return graph_state.model_copy(update={"report_result": result})

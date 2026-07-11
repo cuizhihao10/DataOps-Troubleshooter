@@ -24,6 +24,7 @@ from app.domain.models import (
     RemediationStep,
     RiskLevel,
     RootCauseConclusion,
+    SimilarCaseReference,
 )
 from app.memory.models import (
     CaseMemoryMatch,
@@ -449,6 +450,53 @@ async def test_new_accepted_case_is_staged_pending_with_deterministic_fields() -
     stored = repository.records[result.memory.memory_id]
     assert stored.embedding_dimensions == 32
     assert repository.source_runs[result.memory.memory_id] == {"run_memory_unit_001"}
+
+
+@pytest.mark.asyncio
+async def test_memory_candidate_excludes_recalled_case_ids_from_its_own_evidence() -> None:
+    """验证报告引用历史案例时，新候选不会把 case_id 递归写入自身 Evidence。
+
+    SimilarCaseReference 必须进入报告级 evidence_refs 供 UI/Auditor 追溯，但长期记忆只能沉淀本次
+    实时、知识或图证据。若过滤后仍有工具引用则正常暂存；历史 case_id 不得进入结果或仓储来源。
+    """
+
+    accepted = _accepted_result()
+    report = accepted.state.draft_report
+    assert report is not None
+    historical_id = "mem_confirmed_history_001"
+    similar_case = SimilarCaseReference(
+        case_id=historical_id,
+        similarity=0.9,
+        confirmed=True,
+        common_points=["共同涉及 LTS。"],
+        differences=["本次仍需实时复核。"],
+        reference_actions=["历史方案仅供参考。"],
+        pitfall_warnings=["不得覆盖本次 Observation。"],
+        evidence_refs=[historical_id, "ev_memory_unit_001"],
+    )
+    report_with_history = report.model_copy(
+        update={
+            "evidence_refs": [*report.evidence_refs, historical_id],
+            "similar_cases": [similar_case],
+        }
+    )
+    result_with_history = accepted.model_copy(
+        update={
+            "state": accepted.state.model_copy(update={"draft_report": report_with_history})
+        }
+    )
+    repository = InMemoryMemoryRepository()
+    service = CaseMemoryService(
+        repository,
+        DeterministicHashEmbeddingProvider(dimensions=32),
+        now_factory=FixedClock(NOW),
+    )
+
+    staged = await service.stage_from_report(result_with_history)
+
+    assert staged.memory is not None
+    assert staged.memory.evidence_refs == ["ev_memory_unit_001"]
+    assert historical_id not in staged.memory.evidence_refs
 
 
 @pytest.mark.asyncio

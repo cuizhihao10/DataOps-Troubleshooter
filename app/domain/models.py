@@ -176,9 +176,36 @@ class SimilarCaseReference(BaseModel):
     case_id: str = Field(min_length=1, max_length=100)
     similarity: float = Field(ge=0, le=1)
     confirmed: bool
-    common_points: list[str] = Field(default_factory=list)
-    differences: list[str] = Field(default_factory=list)
-    evidence_refs: list[str] = Field(default_factory=list)
+    common_points: list[str] = Field(min_length=1)
+    differences: list[str] = Field(min_length=1)
+    reference_actions: list[str] = Field(min_length=1)
+    pitfall_warnings: list[str] = Field(min_length=1)
+    evidence_refs: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_confirmed_explanation(self) -> SimilarCaseReference:
+        """保证历史匹配已确认、完整可解释且所有列表内部没有重复项。
+
+        相似案例进入 Planner/报告前必须经过 confirmed-only 搜索，因此 ``confirmed=False`` 不是可
+        展示的降级值，而是上游污染。五类解释列表至少一项且不得重复；case_id 必须作为来源引用，
+        让相似度和历史方案都能追溯到具体案例而不是只引用本次 Observation。
+        """
+
+        if not self.confirmed:
+            raise ValueError("similar case references must be confirmed")
+        for field_name in (
+            "common_points",
+            "differences",
+            "reference_actions",
+            "pitfall_warnings",
+            "evidence_refs",
+        ):
+            values = getattr(self, field_name)
+            if len(values) != len(set(values)):
+                raise ValueError(f"similar case {field_name} must not contain duplicates")
+        if self.case_id not in self.evidence_refs:
+            raise ValueError("similar case evidence_refs must include case_id")
+        return self
 
 
 class DiagnosisReport(BaseModel):

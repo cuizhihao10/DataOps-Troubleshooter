@@ -205,7 +205,7 @@ def test_langgraph_react_runtime_contract_is_versioned_and_explicit() -> None:
 
     prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
 
-    assert "langgraph-react-loop:v1" in prompt_contract
+    assert "langgraph-react-loop:v2" in prompt_contract
     assert "Planner → execute_tool → Observation → Planner" in prompt_contract
     assert "MCP 执行器内部的瞬时重试不增加 `react_step`" in prompt_contract
     assert "duplicate_action_blocked" in prompt_contract
@@ -214,8 +214,8 @@ def test_langgraph_react_runtime_contract_is_versioned_and_explicit() -> None:
     assert "planner_output_invalid" in prompt_contract
 
 
-def test_planner_v3_and_structured_output_repair_are_documented() -> None:
-    """确认 Prompt 契约记录 v3 会话上下文、角色隔离、Pydantic Schema 和一次修复语义。
+def test_planner_v4_and_structured_output_repair_are_documented() -> None:
+    """确认 Prompt 契约记录 v4 会话/历史上下文、角色隔离和一次修复语义。
 
     测试锁定安全与可复现边界而非自然语言全文：用户数据不能进入 system，SDK 不发送 API tools，
     refusal 不修复，第二次失败停止；同时保留官方文档链接便于学习者核对原理。
@@ -223,8 +223,9 @@ def test_planner_v3_and_structured_output_repair_are_documented() -> None:
 
     prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
 
-    assert "planner-react:v3" in prompt_contract
+    assert "planner-react:v4" in prompt_contract
     assert "session_context" in prompt_contract
+    assert "history_case_matches" in prompt_contract
     assert "system/user 两条消息" in prompt_contract
     assert "openai-compatible-planner:v1" in prompt_contract
     assert "chat.completions.parse(response_format=PlannerDecision)" in prompt_contract
@@ -243,11 +244,11 @@ def test_auditor_prompt_and_bounded_revision_contract_are_documented() -> None:
 
     prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
 
-    assert "auditor-report:v1" in prompt_contract
+    assert "auditor-report:v2" in prompt_contract
     assert "openai-compatible-auditor:v1" in prompt_contract
     assert "chat.completions.parse(response_format=AuditResult)" in prompt_contract
     assert "确定性问题拥有最终否决权" in prompt_contract
-    assert "audited-report-workflow:v1" in prompt_contract
+    assert "audited-report-workflow:v2" in prompt_contract
     assert "最多一次报告级返工" in prompt_contract
     assert "安全降级报告" in prompt_contract
 
@@ -281,8 +282,12 @@ def test_top_level_diagnosis_workflow_contract_orders_recall_audit_and_staging()
 
     prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
 
-    assert "audited-diagnosis-workflow:v1" in prompt_contract
+    assert "audited-diagnosis-workflow:v2" in prompt_contract
     assert "recall_case_memories" in prompt_contract
+    assert "explain_case_matches" in prompt_contract
+    assert "共同点" in prompt_contract
+    assert "避坑提示" in prompt_contract
+    assert "不重新搜索" in prompt_contract
     assert "history_trigger=not_requested" in prompt_contract
     assert "Planner 与 Auditor" in prompt_contract
     assert "stage_case_memory" in prompt_contract
@@ -293,12 +298,12 @@ def test_diagnosis_resource_contract_documents_persistence_events_and_failure_se
     """确认资源 API 契约记录同步执行、四表/checkpoint、公开事件和安全失败查询方式。
 
     该门禁防止后续把进程内 background task 宣称为可靠队列，或让 run_events 保存 Thought/原始异常。
-    文档必须保留 `diagnosis-resources:v1`、running/completed/failed 状态和失败后凭 run_id 查询语义。
+    文档必须保留 `diagnosis-resources:v2`、running/completed/failed 状态和失败后凭 run_id 查询语义。
     """
 
     prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
 
-    assert "diagnosis-resources:v1" in prompt_contract
+    assert "diagnosis-resources:v2" in prompt_contract
     assert "diagnosis_sessions" in prompt_contract
     assert "agent_runs" in prompt_contract
     assert "run_events" in prompt_contract

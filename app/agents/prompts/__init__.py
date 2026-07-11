@@ -6,19 +6,19 @@ Prompt ID 与文本文件分离，便于 Golden Case 回归记录具体版本。
 
 from pathlib import Path
 
-PLANNER_PROMPT_ID = "planner-react:v3"
-PLANNER_SYSTEM_PROMPT_PATH = Path(__file__).with_name("planner_react_v3_system.txt")
-PLANNER_USER_PROMPT_PATH = Path(__file__).with_name("planner_react_v3_user.txt")
-AUDITOR_PROMPT_ID = "auditor-report:v1"
-AUDITOR_SYSTEM_PROMPT_PATH = Path(__file__).with_name("auditor_report_v1_system.txt")
-AUDITOR_USER_PROMPT_PATH = Path(__file__).with_name("auditor_report_v1_user.txt")
+PLANNER_PROMPT_ID = "planner-react:v4"
+PLANNER_SYSTEM_PROMPT_PATH = Path(__file__).with_name("planner_react_v4_system.txt")
+PLANNER_USER_PROMPT_PATH = Path(__file__).with_name("planner_react_v4_user.txt")
+AUDITOR_PROMPT_ID = "auditor-report:v2"
+AUDITOR_SYSTEM_PROMPT_PATH = Path(__file__).with_name("auditor_report_v2_system.txt")
+AUDITOR_USER_PROMPT_PATH = Path(__file__).with_name("auditor_report_v2_user.txt")
 
 
 def load_planner_prompt_parts() -> tuple[str, str]:
-    """读取 v3 Planner 的 system 与 user 两个受版本控制模板。
+    """读取 v4 Planner 的 system 与 user 两个受版本控制模板。
 
-    v3 在 v2 角色隔离基础上加入同 session 上一轮公开上下文；system 模板只保存不可被运行数据
-    覆盖的规则，user 模板保存所有占位符。缺失或编码错误直接抛 I/O 异常，不回退旧版本。
+    v4 在会话上下文基础上加入确定性历史案例解释；system 模板只保存不可被运行数据覆盖的规则，
+    user 模板保存全部占位符。缺失或编码错误直接抛 I/O 异常，不回退旧版本。
     """
 
     return (
@@ -40,10 +40,10 @@ def load_planner_prompt() -> str:
 
 
 def load_auditor_prompt_parts() -> tuple[str, str]:
-    """读取 v1 Auditor 的静态 system 与运行时 user 模板。
+    """读取 v2 Auditor 的静态 system 与运行时 user 模板。
 
-    两个 UTF-8 文件分别固定角色规则和不可信审计数据；缺失、编码错误或空内容由启动审计/渲染器
-    显式失败，不回退到 Planner Prompt，也不在 Python 中拼接隐藏的供应商特定指令。
+    v2 新增历史解释与实时事实优先审计；两个 UTF-8 文件分别固定角色规则和不可信审计数据。
+    缺失、编码错误或空内容显式失败，不回退旧 Prompt 或拼接隐藏供应商指令。
     """
 
     return (

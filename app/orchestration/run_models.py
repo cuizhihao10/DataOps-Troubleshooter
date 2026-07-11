@@ -19,7 +19,7 @@ from app.capabilities import (
 from app.domain.models import Component
 from app.orchestration.diagnosis_models import DiagnosisRunResult
 
-DIAGNOSIS_API_CONTRACT_ID = "diagnosis-resources:v1"
+DIAGNOSIS_API_CONTRACT_ID = "diagnosis-resources:v2"
 
 
 class AgentRunStatus(StrEnum):

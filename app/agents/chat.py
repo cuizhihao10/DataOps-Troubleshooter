@@ -32,7 +32,7 @@ PLANNER_PROVIDER_CONTRACT_ID = "openai-compatible-planner:v1"
 class ChatRole(StrEnum):
     """限定 Planner Provider 可发送的 system、user 与 assistant 消息角色。
 
-    system/user 来自 v3 Prompt；assistant 只在一次修复时回放上次无效输出。禁止 tool/developer
+    system/user 来自 v4 Prompt；assistant 只在一次修复时回放上次无效输出。禁止 tool/developer
     角色可避免模型供应商自行接管 MCP 工具协议或插入未版本化的高优先级规则。
     """
 

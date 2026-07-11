@@ -27,6 +27,7 @@ _USER_TEMPLATE_FIELDS = frozenset(
         "evidence_bundle",
         "retrieved_paths",
         "confirmed_case_memories",
+        "history_case_matches",
         "tool_schemas",
         "react_step",
         "max_react_steps",
@@ -130,6 +131,9 @@ class PlannerPromptRenderer:
             ),
             "confirmed_case_memories": _json_text(
                 [item.model_dump(mode="json") for item in context.confirmed_case_memories]
+            ),
+            "history_case_matches": _json_text(
+                [item.model_dump(mode="json") for item in context.history_case_matches]
             ),
             "tool_schemas": _json_text(tool_schemas),
             "react_step": str(state.react_step),

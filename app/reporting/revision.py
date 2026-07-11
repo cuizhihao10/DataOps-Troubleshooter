@@ -14,6 +14,7 @@ from app.domain.models import (
     DiagnosisReport,
     RemediationStep,
     RiskLevel,
+    SimilarCaseReference,
 )
 from app.reporting.evidence import collect_valid_reference_ids
 from app.retrieval.models import GraphEvidenceBundle
@@ -34,6 +35,7 @@ class SafeReportReviser:
         *,
         evidence_bundle: GraphEvidenceBundle | None = None,
         confirmed_case_memories: tuple[CaseMemory, ...] = (),
+        history_case_matches: tuple[SimilarCaseReference, ...] = (),
     ) -> DiagnosisReport:
         """过滤无效内容并追加审计不确定性，返回仍需再次审计的新报告。
 
@@ -95,7 +97,8 @@ class SafeReportReviser:
         # 未确认案例问题会清空全部案例引用，避免依赖模型提供的 claim_path 做不安全局部保留。
         similar_cases = (
             []
-            if AuditIssueCode.UNCONFIRMED_CASE in issue_codes
+            if issue_codes
+            & {AuditIssueCode.UNCONFIRMED_CASE, AuditIssueCode.EVIDENCE_CONFLICT}
             else [
                 item.model_copy(
                     update={"evidence_refs": _valid_refs(item.evidence_refs, valid_refs)}
@@ -129,6 +132,7 @@ class SafeReportReviser:
         *,
         evidence_bundle: GraphEvidenceBundle | None = None,
         confirmed_case_memories: tuple[CaseMemory, ...] = (),
+        history_case_matches: tuple[SimilarCaseReference, ...] = (),
     ) -> DiagnosisReport:
         """在二次未通过或 Auditor 不可用时生成不含根因声明的最终降级报告。
 

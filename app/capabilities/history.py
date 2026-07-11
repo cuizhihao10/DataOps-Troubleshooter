@@ -1,7 +1,7 @@
 """声明按需匹配已确认历史案例的运行时策略。
 
-本模块定义召回输入、比较输出和证据优先级；顶层诊断图已经按 trigger 查询 confirmed 案例并注入
-Planner/Auditor。共同点、差异点和避坑提示仍由后续确定性比较/报告投影切片补齐。
+本模块定义召回输入、比较输出和证据优先级；顶层诊断图按 trigger 查询 confirmed 案例，并由
+``app.memory.matcher`` 在 ReAct 前后生成共同点、差异点、参考方案和避坑提示供 Planner/Auditor。
 """
 
 from app.capabilities.base import (

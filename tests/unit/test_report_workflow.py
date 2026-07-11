@@ -85,6 +85,7 @@ class UnsupportedReportBuilder:
         *,
         evidence_bundle=None,
         confirmed_case_memories=(),
+        history_case_matches=(),
     ) -> DiagnosisReport:
         """使用状态中的真实 evidence_id 组装一个语义无依据的高置信度根因。
 

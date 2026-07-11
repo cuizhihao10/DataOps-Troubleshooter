@@ -1,7 +1,7 @@
 """验证顶层诊断图按需召回 confirmed 案例、复用上下文并在审计后暂存记忆。
 
-测试使用记录型 ReAct/报告/记忆替身，不调用模型、MCP 或数据库；它关注四阶段调用顺序、查询预算、
-history trigger、run 身份和 accepted/degraded 的 staging 语义。
+测试使用记录型 ReAct/报告/记忆替身，不调用模型、MCP 或数据库；它关注五阶段调用顺序、历史解释、
+查询预算、history trigger、run 身份和 accepted/degraded 的 staging 语义。
 """
 
 from __future__ import annotations
@@ -148,6 +148,7 @@ class RecordingReportWorkflow:
                     )
                 ],
                 evidence_refs=[evidence_id],
+                similar_cases=list(request.history_case_matches),
             )
             audit = AuditResult(status=AuditStatus.ACCEPT)
             final_event = ReportPublicEvent(
@@ -390,11 +391,19 @@ async def test_diagnosis_workflow_recalls_once_reuses_context_and_stages_accepte
     assert "当前假设" in query
     assert "旧案例文本" not in query
     assert react.requests[0].confirmed_case_memories == (_confirmed_match().memory,)
+    assert len(react.requests[0].history_case_matches) == 1
+    assert react.requests[0].history_case_matches[0].similarity == 0.94
     assert report.requests[0].confirmed_case_memories == (_confirmed_match().memory,)
+    assert report.requests[0].history_case_matches == result.history_case_matches
     assert len(memory.stage_calls) == 1
     assert memory.stage_calls[0].state.run_id == result.report.state.run_id
     assert memory.stage_calls[0].state.memory_candidate is None
     assert result.recalled_memories[0].similarity == 0.94
+    assert result.history_case_matches[0].case_id == "mem_history_001"
+    assert result.history_case_matches[0].reference_actions
+    assert result.history_case_matches[0].pitfall_warnings
+    assert result.report.state.draft_report is not None
+    assert result.report.state.draft_report.similar_cases == list(result.history_case_matches)
     assert result.memory_stage.status is MemoryStageStatus.STAGED
     assert result.report.state.memory_candidate == result.memory_stage.memory
 
@@ -476,7 +485,7 @@ async def test_diagnosis_workflow_propagates_memory_search_failure_before_agents
 async def test_diagnosis_result_rejects_degraded_report_with_successful_memory_write() -> None:
     """验证最终契约拒绝 degraded 报告与 staged 记忆的危险组合。
 
-    测试故意配置不可信 memory 替身返回写入成功；四个节点虽依次完成，``DiagnosisRunResult`` 仍在
+    测试故意配置不可信 memory 替身返回写入成功；五个节点虽依次完成，``DiagnosisRunResult`` 仍在
     API/评测可见前失败，证明顶层结果模型是审计门禁之外的最后一致性防线。
     """
 

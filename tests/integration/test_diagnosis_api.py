@@ -166,7 +166,7 @@ async def test_diagnosis_resource_routes_return_503_when_runtime_is_disabled() -
 async def test_diagnosis_resource_routes_create_submit_read_and_return_404() -> None:
     """验证会话创建、消息校验、run/event 读取和未知资源 404 的完整 HTTP Schema。
 
-    成功响应均携带 `diagnosis-resources:v1`；消息 intent/components/history trigger 被解析为
+        成功响应均携带 `diagnosis-resources:v2`；消息 intent/components/history trigger 被解析为
     生产枚举，未知 session/run 不调用伪默认对象。响应不包含 reasoning_process 或 Thought 字段。
     """
 
@@ -201,7 +201,7 @@ async def test_diagnosis_resource_routes_create_submit_read_and_return_404() -> 
             missing_run = await client.get("/api/v1/runs/run_aaaaaaaaaaaaaaaa")
 
     assert created.status_code == 201
-    assert created.json()["contract_id"] == "diagnosis-resources:v1"
+    assert created.json()["contract_id"] == "diagnosis-resources:v2"
     assert submitted.status_code == 201
     assert submitted.json()["run"]["status"] == "running"
     assert run.status_code == 200

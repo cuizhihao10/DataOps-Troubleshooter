@@ -11,7 +11,7 @@ from typing import Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.capabilities import CapabilitySelection
-from app.domain.models import AgentState, CaseMemory, MemoryStatus
+from app.domain.models import AgentState, CaseMemory, MemoryStatus, SimilarCaseReference
 from app.domain.planner import PlannerDecision
 from app.retrieval.models import GraphEvidenceBundle
 
@@ -128,6 +128,7 @@ class PlannerTurnContext(BaseModel):
     capabilities: CapabilitySelection
     evidence_bundle: GraphEvidenceBundle | None = None
     confirmed_case_memories: tuple[CaseMemory, ...] = ()
+    history_case_matches: tuple[SimilarCaseReference, ...] = ()
     max_react_steps: int = Field(ge=1, le=20)
     remaining_time_ms: int = Field(ge=0, le=600_000)
 
@@ -150,6 +151,10 @@ class PlannerTurnContext(BaseModel):
             memory.status is not MemoryStatus.CONFIRMED for memory in self.confirmed_case_memories
         ):
             raise ValueError("Planner context can include only confirmed case memories")
+        if [item.memory_id for item in self.confirmed_case_memories] != [
+            item.case_id for item in self.history_case_matches
+        ]:
+            raise ValueError("Planner history explanations must match confirmed memory order")
         return self
 
 

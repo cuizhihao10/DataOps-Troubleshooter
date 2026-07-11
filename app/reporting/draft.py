@@ -15,6 +15,7 @@ from app.domain.models import (
     RemediationStep,
     RiskLevel,
     RootCauseConclusion,
+    SimilarCaseReference,
 )
 from app.reporting.evidence import collect_valid_reference_ids
 from app.retrieval.models import GraphEvidenceBundle, KnowledgeNodeType
@@ -33,6 +34,7 @@ class DeterministicReportBuilder:
         *,
         evidence_bundle: GraphEvidenceBundle | None = None,
         confirmed_case_memories: tuple[CaseMemory, ...] = (),
+        history_case_matches: tuple[SimilarCaseReference, ...] = (),
     ) -> DiagnosisReport:
         """把支持充分的假设、完整图路径和知识方案组装为首版报告。
 
@@ -79,8 +81,10 @@ class DeterministicReportBuilder:
             uncertainties.append("当前证据不足以形成可审计根因，报告保持降级结论。")
         if evidence_bundle is not None and evidence_bundle.truncated:
             uncertainties.append("GraphRAG 上下文受到预算裁剪，省略候选不能解释为知识库不存在。")
-        if confirmed_case_memories:
-            uncertainties.append("已确认历史案例仅作为参考；本草稿未把未计算的相似度写入报告。")
+        if history_case_matches:
+            uncertainties.append(
+                "历史案例解释仅作参考；差异与本次实时 Observation 冲突时以后者为准。"
+            )
 
         # 报告级引用是所有已采纳结论的并集，便于 API 快速展示和 Auditor 检查遗漏。
         evidence_refs = _stable_unique(
@@ -88,6 +92,7 @@ class DeterministicReportBuilder:
                 *(ref for cause in root_causes for ref in cause.evidence_refs),
                 *(ref for step in fault_chain for ref in step.evidence_refs),
                 *(ref for step in remediation_steps for ref in step.evidence_refs),
+                *(ref for item in history_case_matches for ref in item.evidence_refs),
             ]
         )
         summary = (
@@ -104,7 +109,7 @@ class DeterministicReportBuilder:
             remediation_steps=remediation_steps,
             risks=risks,
             uncertainties=_stable_unique(uncertainties),
-            similar_cases=[],
+            similar_cases=list(history_case_matches),
         )
 
 

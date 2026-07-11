@@ -17,6 +17,7 @@ from app.domain.models import (
     AuditResult,
     CaseMemory,
     MemoryStatus,
+    SimilarCaseReference,
 )
 from app.retrieval.models import GraphEvidenceBundle
 
@@ -130,6 +131,7 @@ class AuditorTurnContext(BaseModel):
     capabilities: CapabilitySelection
     evidence_bundle: GraphEvidenceBundle | None = None
     confirmed_case_memories: tuple[CaseMemory, ...] = ()
+    history_case_matches: tuple[SimilarCaseReference, ...] = ()
     deterministic_issues: tuple[AuditIssue, ...] = ()
     revision_number: int = Field(ge=0, le=1)
 
@@ -152,6 +154,10 @@ class AuditorTurnContext(BaseModel):
             memory.status is not MemoryStatus.CONFIRMED for memory in self.confirmed_case_memories
         ):
             raise ValueError("Auditor context can include only confirmed case memories")
+        if [item.memory_id for item in self.confirmed_case_memories] != [
+            item.case_id for item in self.history_case_matches
+        ]:
+            raise ValueError("Auditor history explanations must match confirmed memory order")
         return self
 
 

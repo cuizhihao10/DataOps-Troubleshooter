@@ -169,6 +169,7 @@ class UnsupportedBuilder:
         *,
         evidence_bundle=None,
         confirmed_case_memories=(),
+        history_case_matches=(),
     ) -> DiagnosisReport:
         """使用现有 evidence_id 生成语义无依据根因和完整低风险步骤。
 

@@ -18,10 +18,11 @@ from app.domain.models import (
     AuditStatus,
     CaseMemory,
     MemoryStatus,
+    SimilarCaseReference,
 )
 from app.retrieval.models import GraphEvidenceBundle
 
-AUDITED_REPORT_WORKFLOW_CONTRACT_ID = "audited-report-workflow:v1"
+AUDITED_REPORT_WORKFLOW_CONTRACT_ID = "audited-report-workflow:v2"
 
 
 class ReportWorkflowStatus(StrEnum):
@@ -102,6 +103,7 @@ class ReportRunRequest(BaseModel):
     capabilities: CapabilitySelection
     evidence_bundle: GraphEvidenceBundle | None = None
     confirmed_case_memories: tuple[CaseMemory, ...] = ()
+    history_case_matches: tuple[SimilarCaseReference, ...] = ()
 
     @model_validator(mode="after")
     def validate_post_react_boundary(self) -> ReportRunRequest:
@@ -122,6 +124,10 @@ class ReportRunRequest(BaseModel):
             memory.status is not MemoryStatus.CONFIRMED for memory in self.confirmed_case_memories
         ):
             raise ValueError("report workflow can include only confirmed case memories")
+        if [item.memory_id for item in self.confirmed_case_memories] != [
+            item.case_id for item in self.history_case_matches
+        ]:
+            raise ValueError("report history explanations must match confirmed memory order")
         return self
 
 
@@ -138,6 +144,7 @@ class ReportGraphState(BaseModel):
     capabilities: CapabilitySelection
     evidence_bundle: GraphEvidenceBundle | None = None
     confirmed_case_memories: tuple[CaseMemory, ...] = ()
+    history_case_matches: tuple[SimilarCaseReference, ...] = ()
     max_revisions: int = Field(default=1, ge=0, le=1)
     deterministic_issues: tuple[AuditIssue, ...] = ()
     events: list[ReportPublicEvent] = Field(default_factory=list)

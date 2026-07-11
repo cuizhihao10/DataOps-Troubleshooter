@@ -14,6 +14,7 @@ from app.domain.models import (
     DiagnosisReport,
     HypothesisStatus,
     RiskLevel,
+    SimilarCaseReference,
 )
 from app.reporting.evidence import collect_valid_reference_ids
 from app.retrieval.models import GraphEvidenceBundle
@@ -33,6 +34,7 @@ class ReportPolicyValidator:
         *,
         evidence_bundle: GraphEvidenceBundle | None = None,
         confirmed_case_memories: tuple[CaseMemory, ...] = (),
+        history_case_matches: tuple[SimilarCaseReference, ...] = (),
     ) -> tuple[AuditIssue, ...]:
         """返回所有阻断放行的结构化问题，空元组表示确定性规则通过。
 
@@ -51,7 +53,7 @@ class ReportPolicyValidator:
         issues.extend(_invalid_reference_issues(report, valid_refs))
         issues.extend(_root_cause_issues(report, state, valid_refs))
         issues.extend(_risk_control_issues(report))
-        issues.extend(_case_issues(report, confirmed_case_memories))
+        issues.extend(_case_issues(report, confirmed_case_memories, history_case_matches))
         issues.extend(_completeness_issues(report))
         return tuple(_deduplicate_issues(issues))
 
@@ -193,14 +195,16 @@ def _risk_control_issues(report: DiagnosisReport) -> list[AuditIssue]:
 def _case_issues(
     report: DiagnosisReport,
     confirmed_case_memories: tuple[CaseMemory, ...],
+    history_case_matches: tuple[SimilarCaseReference, ...],
 ) -> list[AuditIssue]:
-    """拒绝报告引用未进入本轮 confirmed 上下文的历史案例。
+    """拒绝未知案例，或与确定性历史解释在分数和字段上发生漂移的报告。
 
-    `confirmed` 布尔值本身不足以证明来源，case_id 还必须命中上游已校验对象；这阻止模型伪造
-    一个看似确认的案例。相似度语义由 Auditor 审查，本规则只验证确认状态和可追溯身份。
+    `confirmed` 布尔值不足以证明来源，case_id 必须命中同批 memory；报告项还必须与 matcher 的
+    完整强类型结果相同，防止后续节点提高 similarity、删除冲突差异或改写历史方案。
     """
 
     confirmed_ids = {memory.memory_id for memory in confirmed_case_memories}
+    expected_by_id = {item.case_id: item for item in history_case_matches}
     issues: list[AuditIssue] = []
     for index, item in enumerate(report.similar_cases):
         if not item.confirmed or item.case_id not in confirmed_ids:
@@ -209,6 +213,17 @@ def _case_issues(
                     code=AuditIssueCode.UNCONFIRMED_CASE,
                     claim_path=f"similar_cases[{index}]",
                     message="相似案例未出现在本轮已确认案例上下文中。",
+                    evidence_refs=tuple(item.evidence_refs),
+                )
+            )
+            continue
+        expected = expected_by_id.get(item.case_id)
+        if expected is None or item != expected:
+            issues.append(
+                AuditIssue(
+                    code=AuditIssueCode.EVIDENCE_CONFLICT,
+                    claim_path=f"similar_cases[{index}]",
+                    message="报告中的相似度或案例解释与确定性历史匹配结果不一致。",
                     evidence_refs=tuple(item.evidence_refs),
                 )
             )

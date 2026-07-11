@@ -253,8 +253,19 @@ async def test_confirmed_memory_is_recalled_next_session_and_new_report_is_merge
         assert second.recalled_memories[0].memory.memory_id == memory_id
         assert planner.contexts[0].confirmed_case_memories == ()
         assert planner.contexts[1].confirmed_case_memories[0].memory_id == memory_id
+        assert planner.contexts[1].history_case_matches[0].case_id == memory_id
+        assert planner.contexts[1].history_case_matches[0].similarity == pytest.approx(
+            second.recalled_memories[0].similarity
+        )
         assert auditor.contexts[0].confirmed_case_memories == ()
         assert auditor.contexts[1].confirmed_case_memories[0].memory_id == memory_id
+        assert auditor.contexts[1].history_case_matches == second.history_case_matches
+        final_report = second.report.state.draft_report
+        assert final_report is not None
+        assert final_report.similar_cases == list(second.history_case_matches)
+        assert final_report.similar_cases[0].reference_actions
+        assert final_report.similar_cases[0].pitfall_warnings
+        assert memory_id in final_report.evidence_refs
         assert second.memory_stage.status is MemoryStageStatus.MERGED
         assert second.memory_stage.memory is not None
         assert second.memory_stage.memory.status is MemoryStatus.CONFIRMED

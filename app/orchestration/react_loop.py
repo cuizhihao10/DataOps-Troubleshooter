@@ -107,6 +107,7 @@ class BoundedReactLoop:
             capability_request=request.capability_request,
             evidence_bundle=request.evidence_bundle,
             confirmed_case_memories=request.confirmed_case_memories,
+            history_case_matches=request.history_case_matches,
             executed_action_fingerprints=_fingerprints_from_tool_events(request.state.tool_events),
         )
         runtime_context = ReactGraphRuntime(
@@ -165,7 +166,7 @@ def _build_react_graph():
         {"execute_tool": "execute_tool", "end": END},
     )
     graph.add_edge("execute_tool", "planner_react")
-    return graph.compile(name="dataops_bounded_react_v1")
+    return graph.compile(name="dataops_bounded_react_v2")
 
 
 async def _select_capabilities(
@@ -241,6 +242,7 @@ async def _planner_react(
         capabilities=selection,
         evidence_bundle=graph_state.evidence_bundle,
         confirmed_case_memories=graph_state.confirmed_case_memories,
+        history_case_matches=graph_state.history_case_matches,
         max_react_steps=runtime.context.config.max_steps,
         remaining_time_ms=remaining_time_ms,
     )

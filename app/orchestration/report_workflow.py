@@ -22,6 +22,7 @@ from app.domain.models import (
     AuditStatus,
     CaseMemory,
     DiagnosisReport,
+    SimilarCaseReference,
 )
 from app.orchestration.report_models import (
     AUDITED_REPORT_WORKFLOW_CONTRACT_ID,
@@ -55,6 +56,7 @@ class ReportDraftBuilder(Protocol):
         *,
         evidence_bundle: GraphEvidenceBundle | None = None,
         confirmed_case_memories: tuple[CaseMemory, ...] = (),
+        history_case_matches: tuple[SimilarCaseReference, ...] = (),
     ) -> DiagnosisReport:
         """从已停止调查状态创建首版结构化报告。
 
@@ -79,6 +81,7 @@ class ReportValidator(Protocol):
         *,
         evidence_bundle: GraphEvidenceBundle | None = None,
         confirmed_case_memories: tuple[CaseMemory, ...] = (),
+        history_case_matches: tuple[SimilarCaseReference, ...] = (),
     ) -> tuple[AuditIssue, ...]:
         """检查引用、假设支撑、冲突、风险和案例状态并返回结构化问题。
 
@@ -104,6 +107,7 @@ class ReportReviser(Protocol):
         *,
         evidence_bundle: GraphEvidenceBundle | None = None,
         confirmed_case_memories: tuple[CaseMemory, ...] = (),
+        history_case_matches: tuple[SimilarCaseReference, ...] = (),
     ) -> DiagnosisReport:
         """根据首次结构化问题创建仍需再次审计的收窄报告。
 
@@ -120,6 +124,7 @@ class ReportReviser(Protocol):
         *,
         evidence_bundle: GraphEvidenceBundle | None = None,
         confirmed_case_memories: tuple[CaseMemory, ...] = (),
+        history_case_matches: tuple[SimilarCaseReference, ...] = (),
     ) -> DiagnosisReport:
         """生成不含未审计结论的最终安全降级报告。
 
@@ -188,6 +193,7 @@ class AuditedReportWorkflow:
             capabilities=request.capabilities,
             evidence_bundle=request.evidence_bundle,
             confirmed_case_memories=request.confirmed_case_memories,
+            history_case_matches=request.history_case_matches,
             max_revisions=self._runtime.config.max_revisions,
         )
         raw_state = await self._graph.ainvoke(
@@ -229,7 +235,7 @@ def _build_report_graph():
     )
     graph.add_edge("revise_report", "audit_report")
     graph.add_edge("degrade_report", END)
-    return graph.compile(name="dataops_audited_report_v1")
+    return graph.compile(name="dataops_audited_report_v2")
 
 
 async def _draft_report(
@@ -247,12 +253,14 @@ async def _draft_report(
         graph_state.agent_state,
         evidence_bundle=graph_state.evidence_bundle,
         confirmed_case_memories=graph_state.confirmed_case_memories,
+        history_case_matches=graph_state.history_case_matches,
     )
     issues = runtime.context.validator.validate(
         report,
         graph_state.agent_state,
         evidence_bundle=graph_state.evidence_bundle,
         confirmed_case_memories=graph_state.confirmed_case_memories,
+        history_case_matches=graph_state.history_case_matches,
     )
     agent_state = graph_state.agent_state.model_copy(
         update={"draft_report": report, "audit_result": None}
@@ -286,12 +294,14 @@ async def _audit_report(
         graph_state.agent_state,
         evidence_bundle=graph_state.evidence_bundle,
         confirmed_case_memories=graph_state.confirmed_case_memories,
+        history_case_matches=graph_state.history_case_matches,
     )
     context = AuditorTurnContext(
         state=graph_state.agent_state,
         capabilities=graph_state.capabilities,
         evidence_bundle=graph_state.evidence_bundle,
         confirmed_case_memories=graph_state.confirmed_case_memories,
+        history_case_matches=graph_state.history_case_matches,
         deterministic_issues=deterministic_issues,
         revision_number=graph_state.agent_state.retry_count,
     )
@@ -314,6 +324,7 @@ async def _audit_report(
             graph_state.agent_state,
             evidence_bundle=graph_state.evidence_bundle,
             confirmed_case_memories=graph_state.confirmed_case_memories,
+            history_case_matches=graph_state.history_case_matches,
         )
         agent_state = graph_state.agent_state.model_copy(
             update={"draft_report": degraded, "audit_result": audit_result}
@@ -407,6 +418,7 @@ async def _revise_report(
         graph_state.agent_state,
         evidence_bundle=graph_state.evidence_bundle,
         confirmed_case_memories=graph_state.confirmed_case_memories,
+        history_case_matches=graph_state.history_case_matches,
     )
     agent_state = graph_state.agent_state.model_copy(
         update={
@@ -445,6 +457,7 @@ async def _degrade_report(
         graph_state.agent_state,
         evidence_bundle=graph_state.evidence_bundle,
         confirmed_case_memories=graph_state.confirmed_case_memories,
+        history_case_matches=graph_state.history_case_matches,
     )
     agent_state = graph_state.agent_state.model_copy(update={"draft_report": degraded})
     completed = graph_state.model_copy(

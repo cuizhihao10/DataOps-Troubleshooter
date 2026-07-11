@@ -21,6 +21,7 @@ _AUDITOR_USER_FIELDS = frozenset(
         "realtime_evidence",
         "graph_bundle",
         "confirmed_cases",
+        "history_case_matches",
         "capability_rules",
         "deterministic_issues",
         "revision_number",
@@ -43,7 +44,7 @@ class AuditorPromptBundle(BaseModel):
 
 
 class AuditorPromptRenderer:
-    """加载并审计 v1 Auditor 模板，再把强类型上下文渲染为稳定消息。
+    """加载并审计 v2 Auditor 模板，再把强类型上下文渲染为稳定消息。
 
     构造时要求 system 无占位符、user 占位符与代码集合完全一致；任何模板漂移在创建 Provider 前
     失败。render 不读取文件外数据，也不接受调用方追加隐藏规则。
@@ -101,6 +102,9 @@ class AuditorPromptRenderer:
             ),
             "confirmed_cases": _json_text(
                 [item.model_dump(mode="json") for item in context.confirmed_case_memories]
+            ),
+            "history_case_matches": _json_text(
+                [item.model_dump(mode="json") for item in context.history_case_matches]
             ),
             "capability_rules": _json_text(capability_rules),
             "deterministic_issues": _json_text(

@@ -43,17 +43,17 @@ async def test_health_reports_validated_contract_baseline() -> None:
     assert payload["knowledge_edges_loaded"] == 0
     assert payload["knowledge_nodes_embedded"] == 0
     assert payload["contracts"] == {
-        "planner_prompt": "planner-react:v3",
+        "planner_prompt": "planner-react:v4",
         "planner_provider": "openai-compatible-planner:v1",
-        "auditor_prompt": "auditor-report:v1",
+        "auditor_prompt": "auditor-report:v2",
         "auditor_provider": "openai-compatible-auditor:v1",
         "mcp": "mcp-tools:v1",
         "golden_case": "golden-case:v1",
         "runtime_capabilities": "runtime-capabilities:v1",
-        "react_loop": "langgraph-react-loop:v1",
-        "audited_report_workflow": "audited-report-workflow:v1",
-        "diagnosis_workflow": "audited-diagnosis-workflow:v1",
-        "diagnosis_api": "diagnosis-resources:v1",
+        "react_loop": "langgraph-react-loop:v2",
+        "audited_report_workflow": "audited-report-workflow:v2",
+        "diagnosis_workflow": "audited-diagnosis-workflow:v2",
+        "diagnosis_api": "diagnosis-resources:v2",
         "session_checkpoint": "session-checkpoint:v1",
         "case_memory": "case-memory:v1",
         "graph_retrieval": "graphrag-retrieval:v2",
@@ -94,7 +94,7 @@ async def test_health_reports_validated_contract_baseline() -> None:
     }
     assert payload["diagnosis_api"] == {
         "status": "disabled",
-        "contract_id": "diagnosis-resources:v1",
+        "contract_id": "diagnosis-resources:v2",
         "checkpoint_contract_id": "session-checkpoint:v1",
         "execution_mode": "synchronous",
         "retrieval_seed_limit": 5,

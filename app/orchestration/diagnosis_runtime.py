@@ -358,6 +358,8 @@ def _project_run_events(
                 "selected_node_ids": [item.node_id for item in evidence_bundle.selected_nodes],
                 "selected_path_ids": [item.path_id for item in evidence_bundle.selected_paths],
                 "truncated": evidence_bundle.truncated,
+                "history_match_count": len(result.history_case_matches),
+                "history_case_ids": [item.case_id for item in result.history_case_matches],
                 "restored_checkpoint_version": (
                     restored_checkpoint.checkpoint_version
                     if restored_checkpoint is not None

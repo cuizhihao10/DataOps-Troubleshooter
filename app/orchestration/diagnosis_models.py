@@ -11,13 +11,13 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.capabilities import CapabilitySelectionRequest, HistoryTrigger
-from app.domain.models import AgentState
+from app.domain.models import AgentState, SimilarCaseReference
 from app.memory.models import CaseMemoryMatch, MemoryStageResult, MemoryStageStatus
 from app.orchestration.models import ReactRunResult
 from app.orchestration.report_models import ReportRunResult, ReportWorkflowOutcome
 from app.retrieval.models import GraphEvidenceBundle
 
-DIAGNOSIS_WORKFLOW_CONTRACT_ID = "audited-diagnosis-workflow:v1"
+DIAGNOSIS_WORKFLOW_CONTRACT_ID = "audited-diagnosis-workflow:v2"
 
 
 class DiagnosisWorkflowStatus(StrEnum):
@@ -72,7 +72,7 @@ class DiagnosisRunRequest(BaseModel):
 
 
 class DiagnosisGraphState(BaseModel):
-    """保存顶层 LangGraph 四个阶段之间传递的可序列化状态。
+    """保存顶层 LangGraph 五个阶段之间传递的可序列化状态。
 
     状态逐步增加 memory query/matches、ReAct 结果、报告结果和 staging 结果；外部运行时对象通过
     LangGraph context 注入。可空字段只表示对应节点尚未完成，最终结果构造会拒绝缺失阶段。
@@ -85,6 +85,7 @@ class DiagnosisGraphState(BaseModel):
     evidence_bundle: GraphEvidenceBundle | None = None
     memory_query: str | None = None
     recalled_memories: tuple[CaseMemoryMatch, ...] = ()
+    history_case_matches: tuple[SimilarCaseReference, ...] = ()
     react_result: ReactRunResult | None = None
     report_result: ReportRunResult | None = None
     memory_stage: MemoryStageResult | None = None
@@ -104,6 +105,7 @@ class DiagnosisRunResult(BaseModel):
     history_trigger: HistoryTrigger
     memory_query: str | None = None
     recalled_memories: tuple[CaseMemoryMatch, ...] = ()
+    history_case_matches: tuple[SimilarCaseReference, ...] = ()
     react: ReactRunResult
     report: ReportRunResult
     memory_stage: MemoryStageResult
@@ -118,10 +120,23 @@ class DiagnosisRunResult(BaseModel):
         """
 
         if self.history_trigger is HistoryTrigger.NOT_REQUESTED:
-            if self.memory_query is not None or self.recalled_memories:
-                raise ValueError("unrequested history cannot contain a query or recalled memories")
+            if self.memory_query is not None or self.recalled_memories or self.history_case_matches:
+                raise ValueError(
+                    "unrequested history cannot contain a query, memories, or explanations"
+                )
         elif self.memory_query is None or not self.memory_query.strip():
             raise ValueError("requested history requires a recorded memory query")
+
+        raw_ids = [match.memory.memory_id for match in self.recalled_memories]
+        explained_ids = [match.case_id for match in self.history_case_matches]
+        if raw_ids != explained_ids:
+            raise ValueError(
+                "history explanations must preserve recalled memory order and identity"
+            )
+        raw_similarity = [match.similarity for match in self.recalled_memories]
+        explained_similarity = [match.similarity for match in self.history_case_matches]
+        if raw_similarity != explained_similarity:
+            raise ValueError("history explanations must preserve retrieval similarity")
 
         if self.react.state.run_id != self.report.state.run_id:
             raise ValueError("React and report results must share run_id")
