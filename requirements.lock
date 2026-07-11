@@ -16,6 +16,7 @@ annotated-types==0.7.0
 anyio==4.14.1
     # via
     #   httpx
+    #   langsmith
     #   mcp
     #   sse-starlette
     #   starlette
@@ -30,14 +31,19 @@ certifi==2026.6.17
     # via
     #   httpcore
     #   httpx
+    #   requests
 cffi==2.1.0
     # via cryptography
+charset-normalizer==3.4.9
+    # via requests
 click==8.4.2
     # via uvicorn
 colorama==0.4.6
     # via click
 cryptography==49.0.0
     # via pyjwt
+distro==1.9.0
+    # via langsmith
 fastapi==0.139.0
     # via dataops-troubleshooter (pyproject.toml)
 greenlet==3.5.3
@@ -51,23 +57,60 @@ httpcore==1.0.9
 httptools==0.8.0
     # via uvicorn
 httpx==0.28.1
-    # via mcp
+    # via
+    #   langgraph-sdk
+    #   langsmith
+    #   mcp
 httpx-sse==0.4.3
     # via mcp
 idna==3.18
     # via
     #   anyio
     #   httpx
+    #   requests
+jsonpatch==1.33
+    # via langchain-core
+jsonpointer==3.1.1
+    # via jsonpatch
 jsonschema==4.26.0
     # via mcp
 jsonschema-specifications==2025.9.1
     # via jsonschema
+langchain-core==1.4.9
+    # via
+    #   langgraph
+    #   langgraph-checkpoint
+    #   langgraph-prebuilt
+langchain-protocol==0.0.18
+    # via langchain-core
+langgraph==1.2.2
+    # via dataops-troubleshooter (pyproject.toml)
+langgraph-checkpoint==4.1.1
+    # via
+    #   langgraph
+    #   langgraph-prebuilt
+langgraph-prebuilt==1.1.0
+    # via langgraph
+langgraph-sdk==0.3.15
+    # via langgraph
+langsmith==0.10.2
+    # via langchain-core
 mako==1.3.12
     # via alembic
 markupsafe==3.0.3
     # via mako
 mcp==1.28.1
     # via dataops-troubleshooter (pyproject.toml)
+orjson==3.11.9
+    # via
+    #   langgraph-sdk
+    #   langsmith
+ormsgpack==1.12.2
+    # via langgraph-checkpoint
+packaging==26.2
+    # via
+    #   langchain-core
+    #   langsmith
 pgvector==0.5.0
     # via dataops-troubleshooter (pyproject.toml)
 pycparser==3.0
@@ -76,6 +119,9 @@ pydantic==2.13.4
     # via
     #   dataops-troubleshooter (pyproject.toml)
     #   fastapi
+    #   langchain-core
+    #   langgraph
+    #   langsmith
     #   mcp
     #   pydantic-settings
 pydantic-core==2.46.4
@@ -97,15 +143,25 @@ pywin32==312 ; sys_platform == "win32"
     #   dataops-troubleshooter (pyproject.toml)
     #   mcp
 pyyaml==6.0.3
-    # via uvicorn
+    # via
+    #   langchain-core
+    #   uvicorn
 referencing==0.37.0
     # via
     #   jsonschema
     #   jsonschema-specifications
+requests==2.34.2
+    # via
+    #   langsmith
+    #   requests-toolbelt
+requests-toolbelt==1.0.0
+    # via langsmith
 rpds-py==2026.6.3
     # via
     #   jsonschema
     #   referencing
+sniffio==1.3.1
+    # via langsmith
 sqlalchemy==2.0.51
     # via
     #   alembic
@@ -117,11 +173,16 @@ starlette==1.3.1
     #   fastapi
     #   mcp
     #   sse-starlette
+tenacity==9.1.4
+    # via langchain-core
 typing-extensions==4.16.0
     # via
     #   alembic
     #   anyio
     #   fastapi
+    #   langchain-core
+    #   langchain-protocol
+    #   langsmith
     #   mcp
     #   pydantic
     #   pydantic-core
@@ -135,6 +196,12 @@ typing-inspection==0.4.2
     #   mcp
     #   pydantic
     #   pydantic-settings
+urllib3==2.7.0
+    # via requests
+uuid-utils==0.17.0
+    # via
+    #   langchain-core
+    #   langsmith
 uvicorn==0.51.0
     # via
     #   dataops-troubleshooter (pyproject.toml)
@@ -142,4 +209,12 @@ uvicorn==0.51.0
 watchfiles==1.2.0
     # via uvicorn
 websockets==16.1
-    # via uvicorn
+    # via
+    #   langsmith
+    #   uvicorn
+xxhash==3.8.1
+    # via
+    #   langgraph
+    #   langsmith
+zstandard==0.25.0
+    # via langsmith

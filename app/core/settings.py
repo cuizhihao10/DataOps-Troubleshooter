@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     port: int = Field(default=8000, ge=1, le=65535)
 
     max_react_steps: int = Field(default=6, ge=1, le=20)
+    react_total_timeout_seconds: float = Field(default=60, gt=0, le=600)
     max_graph_hops: int = Field(default=2, ge=1, le=2)
     max_audit_revisions: int = Field(default=1, ge=0, le=1)
     tool_timeout_seconds: float = Field(default=5, gt=0, le=60)
@@ -62,6 +63,7 @@ class Settings(BaseSettings):
     mcp_contract_id: str = "mcp-tools:v1"
     golden_case_contract_id: str = "golden-case:v1"
     capabilities_contract_id: str = "runtime-capabilities:v1"
+    react_loop_contract_id: str = "langgraph-react-loop:v1"
     graphrag_retrieval_contract_id: str = "graphrag-retrieval:v2"
     graphrag_evidence_bundle_contract_id: str = "graphrag-evidence-bundle:v1"
 

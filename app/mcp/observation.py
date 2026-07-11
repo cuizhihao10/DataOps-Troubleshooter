@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 from hashlib import sha256
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -50,12 +51,13 @@ def normalize_observation(
 ) -> ToolObservation:
     """把单次统一 MCP 响应确定性转换成 Evidence、ToolEvent 和引用列表。
 
-    证据与事件 ID 由 trace、工具、来源和 attempt 计算稳定摘要，便于重放引用；只有服务端明确
-    返回的 evidence 才会转换，失败空载荷不会生成事实。工具元数据附加到每条证据，事件同时
-    保存原请求/响应和时间，使 Auditor 可从结论追溯到协议调用。
+    证据与事件 ID 由 trace、工具、规范化请求、来源和 attempt 计算稳定摘要，便于重放引用；
+    只有服务端明确返回的 evidence 才会转换，失败空载荷不会生成事实。工具元数据附加到每条
+    证据，事件同时保存原请求/响应和时间，使 Auditor 可从结论追溯到协议调用。
     """
 
     tool_slug = action.tool_name.value.replace(".", "_")
+    request_identity = _request_identity(action)
 
     # 证据 ID 不包含可变自然语言内容，避免措辞微调破坏同一来源在报告中的稳定引用。
     evidence = [
@@ -64,6 +66,7 @@ def normalize_observation(
                 "ev",
                 action.arguments.trace_id,
                 action.tool_name.value,
+                request_identity,
                 item.source_id,
             ),
             source_type=EvidenceSourceType.TOOL,
@@ -85,6 +88,7 @@ def normalize_observation(
             "evt",
             action.arguments.trace_id,
             tool_slug,
+            request_identity,
             str(attempt),
         ),
         trace_id=action.arguments.trace_id,
@@ -137,3 +141,18 @@ def _stable_id(prefix: str, *parts: str) -> str:
 
     digest = sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
     return f"{prefix}_{digest}"
+
+
+def _request_identity(action: ToolAction) -> str:
+    """将 ToolAction 参数编码为稳定 JSON，避免同工具不同请求共享审计 ID。
+
+    字段按键排序并使用紧凑 UTF-8 JSON，确保字典顺序和空格不影响身份；完整请求包含资源、
+    时间窗、场景和 trace，因此同一运行内合法的不同参数调用会得到不同 Evidence/Event ID。
+    """
+
+    return json.dumps(
+        action.arguments.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )

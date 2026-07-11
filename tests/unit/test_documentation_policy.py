@@ -16,6 +16,7 @@ MIN_CALLABLE_DOCSTRING_LENGTH = 80
 CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/api/main.py"),
     Path("app/capabilities/registry.py"),
+    Path("app/orchestration/react_loop.py"),
     Path("app/mcp/client.py"),
     Path("app/mcp/executor.py"),
     Path("app/mcp/observation.py"),
@@ -38,6 +39,7 @@ REQUIRED_GUIDE_SECTIONS = (
     "PostgreSQL、SQLAlchemy、Alembic 与 pgvector",
     "显式 GraphRAG 路径",
     "固定 runtime capability registry",
+    "LangGraph 有界 ReAct",
     "测试分层",
 )
 
@@ -169,6 +171,22 @@ def test_runtime_capability_prompt_contract_is_versioned_and_bounded() -> None:
     )
     assert "registry 不解析自然语言，也不调用 LLM、MCP、检索或记忆服务" in prompt_contract
     assert "实时 Observation 都高于案例和知识证据" in prompt_contract
+
+
+def test_langgraph_react_runtime_contract_is_versioned_and_explicit() -> None:
+    """确认 Prompt 文档记录真实 LangGraph 循环、停止原因和 Action 计数口径。
+
+    该门禁防止实现退化为手写单轮函数，或把 MCP 内部重试误算成 Planner 步数；同时要求文档
+    明确模型适配器仍是独立边界，不能把测试 Scripted Planner 宣传成生产 Agent。
+    """
+
+    prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
+
+    assert "langgraph-react-loop:v1" in prompt_contract
+    assert "Planner → execute_tool → Observation → Planner" in prompt_contract
+    assert "MCP 执行器内部的瞬时重试不增加 `react_step`" in prompt_contract
+    assert "duplicate_action_blocked" in prompt_contract
+    assert "当前契约不代表具体 LLM Provider 已完成" in prompt_contract
 
 
 def test_ablation_report_labels_measured_values_and_honest_zero_gain() -> None:

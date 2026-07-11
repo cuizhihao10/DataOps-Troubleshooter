@@ -126,7 +126,7 @@ Golden Case 描述“一个诊断应该做什么”，Fixture 描述“工具会
 
 执行器只对 `TIMEOUT` 和 `SERVICE_UNAVAILABLE` 重试一次。空结果、权限拒绝和非法请求继续重试不会增加信息，因此直接返回。
 
-每次尝试都生成独立 `ToolEvent`，事件 ID 包含 trace、工具名和 attempt 的稳定摘要。即使第二次成功，也保留第一次失败，便于观察延迟、失败率和真实调查过程。
+每次尝试都生成独立 `ToolEvent`，事件 ID 包含 trace、工具名、规范化请求和 attempt 的稳定摘要。即使第二次成功，也保留第一次失败，便于观察延迟、失败率和真实调查过程；同一工具查询不同资源或时间窗时也不会发生 ID 冲突。
 
 ## 6. FastAPI lifespan 与健康检查
 
@@ -293,10 +293,91 @@ FastAPI lifespan 构造默认注册表、校验配置中的 `runtime-capabilitie
 显式失败，不会静默选择近似策略。单元测试覆盖五项集合、BDS 工具过滤、三类历史触发、实时
 证据优先文案、非法组件组合和无执行钩子 Schema；健康集成测试覆盖启动接线。
 
-## 10. 测试分层
+## 10. LangGraph 有界 ReAct
 
-- 单元测试：Pydantic 约束、Fixture、Prompt Schema、Observation、固定 capability registry、Provider 稳定性、向量元数据、混合评分、Evidence Bundle 预算和消融 Schema。
-- MCP 集成测试：真实 stdio 握手、九工具发现、成功/失败响应和重试 trace。
+### 10.1 为什么必须使用真实状态图
+
+`app/orchestration/react_loop.py` 使用 LangGraph 1.x `StateGraph` 编译固定拓扑，而不是在一个
+while 循环中手工模仿节点名称。依赖通过 `pyproject.toml` 声明为 `langgraph>=1.2,<2`，当前
+锁文件解析为 1.2.2；锁文件由 pip-compile 生成，不手工编辑传递依赖。
+
+图的最小闭环是：
+
+```text
+START
+  -> select_capabilities
+  -> planner_react
+       -> execute_tool
+       -> planner_react
+       -> END
+```
+
+`select_capabilities` 调用固定 registry，并把意图和名称注入 AgentState；`planner_react` 调用
+可替换 `PlannerAgent` 协议，接收结构化 PlannerDecision；`execute_tool` 使用注入执行器跨真实
+MCP，随后原子回写 Evidence、ToolEvent、observation_refs 和 react_step。
+
+LangGraph 的 state_schema 使用 `ReactGraphState` Pydantic 模型。每个节点接收和返回强类型
+模型，框架最终给出的映射也立即通过 `model_validate` 重建。Planner、Executor、Registry 和
+截止时间通过 `context_schema=ReactGraphRuntime` 注入，不进入 checkpoint，也不会与并发运行
+共享可变状态。
+
+### 10.2 Planner 协议为何不是占位 Agent
+
+`app/agents/planner.py` 的 `PlannerAgent` 是依赖反转边界：生产实现必须接收
+`PlannerTurnContext` 并返回 `PlannerDecision`。它不提供工具执行或 Observation 写入方法，因而
+模型供应商适配器不能绕过图节点。当前仅完成协议和控制器，尚未完成 OpenAI-compatible Chat
+Provider、Prompt 渲染、输出修复或 Auditor；测试中的 Scripted Planner 只验证控制流，不冒充
+真实智能诊断结果。
+
+PlannerTurnContext 会再次检查 AgentState.intent、active_capabilities 和 CapabilitySelection
+一致，并拒绝预算耗尽后的模型调用。remaining_time_ms 来自控制器的单调时钟截止时间，模型只能
+看到剩余预算，不能自行延长。
+
+### 10.3 Action 门禁与重复检测
+
+PlannerDecision 通过 Pydantic 只证明 JSON 结构合法，仍不足以安全执行。控制器在 MCP 前依次
+检查：引用是否存在、工具是否属于当前组件范围、trace_id 是否等于 run_id、Action 是否已经
+执行。任何失败都生成 `policy_blocked` 事件和公开 stop_reason，不调用 Executor。
+
+重复检测将完整 ToolAction 规范化为排序键、紧凑分隔符的 UTF-8 JSON，再计算 SHA-256。参数
+中包含资源、时间窗、场景和 trace；因此真正同参会被拦截，同工具不同资源仍允许执行。恢复已有
+AgentState 时，控制器从 ToolEvent 重建指纹，checkpoint 不能成为重复调用绕过路径。
+
+MCP 内部 TIMEOUT/SERVICE_UNAVAILABLE 重试仍由 McpToolExecutor 负责。一次 Planner Action
+无论产生一个还是两个 ToolEvent，react_step 都只增加一；这样“最多 6 步”表达调查决策预算，
+不会被传输重试歪曲，同时总网络尝试仍完整可审计。
+
+### 10.4 总超时与最后完整状态
+
+`DATAOPS_REACT_TOTAL_TIMEOUT_SECONDS` 默认 60 秒，覆盖 LangGraph 调度、Planner 等待和 MCP
+执行，独立于单工具 timeout。控制器使用 `asyncio.timeout` 取消超时节点，并以 LangGraph
+`astream(stream_mode="values")` 持续保存最后一个完整 Pydantic 状态。这样第二次工具卡住时，
+第一次已经取得的证据不会因为总超时丢失；终态追加 `total_timeout`，但不会伪造失败节点结果。
+
+递归上限按 `max_steps * 2 + 6` 设置，覆盖路由、每次 execute/planner 回边和最终预算检查。
+它是框架死循环的第二道防线，业务停止仍由 react_step 和 stop_reason 决定。
+
+### 10.5 公开事件与审计 ID
+
+`ReactPublicEvent` 只记录稳定 ID、序号、类型、公开摘要、工具名、Observation 引用和停止原因，
+不包含 Thought。终止类事件强制 stop_reason；`ReactRunResult` 强制最终 AgentState 和最后事件都
+处于可解释终态，防止条件边错误导致无声结束。
+
+Evidence 与 ToolEvent 的稳定 ID 现在包含规范化请求身份。此前同一 trace 内同一工具查询不同
+资源可能共享事件 ID；加入资源、时间窗、场景和 trace 后，不同参数调用可独立寻址，而完全相同
+请求重放仍稳定。合并状态时若同 ID 的结构化载荷不同，控制器显式失败，不覆盖旧审计事实。
+
+### 10.6 验证范围
+
+单元测试覆盖 capability 注入、Action/Observation 回写、同参拦截、组件越界、trace 漂移、
+无效证据引用、步数耗尽、总超时和不同参数审计 ID。集成测试用 Scripted Planner 发出
+`lts.get_task_status`，Action 必须经过 LangGraph 和真实 stdio MCP，再由第二轮 Planner 读取
+回写证据并 finish。该测试证明控制器闭环真实存在，但不宣称模型推理或 Auditor 已完成。
+
+## 11. 测试分层
+
+- 单元测试：Pydantic 约束、Fixture、Prompt Schema、Observation、固定 capability registry、LangGraph ReAct 门禁、Provider 稳定性、向量元数据、混合评分、Evidence Bundle 预算和消融 Schema。
+- MCP/编排集成测试：真实 stdio 握手、九工具发现、成功/失败响应、重试 trace，以及 Planner → Action → Observation → Planner 回环。
 - PostgreSQL 集成测试：迁移、pgvector 扩展、带 Provider 溯源的幂等种子、cosine/全文双路检索、混合评分、预算 Bundle、vector-only/vector+graph 与删边消融。
 - Docker 验证：从镜像安装依赖，等待 PostgreSQL 健康，执行迁移/种子，再检查 API `/health`。
 
@@ -307,7 +388,7 @@ $env:DATAOPS_TEST_DATABASE_URL='postgresql+asyncpg://...'
 python -m pytest -m postgres
 ```
 
-## 11. 配置与生成文件说明
+## 12. 配置与生成文件说明
 
 | 文件 | 为什么不逐行注释 | 如何理解和验证 |
 |---|---|---|
@@ -317,7 +398,7 @@ python -m pytest -m postgres
 | `data/evals/*.json` | 标准评测数据不能加入非标准注释。 | `GraphAblationCase` Schema、快速加载测试、本文档和实测报告。 |
 | PNG / DOCX | 二进制格式不能可靠保存代码式注释。 | Markdown 产品基线、本文档和正式阅读版正文。 |
 
-## 12. 当前完成度与下一步
+## 13. 当前完成度与下一步
 
 已经完成：
 
@@ -329,10 +410,12 @@ python -m pytest -m postgres
 - 全文/向量种子合并去重、五项可解释评分和 1–2 跳显式路径扩展。
 - 预算化 Evidence Bundle、稳定节点/路径引用和 vector-only/vector+graph 消融。
 - 五项固定 runtime capabilities、确定性 registry、历史按需触发和健康检查契约审计。
+- LangGraph capability 注入、有界 Planner Action/Observation 控制器、公开事件和真实 MCP 回环。
 
 尚未完成：
 
 - 模型级 Embedding Provider（当前默认实现是离线 feature hashing 基线）。
-- LangGraph Planner ReAct / Auditor 双 Agent。
+- OpenAI-compatible Planner 模型适配器、Prompt 渲染与结构化输出修复。
+- 报告草稿、Auditor Agent 与一次返工图节点。
 - 长期记忆确认、去重和召回。
 - 28 个 Golden Cases 和消融报告。

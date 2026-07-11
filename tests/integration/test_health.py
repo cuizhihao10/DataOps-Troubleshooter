@@ -47,11 +47,13 @@ async def test_health_reports_validated_contract_baseline() -> None:
         "mcp": "mcp-tools:v1",
         "golden_case": "golden-case:v1",
         "runtime_capabilities": "runtime-capabilities:v1",
+        "react_loop": "langgraph-react-loop:v1",
         "graph_retrieval": "graphrag-retrieval:v2",
         "graph_evidence_bundle": "graphrag-evidence-bundle:v1",
     }
     assert payload["limits"] == {
         "max_react_steps": 6,
+        "react_total_timeout_seconds": 60.0,
         "max_graph_hops": 2,
         "max_audit_revisions": 1,
         "tool_retry_count": 1,

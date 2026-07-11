@@ -209,6 +209,43 @@ Evidence Bundle 的上下文主体契约如下：
 
 `used_bytes` 精确计算 `selected_nodes` 和 `selected_paths` 的规范 UTF-8 JSON 大小，不包含预算诊断元数据。路径只有在其全部节点、边和来源能一起进入预算时才允许注入；`truncated=true` 时 Planner 必须把 omitted IDs 视为“未注入上下文”，不能解释为知识库不存在这些候选。
 
+### 2.7 LangGraph 有界 ReAct 运行契约
+
+运行控制器使用 `langgraph-react-loop:v1`。固定图拓扑为：
+
+```text
+select_capabilities
+  -> planner_react
+       -> execute_tool -> Observation -> planner_react
+       -> end
+```
+
+也就是实际执行 `Planner → execute_tool → Observation → Planner`，而不是在 Prompt 中描述一个
+并未发生的循环。`select_capabilities` 把 `runtime-capabilities:v1` 的意图和活动能力写入
+`AgentState`；`planner_react` 只接受 `PlannerDecision`；`execute_tool` 只能调用注入的真实 MCP
+执行器并回写 Evidence、ToolEvent 和 observation_refs。
+
+`react_step` 只统计 Planner 选择且真正进入执行节点的 ToolAction。MCP 执行器内部的瞬时重试不增加 `react_step`，但每次尝试仍保留独立 ToolEvent。控制器在 Planner 前检查最大 Action 数，
+并用独立墙钟预算覆盖图调度、Planner 和工具等待；默认值分别为 6 步和 60 秒。
+
+确定性门禁在任何 MCP I/O 前执行：
+
+- 工具必须属于本轮 capability 允许的组件范围；
+- `trace_id` 必须等于当前 `run_id`；
+- Planner 的 evidence_refs 必须已存在于 Evidence 或 GraphRAG path 集合；
+- 工具名与规范化参数的 SHA-256 指纹不得重复；工具内部重试已经消费允许的重试预算；
+- 相同工具但资源、时间窗或场景不同属于不同 Action，并得到不同审计 ID。
+
+控制器主动停止原因包括 `react_budget_exhausted`、`total_timeout`、
+`duplicate_action_blocked`、`tool_not_allowed_by_capability`、`trace_id_mismatch` 和
+`invalid_evidence_reference`。Planner 的 `finish` / `need_user_input` 则保留其经过 Schema 校验的
+公开 stop_reason。运行事件只包含路由、decision_summary、工具名、Observation 引用和停止原因，
+不保存 Thought。
+
+当前契约不代表具体 LLM Provider 已完成。`PlannerAgent` 只是 OpenAI-compatible 适配器必须实现
+的异步协议；集成测试使用 Scripted Planner 隔离模型波动，但 Action 必须穿过真实 stdio MCP。
+模型 Prompt 渲染、结构化输出修复和 Auditor 仍属于后续切片，不能把测试替身宣传成生产 Agent。
+
 ## 3. GraphRAG 实体与关系抽取 Prompt
 
 ### 3.1 用途和边界

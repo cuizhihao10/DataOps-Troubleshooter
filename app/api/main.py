@@ -19,6 +19,7 @@ from app.core.fixture_registry import FixtureRegistry, load_golden_cases
 from app.core.settings import get_settings
 from app.domain.tooling import ToolName
 from app.mcp.client import StdioMcpClient
+from app.orchestration import REACT_LOOP_CONTRACT_ID
 from app.persistence.database import (
     check_database_connection,
     create_database_engine,
@@ -35,10 +36,10 @@ from app.retrieval.repository import PostgresGraphRepository
 
 
 class ContractVersions(BaseModel):
-    """描述健康检查公开的 Prompt、工具、评测、capability 和 GraphRAG 契约标识。
+    """描述健康检查公开的 Prompt、工具、评测、capability、ReAct 与 GraphRAG 契约标识。
 
-    客户端可判断 Planner、MCP、Golden Case、固定能力组合和两类检索上下文是否与预期环境
-    一致；严格额外字段策略避免展示脚本静默依赖已经漂移的响应。
+    客户端可判断 Planner、MCP、Golden Case、固定能力、LangGraph 循环和两类检索上下文是否
+    与预期环境一致；严格额外字段策略避免展示脚本静默依赖已经漂移的响应。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -47,6 +48,7 @@ class ContractVersions(BaseModel):
     mcp: str
     golden_case: str
     runtime_capabilities: str
+    react_loop: str
     graph_retrieval: str
     graph_evidence_bundle: str
 
@@ -54,13 +56,14 @@ class ContractVersions(BaseModel):
 class RuntimeLimits(BaseModel):
     """公开影响诊断成本和终止条件的集中式运行预算。
 
-    这些值来自经过 Pydantic 校验的 Settings，而不是散落在节点中的魔法数字；健康接口
-    暴露预算便于面试演示和故障排查确认当前实例采用了哪组安全边界。
+    这些值来自经过 Pydantic 校验的 Settings，而不是散落在节点中的魔法数字；Action 数和
+    总墙钟分别限制循环深度与整体等待时间，健康接口公开它们以确认当前实例安全边界。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     max_react_steps: int
+    react_total_timeout_seconds: float
     max_graph_hops: int
     max_audit_revisions: int
     tool_retry_count: int
@@ -112,10 +115,9 @@ class HealthResponse(BaseModel):
 async def lifespan(app: FastAPI):
     """在 FastAPI 接流量前审计强依赖，并在停机时释放数据库连接池。
 
-    启动阶段依次校验本地合成数据、版本化 Prompt、真实 MCP 工具发现以及可选 PostgreSQL
-    图数据；任一步失败都会中止启动，使错误靠近配置源而不是延迟到诊断请求。通过检查后，
-    只把经过验证的对象写入 `app.state` 供路由只读复用。生成器退出时无论正常停机还是异常
-    取消都会关闭异步连接池，防止测试重启或容器退出后遗留连接。
+    启动阶段依次校验本地合成数据、版本化 Prompt/capability/ReAct 契约、真实 MCP 工具发现
+    以及可选 PostgreSQL 图数据；任一步失败都会中止启动，使错误靠近配置源。通过检查后只把
+    已验证对象写入 `app.state` 供路由只读复用；退出时始终关闭异步连接池，避免遗留连接。
     """
 
     settings = get_settings()
@@ -144,6 +146,8 @@ async def lifespan(app: FastAPI):
     capability_registry = get_capability_registry()
     if settings.capabilities_contract_id != CAPABILITY_CONTRACT_ID:
         raise ValueError("configured capability contract ID does not match the package")
+    if settings.react_loop_contract_id != REACT_LOOP_CONTRACT_ID:
+        raise ValueError("configured ReAct loop contract ID does not match the package")
 
     # Provider 工厂在任何部署模式都执行，使未知 ID 或非法维度不能等到首次检索才失败。
     embedding_provider = create_embedding_provider(
@@ -243,11 +247,13 @@ async def health(request: Request) -> HealthResponse:
             mcp=settings.mcp_contract_id,
             golden_case=settings.golden_case_contract_id,
             runtime_capabilities=settings.capabilities_contract_id,
+            react_loop=settings.react_loop_contract_id,
             graph_retrieval=settings.graphrag_retrieval_contract_id,
             graph_evidence_bundle=settings.graphrag_evidence_bundle_contract_id,
         ),
         limits=RuntimeLimits(
             max_react_steps=settings.max_react_steps,
+            react_total_timeout_seconds=settings.react_total_timeout_seconds,
             max_graph_hops=settings.max_graph_hops,
             max_audit_revisions=settings.max_audit_revisions,
             tool_retry_count=settings.tool_retry_count,
