@@ -13,15 +13,21 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict
 
 from app import __version__
+from app.agents.auditor_chat import AUDITOR_PROVIDER_CONTRACT_ID
 from app.agents.chat import PLANNER_PROVIDER_CONTRACT_ID
-from app.agents.factory import create_planner_runtime
-from app.agents.prompts import PLANNER_PROMPT_ID, load_planner_prompt
+from app.agents.factory import create_auditor_runtime, create_planner_runtime
+from app.agents.prompts import (
+    AUDITOR_PROMPT_ID,
+    PLANNER_PROMPT_ID,
+    load_auditor_prompt,
+    load_planner_prompt,
+)
 from app.capabilities import CAPABILITY_CONTRACT_ID, get_capability_registry
 from app.core.fixture_registry import FixtureRegistry, load_golden_cases
 from app.core.settings import get_settings
 from app.domain.tooling import ToolName
 from app.mcp.client import StdioMcpClient
-from app.orchestration import REACT_LOOP_CONTRACT_ID
+from app.orchestration import AUDITED_REPORT_WORKFLOW_CONTRACT_ID, REACT_LOOP_CONTRACT_ID
 from app.persistence.database import (
     check_database_connection,
     create_database_engine,
@@ -48,10 +54,13 @@ class ContractVersions(BaseModel):
 
     planner_prompt: str
     planner_provider: str
+    auditor_prompt: str
+    auditor_provider: str
     mcp: str
     golden_case: str
     runtime_capabilities: str
     react_loop: str
+    audited_report_workflow: str
     graph_retrieval: str
     graph_evidence_bundle: str
 
@@ -104,6 +113,23 @@ class PlannerConfiguration(BaseModel):
     schema_repair_count: int
 
 
+class AuditorConfiguration(BaseModel):
+    """公开 Auditor Provider 的非敏感配置和启用状态。
+
+    Auditor 与 Planner 使用相同端点/模型但拥有独立 Prompt、Schema 和修复预算；响应不包含 API
+    key 或完整认证 URL。configured 仅表示本地运行时可构造，不冒充已请求远端模型。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["disabled", "configured"]
+    provider: str
+    model: str
+    endpoint_host: str
+    timeout_seconds: float
+    schema_repair_count: int
+
+
 class HealthResponse(BaseModel):
     """定义 `/health` 返回的已验证依赖、数据规模与契约快照。
 
@@ -129,6 +155,7 @@ class HealthResponse(BaseModel):
     contracts: ContractVersions
     limits: RuntimeLimits
     planner: PlannerConfiguration
+    auditor: AuditorConfiguration
     retrieval: RetrievalConfiguration
 
 
@@ -158,6 +185,12 @@ async def lifespan(app: FastAPI):
         raise ValueError("planner prompt must not be empty")
     if settings.planner_provider_contract_id != PLANNER_PROVIDER_CONTRACT_ID:
         raise ValueError("configured Planner provider contract ID does not match the package")
+    if settings.auditor_prompt_id != AUDITOR_PROMPT_ID:
+        raise ValueError("configured Auditor prompt ID does not match the packaged prompt")
+    if not load_auditor_prompt().strip():
+        raise ValueError("Auditor prompt must not be empty")
+    if settings.auditor_provider_contract_id != AUDITOR_PROVIDER_CONTRACT_ID:
+        raise ValueError("configured Auditor provider contract ID does not match the package")
     if settings.graphrag_retrieval_contract_id != GRAPH_RETRIEVAL_CONTRACT_ID:
         raise ValueError("configured GraphRAG retrieval contract ID does not match the package")
     if settings.graphrag_evidence_bundle_contract_id != GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID:
@@ -171,6 +204,10 @@ async def lifespan(app: FastAPI):
         raise ValueError("configured capability contract ID does not match the package")
     if settings.react_loop_contract_id != REACT_LOOP_CONTRACT_ID:
         raise ValueError("configured ReAct loop contract ID does not match the package")
+    if settings.audited_report_workflow_contract_id != AUDITED_REPORT_WORKFLOW_CONTRACT_ID:
+        raise ValueError(
+            "configured audited report workflow contract ID does not match the package"
+        )
 
     # Provider 工厂在任何部署模式都执行，使未知 ID 或非法维度不能等到首次检索才失败。
     embedding_provider = create_embedding_provider(
@@ -191,44 +228,50 @@ async def lifespan(app: FastAPI):
     knowledge_nodes_loaded = 0
     knowledge_edges_loaded = 0
     knowledge_nodes_embedded = 0
-    if settings.database_url is not None:
-        # 数据库是可选依赖：纯单测模式明确标记 disabled，配置后则必须真正可连接且可查询。
-        database_engine = create_database_engine(settings.database_url.get_secret_value())
-        await check_database_connection(database_engine)
-        factory = create_session_factory(database_engine)
-        async with factory() as session:
-            repository = PostgresGraphRepository(session)
-            knowledge_nodes_loaded, knowledge_edges_loaded = await repository.count_graph()
-            knowledge_nodes_embedded = await repository.count_embedded_nodes(
-                provider_id=embedding_provider.provider_id,
-                dimensions=embedding_provider.dimensions,
-            )
-            if knowledge_nodes_embedded != knowledge_nodes_loaded:
-                raise ValueError(
-                    "all knowledge nodes must be embedded in the configured provider space"
-                )
-        database_status = "ok"
-
-    # 放在所有远程/数据库启动检查之后构造，避免后续初始化失败遗留尚未进入 lifespan 的 HTTP 池。
-    # disabled 返回 None；启用时只构造 SDK/Prompt 边界，不发送付费或有副作用的探测请求。
-    planner_runtime = create_planner_runtime(settings)
-
-    # 只有所有检查完成后才发布共享状态，避免路由观察到半初始化的依赖集合。
-    app.state.settings = settings
-    app.state.fixture_registry = fixture_registry
-    app.state.golden_cases = golden_cases
-    app.state.mcp_tools_available = mcp_tools_available
-    app.state.capability_registry = capability_registry
-    app.state.planner_runtime = planner_runtime
-    app.state.database_engine = database_engine
-    app.state.database_status = database_status
-    app.state.knowledge_nodes_loaded = knowledge_nodes_loaded
-    app.state.knowledge_edges_loaded = knowledge_edges_loaded
-    app.state.knowledge_nodes_embedded = knowledge_nodes_embedded
+    planner_runtime = None
+    auditor_runtime = None
     try:
+        if settings.database_url is not None:
+            # 数据库是可选依赖：纯单测模式标记 disabled；配置后则必须真正连接并查询。
+            database_engine = create_database_engine(settings.database_url.get_secret_value())
+            await check_database_connection(database_engine)
+            factory = create_session_factory(database_engine)
+            async with factory() as session:
+                repository = PostgresGraphRepository(session)
+                knowledge_nodes_loaded, knowledge_edges_loaded = await repository.count_graph()
+                knowledge_nodes_embedded = await repository.count_embedded_nodes(
+                    provider_id=embedding_provider.provider_id,
+                    dimensions=embedding_provider.dimensions,
+                )
+                if knowledge_nodes_embedded != knowledge_nodes_loaded:
+                    raise ValueError(
+                        "all knowledge nodes must be embedded in the configured provider space"
+                    )
+            database_status = "ok"
+
+        # 在数据库审计后构造两个模型角色；若第二个失败，finally 会关闭已经创建的第一个。
+        # disabled 返回 None；启用时只创建 SDK/Prompt 边界，不发送付费或有副作用的探测请求。
+        planner_runtime = create_planner_runtime(settings)
+        auditor_runtime = create_auditor_runtime(settings)
+
+        # 只有全部检查完成后才发布共享状态，避免路由观察到半初始化的依赖集合。
+        app.state.settings = settings
+        app.state.fixture_registry = fixture_registry
+        app.state.golden_cases = golden_cases
+        app.state.mcp_tools_available = mcp_tools_available
+        app.state.capability_registry = capability_registry
+        app.state.planner_runtime = planner_runtime
+        app.state.auditor_runtime = auditor_runtime
+        app.state.database_engine = database_engine
+        app.state.database_status = database_status
+        app.state.knowledge_nodes_loaded = knowledge_nodes_loaded
+        app.state.knowledge_edges_loaded = knowledge_edges_loaded
+        app.state.knowledge_nodes_embedded = knowledge_nodes_embedded
         yield
     finally:
-        # 先关闭模型 HTTP 池，再释放数据库池；两者均不吞异常，避免测试重启后遗留资源。
+        # 先按角色关闭模型 HTTP 池，再释放数据库池；均不吞异常，避免测试重启后遗留资源。
+        if auditor_runtime is not None:
+            await auditor_runtime.aclose()
         if planner_runtime is not None:
             await planner_runtime.aclose()
         if database_engine is not None:
@@ -275,10 +318,13 @@ async def health(request: Request) -> HealthResponse:
         contracts=ContractVersions(
             planner_prompt=settings.planner_prompt_id,
             planner_provider=settings.planner_provider_contract_id,
+            auditor_prompt=settings.auditor_prompt_id,
+            auditor_provider=settings.auditor_provider_contract_id,
             mcp=settings.mcp_contract_id,
             golden_case=settings.golden_case_contract_id,
             runtime_capabilities=settings.capabilities_contract_id,
             react_loop=settings.react_loop_contract_id,
+            audited_report_workflow=settings.audited_report_workflow_contract_id,
             graph_retrieval=settings.graphrag_retrieval_contract_id,
             graph_evidence_bundle=settings.graphrag_evidence_bundle_contract_id,
         ),
@@ -296,6 +342,14 @@ async def health(request: Request) -> HealthResponse:
             endpoint_host=settings.chat_base_url.host or "",
             timeout_seconds=settings.chat_timeout_seconds,
             schema_repair_count=settings.planner_schema_repair_count,
+        ),
+        auditor=AuditorConfiguration(
+            status=("disabled" if request.app.state.auditor_runtime is None else "configured"),
+            provider=settings.chat_provider,
+            model=settings.chat_model,
+            endpoint_host=settings.chat_base_url.host or "",
+            timeout_seconds=settings.chat_timeout_seconds,
+            schema_repair_count=settings.auditor_schema_repair_count,
         ),
         retrieval=RetrievalConfiguration(
             embedding_provider=settings.embedding_provider,

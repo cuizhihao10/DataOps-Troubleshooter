@@ -1,7 +1,7 @@
-"""验证 Planner Provider 的 disabled 默认值、SecretStr 边界与运行时工厂。
+"""验证 Planner/Auditor Provider 的 disabled 默认值、SecretStr 边界与运行时工厂。
 
-配置测试不发送网络请求，只确认无 key 环境可以启动，启用 Provider 时必须提供密钥，并且健康/
-对象 repr 不泄露明文。注入 SDK 客户端用于验证工厂接线而不创建额外连接池。
+配置测试不发送网络请求，只确认无 key 环境可以启动，启用两个角色时必须提供密钥，并且对象
+repr 不泄露明文。注入 SDK 客户端用于验证两个工厂接线和资源所有权。
 """
 
 import httpx
@@ -9,7 +9,7 @@ import pytest
 from openai import AsyncOpenAI
 from pydantic import ValidationError
 
-from app.agents.factory import create_planner_runtime
+from app.agents.factory import create_auditor_runtime, create_planner_runtime
 from app.core.settings import Settings
 
 
@@ -25,6 +25,7 @@ def test_default_settings_keep_paid_planner_provider_disabled() -> None:
     assert settings.chat_provider == "disabled"
     assert settings.chat_api_key is None
     assert create_planner_runtime(settings) is None
+    assert create_auditor_runtime(settings) is None
 
 
 def test_enabled_provider_requires_secret_key_and_rejects_url_credentials() -> None:
@@ -77,6 +78,44 @@ async def test_factory_builds_runtime_without_exposing_secret_or_owning_injected
 
     assert runtime is not None
     assert "local_test_secret" not in repr(settings)
+    await runtime.aclose()
+    assert not http_client.is_closed
+    await sdk_client.close()
+
+
+@pytest.mark.asyncio
+async def test_auditor_factory_builds_independent_runtime_without_network_probe() -> None:
+    """验证启用配置可构造独立 Auditor，且关闭 runtime 不关闭注入客户端。
+
+    MockTransport 若收到请求会失败，证明工厂只加载/审计 Prompt 与构造对象；随后 runtime.aclose
+    不关闭外部连接池，测试最后显式释放，明确资源所有权。
+    """
+
+    async def unexpected_request(request: httpx.Request) -> httpx.Response:
+        """拒绝任何构造期 HTTP 请求，防止健康启动产生付费模型探测。
+
+        request 只用于错误定位；函数总是抛 AssertionError，不返回合成模型结果。
+        """
+
+        raise AssertionError(f"unexpected Auditor request to {request.url.host}")
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(unexpected_request))
+    sdk_client = AsyncOpenAI(
+        api_key="local_test_secret",
+        base_url="https://example.test/v1",
+        http_client=http_client,
+        max_retries=0,
+    )
+    settings = Settings(
+        _env_file=None,
+        chat_provider="openai-compatible",
+        chat_base_url="https://example.test/v1",
+        chat_api_key="local_test_secret",
+    )
+
+    runtime = create_auditor_runtime(settings, client=sdk_client)
+
+    assert runtime is not None
     await runtime.aclose()
     assert not http_client.is_closed
     await sdk_client.close()

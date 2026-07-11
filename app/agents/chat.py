@@ -126,7 +126,7 @@ class OpenAICompatiblePlannerProvider:
                 response_format=PlannerDecision,
             )
         except ValidationError as exc:
-            raw_output, summary = _validation_failure_details(exc)
+            raw_output, summary = validation_failure_details(exc)
             raise PlannerOutputValidationError(
                 validation_summary=summary,
                 raw_output=raw_output,
@@ -192,7 +192,7 @@ class OpenAICompatiblePlannerProvider:
             await self._client.close()
 
 
-def _validation_failure_details(exc: ValidationError) -> tuple[str, str]:
+def validation_failure_details(exc: ValidationError) -> tuple[str, str]:
     """从 SDK/Pydantic 校验错误提取截断原输出和不含敏感响应体的错误摘要。
 
     errors() 中的 input 是 SDK 尝试解析的 assistant content，可用于一次修复；summary 只保留字段

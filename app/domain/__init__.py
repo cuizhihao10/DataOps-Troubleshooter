@@ -6,10 +6,18 @@
 
 from app.domain.models import (
     AgentState,
+    AuditIssue,
+    AuditIssueCode,
+    AuditResult,
+    AuditStatus,
     CaseMemory,
     DiagnosisReport,
     Evidence,
+    FaultChainStep,
     FaultHypothesis,
+    RemediationStep,
+    RiskLevel,
+    RootCauseConclusion,
     ToolEvent,
 )
 from app.domain.planner import PlannerDecision
@@ -18,14 +26,22 @@ from app.domain.tooling import McpToolRequest, McpToolResponse, ToolName
 
 __all__ = [
     "AgentState",
+    "AuditIssue",
+    "AuditIssueCode",
+    "AuditResult",
+    "AuditStatus",
     "CaseMemory",
     "DiagnosisReport",
     "Evidence",
+    "FaultChainStep",
     "FaultHypothesis",
     "GoldenCaseSpec",
     "McpToolRequest",
     "McpToolResponse",
     "PlannerDecision",
+    "RemediationStep",
+    "RiskLevel",
+    "RootCauseConclusion",
     "ScenarioFixture",
     "ToolEvent",
     "ToolName",

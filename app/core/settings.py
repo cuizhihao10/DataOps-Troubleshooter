@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     chat_api_key: SecretStr | None = None
     chat_timeout_seconds: float = Field(default=30, gt=0, le=300)
     planner_schema_repair_count: int = Field(default=1, ge=0, le=1)
+    auditor_schema_repair_count: int = Field(default=1, ge=0, le=1)
 
     embedding_provider: str = "deterministic-hash:v1"
     embedding_dimensions: int = Field(default=128, ge=8, le=4096)
@@ -69,10 +70,13 @@ class Settings(BaseSettings):
 
     planner_prompt_id: str = "planner-react:v2"
     planner_provider_contract_id: str = "openai-compatible-planner:v1"
+    auditor_prompt_id: str = "auditor-report:v1"
+    auditor_provider_contract_id: str = "openai-compatible-auditor:v1"
     mcp_contract_id: str = "mcp-tools:v1"
     golden_case_contract_id: str = "golden-case:v1"
     capabilities_contract_id: str = "runtime-capabilities:v1"
     react_loop_contract_id: str = "langgraph-react-loop:v1"
+    audited_report_workflow_contract_id: str = "audited-report-workflow:v1"
     graphrag_retrieval_contract_id: str = "graphrag-retrieval:v2"
     graphrag_evidence_bundle_contract_id: str = "graphrag-evidence-bundle:v1"
 
@@ -80,8 +84,8 @@ class Settings(BaseSettings):
     def validate_runtime_configuration(self) -> Settings:
         """在启动时联合校验检索预算和可选 Planner Provider 的安全配置。
 
-        检索模型复用权重/预算契约；Chat 端点禁止 URL 凭据，启用模型时强制 SecretStr key。
-        任一错误都会阻止半配置实例启动，而不是延迟到首次检索或模型请求。
+        检索模型复用权重/预算契约；Planner/Auditor 共享 Chat 端点，禁止 URL 凭据，启用模型时
+        强制 SecretStr key。任一错误都会阻止半配置实例启动，而不是延迟到首次模型请求。
         """
 
         self.hybrid_scoring_weights()

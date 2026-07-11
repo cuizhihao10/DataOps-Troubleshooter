@@ -105,6 +105,19 @@ class RootCauseConclusion(BaseModel):
     evidence_refs: list[str] = Field(min_length=1)
 
 
+class FaultChainStep(BaseModel):
+    """表示报告中一段必须能够追溯到现有证据的故障传播链路。
+
+    旧的自由文本列表无法判断某一段链路是否有依据；本模型把描述与至少一个 evidence_id/path_id
+    绑定，使确定性门禁和 Auditor 能逐段核对。模型不表达模型内部推理，只保存可公开结论。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: str = Field(min_length=1, max_length=2000)
+    evidence_refs: list[str] = Field(min_length=1)
+
+
 class RiskLevel(StrEnum):
     """限定修复步骤可公开的低、中、高三档风险等级。
 
@@ -129,9 +142,26 @@ class RemediationStep(BaseModel):
     order: int = Field(ge=1)
     action: str = Field(min_length=1, max_length=2000)
     risk_level: RiskLevel
+    evidence_refs: list[str] = Field(default_factory=list)
     prerequisites: list[str] = Field(default_factory=list)
     rollback: str = Field(min_length=1, max_length=2000)
     verification: str = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_high_risk_controls(self) -> RemediationStep:
+        """保证高风险建议同时具备事实依据、前置检查和可执行回滚边界。
+
+        低/中风险的只读检查可以没有证据引用，但 high 操作若缺少任一保护就会在报告构造阶段
+        失败，而不是只依赖 Prompt 提醒 Auditor。rollback/verification 已由字段非空约束保证。
+        """
+
+        # 高风险操作对错误根因更敏感，因此必须先证明必要性，再说明执行前置条件。
+        if self.risk_level is RiskLevel.HIGH:
+            if not self.evidence_refs:
+                raise ValueError("high-risk remediation requires evidence references")
+            if not self.prerequisites:
+                raise ValueError("high-risk remediation requires prerequisites")
+        return self
 
 
 class SimilarCaseReference(BaseModel):
@@ -161,13 +191,26 @@ class DiagnosisReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     summary: str = Field(min_length=1, max_length=4000)
-    fault_chain: list[str] = Field(default_factory=list)
+    fault_chain: list[FaultChainStep] = Field(default_factory=list)
     root_causes: list[RootCauseConclusion] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
     remediation_steps: list[RemediationStep] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
     similar_cases: list[SimilarCaseReference] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_remediation_order(self) -> DiagnosisReport:
+        """要求修复步骤从一开始连续编号，避免 UI 与人工执行顺序产生歧义。
+
+        空步骤列表用于证据不足的降级报告；非空列表必须严格为 1..N。该规则只校验结构顺序，
+        不把自然语言动作当作已执行事实，具体引用和语义仍由确定性门禁与 Auditor 审核。
+        """
+
+        orders = [step.order for step in self.remediation_steps]
+        if orders and orders != list(range(1, len(orders) + 1)):
+            raise ValueError("remediation order must be consecutive starting at one")
+        return self
 
 
 class MemoryStatus(StrEnum):
@@ -267,6 +310,37 @@ class AuditStatus(StrEnum):
     REVISE = "revise"
 
 
+class AuditIssueCode(StrEnum):
+    """枚举确定性规则和 Auditor 可以报告的有限审计问题类型。
+
+    代码值让 LangGraph、测试和 API 无需解析自然语言；集合只覆盖引用、事实支撑、冲突、风险、
+    案例状态、完整性与 Auditor 可用性，不允许模型借自定义代码扩张工作流分支。
+    """
+
+    INVALID_EVIDENCE_REF = "invalid_evidence_ref"
+    UNSUPPORTED_CLAIM = "unsupported_claim"
+    EVIDENCE_CONFLICT = "evidence_conflict"
+    MISSING_RISK_CONTROL = "missing_risk_control"
+    UNCONFIRMED_CASE = "unconfirmed_case"
+    REPORT_INCOMPLETE = "report_incomplete"
+    AUDITOR_UNAVAILABLE = "auditor_unavailable"
+
+
+class AuditIssue(BaseModel):
+    """保存一条可公开、可定位且不能携带新事实的结构化审计问题。
+
+    `claim_path` 使用报告字段路径定位问题，`evidence_refs` 只引用被审查的现有 ID；message 解释
+    为什么不能放行，但不得提出新的根因。严格字段边界防止自由字典进入返工控制流。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    code: AuditIssueCode
+    claim_path: str = Field(min_length=1, max_length=300)
+    message: str = Field(min_length=1, max_length=1000)
+    evidence_refs: tuple[str, ...] = ()
+
+
 class AuditResult(BaseModel):
     """保存 Auditor 的接受/返工结论、问题列表和修订指令。
 
@@ -277,8 +351,26 @@ class AuditResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: AuditStatus
-    issues: list[str] = Field(default_factory=list)
+    issues: list[AuditIssue] = Field(default_factory=list)
     revision_instructions: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_status_payload(self) -> AuditResult:
+        """绑定 accept/revise 与问题、返工指令，形成唯一可路由的组合。
+
+        accept 必须没有问题或返工内容；revise 必须同时说明至少一个问题和一条修订指令。这样
+        LangGraph 只读取枚举即可安全路由，不会出现“口头接受但仍列出阻断问题”的矛盾状态。
+        """
+
+        if self.status is AuditStatus.ACCEPT:
+            if self.issues or self.revision_instructions:
+                raise ValueError("accepted audit cannot contain issues or revision instructions")
+            return self
+        if not self.issues:
+            raise ValueError("revise audit requires at least one issue")
+        if not self.revision_instructions:
+            raise ValueError("revise audit requires revision instructions")
+        return self
 
 
 class AgentState(BaseModel):

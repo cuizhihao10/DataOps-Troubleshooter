@@ -9,6 +9,9 @@ from pathlib import Path
 PLANNER_PROMPT_ID = "planner-react:v2"
 PLANNER_SYSTEM_PROMPT_PATH = Path(__file__).with_name("planner_react_v2_system.txt")
 PLANNER_USER_PROMPT_PATH = Path(__file__).with_name("planner_react_v2_user.txt")
+AUDITOR_PROMPT_ID = "auditor-report:v1"
+AUDITOR_SYSTEM_PROMPT_PATH = Path(__file__).with_name("auditor_report_v1_system.txt")
+AUDITOR_USER_PROMPT_PATH = Path(__file__).with_name("auditor_report_v1_user.txt")
 
 
 def load_planner_prompt_parts() -> tuple[str, str]:
@@ -36,4 +39,35 @@ def load_planner_prompt() -> str:
     return f"{system_prompt}\n\n{user_prompt}"
 
 
-__all__ = ["PLANNER_PROMPT_ID", "load_planner_prompt", "load_planner_prompt_parts"]
+def load_auditor_prompt_parts() -> tuple[str, str]:
+    """读取 v1 Auditor 的静态 system 与运行时 user 模板。
+
+    两个 UTF-8 文件分别固定角色规则和不可信审计数据；缺失、编码错误或空内容由启动审计/渲染器
+    显式失败，不回退到 Planner Prompt，也不在 Python 中拼接隐藏的供应商特定指令。
+    """
+
+    return (
+        AUDITOR_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8"),
+        AUDITOR_USER_PROMPT_PATH.read_text(encoding="utf-8"),
+    )
+
+
+def load_auditor_prompt() -> str:
+    """组合读取 Auditor 两条模板，供启动完整性检查和文档门禁使用。
+
+    运行时仍通过 `load_auditor_prompt_parts` 保持消息角色分离；本函数只提供非空审计视图，不执行
+    format 或模型请求，因此不会把用户问题提升到 system 优先级。
+    """
+
+    system_prompt, user_prompt = load_auditor_prompt_parts()
+    return f"{system_prompt}\n\n{user_prompt}"
+
+
+__all__ = [
+    "AUDITOR_PROMPT_ID",
+    "PLANNER_PROMPT_ID",
+    "load_auditor_prompt",
+    "load_auditor_prompt_parts",
+    "load_planner_prompt",
+    "load_planner_prompt_parts",
+]

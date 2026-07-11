@@ -19,7 +19,14 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/agents/chat.py"),
     Path("app/agents/planner_adapter.py"),
     Path("app/agents/prompting.py"),
+    Path("app/agents/auditor_chat.py"),
+    Path("app/agents/auditor_adapter.py"),
+    Path("app/agents/auditor_prompting.py"),
     Path("app/orchestration/react_loop.py"),
+    Path("app/orchestration/report_workflow.py"),
+    Path("app/reporting/draft.py"),
+    Path("app/reporting/policy.py"),
+    Path("app/reporting/revision.py"),
     Path("app/mcp/client.py"),
     Path("app/mcp/executor.py"),
     Path("app/mcp/observation.py"),
@@ -44,6 +51,7 @@ REQUIRED_GUIDE_SECTIONS = (
     "固定 runtime capability registry",
     "LangGraph 有界 ReAct",
     "OpenAI-compatible Planner Structured Outputs",
+    "确定性报告草稿与 Auditor Structured Outputs",
     "测试分层",
 )
 
@@ -212,6 +220,24 @@ def test_planner_v2_and_structured_output_repair_are_documented() -> None:
     assert "第二次仍无效" in prompt_contract
     assert "refusal" in prompt_contract
     assert "https://developers.openai.com/api/docs/guides/structured-outputs" in prompt_contract
+
+
+def test_auditor_prompt_and_bounded_revision_contract_are_documented() -> None:
+    """确认独立 Auditor Prompt、规则否决和一次报告返工拥有版本化契约。
+
+    门禁要求 Auditor 使用 Structured Outputs、不注册 API tools，确定性问题可否决 accept，二次
+    revise 或 Provider 失败返回 degraded；这防止实现退化成无约束的同模型自评。
+    """
+
+    prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
+
+    assert "auditor-report:v1" in prompt_contract
+    assert "openai-compatible-auditor:v1" in prompt_contract
+    assert "chat.completions.parse(response_format=AuditResult)" in prompt_contract
+    assert "确定性问题拥有最终否决权" in prompt_contract
+    assert "audited-report-workflow:v1" in prompt_contract
+    assert "最多一次报告级返工" in prompt_contract
+    assert "安全降级报告" in prompt_contract
 
 
 def test_ablation_report_labels_measured_values_and_honest_zero_gain() -> None:
