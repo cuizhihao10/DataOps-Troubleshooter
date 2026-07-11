@@ -17,7 +17,7 @@ from app.memory.models import (
 )
 from app.memory.repository import PostgresCaseMemoryRepository
 from app.memory.service import CaseMemoryService
-from app.orchestration import ReportRunResult
+from app.orchestration.report_models import ReportRunResult
 from app.retrieval.embeddings import EmbeddingProvider
 
 

@@ -577,10 +577,10 @@ FastAPI lifespan 仅在 PostgreSQL 配置并通过连接/种子检查后创建 `
 默认 limit 及 pending/confirmed/rejected 计数，但不公开数据库 URL、密码或 embedding 内容。
 
 本切片已经实现并验证候选构建、暂存/合并、两阶段去重、同 run 幂等、确认/拒绝/重新确认、默认
-搜索和 API 降级语义。完整诊断 API 尚未存在，因此还没有把 report workflow 终态自动调用
-`runtime.stage()`；已确认案例也尚未自动注册为 GraphRAG `case` 节点或建立 `SIMILAR_TO`，历史案例
-的共同点/差异点/避坑提示仍需后续 capability 编排生成，删除 API 也尚未实现。这些边界不能描述为
-已经完成。
+搜索和 API 降级语义。顶层 `AuditedDiagnosisWorkflow` 已在内部调用链中把 report 终态自动交给
+`runtime.stage()`；但完整诊断 HTTP API 尚未存在。已确认案例也尚未自动注册为 GraphRAG `case`
+节点或建立 `SIMILAR_TO`，历史案例的共同点/差异点/避坑提示仍需后续投影，删除 API 也尚未实现。
+这些边界不能描述为已经完成。
 
 ### 13.7 验证方式
 
@@ -595,7 +595,73 @@ python -m pytest -q tests/unit/test_case_memory_service.py tests/integration/tes
 python -m pytest -q tests/integration/test_case_memory_postgres.py
 ```
 
-## 14. 测试分层
+## 14. 端到端诊断编排
+
+### 14.1 为什么还需要一个顶层工作流
+
+`BoundedReactLoop` 和 `AuditedReportWorkflow` 分别解决调查与审计，但单独调用它们无法保证历史
+召回发生在 Planner 前、Auditor 使用同一历史上下文、记忆写入发生在审计后。若这些顺序散落在
+未来 API 路由中，测试很难证明没有某个入口提前写入或漏掉召回。
+
+`audited-diagnosis-workflow:v1` 因此使用第三层确定性 LangGraph 组合四个节点：
+
+```text
+recall_case_memories -> run_react -> run_report -> stage_case_memory
+```
+
+它不是第三个 Agent。节点只调用现有协议对象，Planner 与 Auditor 仍是唯二 LLM 角色；顶层状态只
+保存 Pydantic 请求、查询、confirmed matches 和三个子结果，Provider、数据库 session factory 等
+不可序列化依赖通过 LangGraph runtime context 注入。
+
+### 14.2 历史按需触发和查询预算
+
+`CapabilitySelectionRequest.history_trigger` 是唯一查询开关。`not_requested` 直接跳过数据库；
+`user_requested`、`planner_validation`、`reusable_signature` 才调用记忆 runtime。这样历史匹配仍是
+第五项按需 capability，而不是每个诊断固定支付的向量查询。
+
+查询由 `_build_memory_query` 确定性构造，顺序是用户问题、本次非 CASE_MEMORY Evidence、当前假设。
+实时 Observation 位于假设之前，使字符预算截断时优先保留本次事实；CASE_MEMORY 来源被排除，避免
+旧案例内容递归查询并强化自身。`memory_query_max_chars` 默认 4000，`memory_search_limit` 默认 5，
+都由 Pydantic 限制并在 `.env.example` 说明。
+
+### 14.3 同一 confirmed 上下文贯穿 Planner 与 Auditor
+
+记忆搜索返回 `CaseMemoryMatch(memory, similarity)`，响应模型已拒绝 pending/rejected。顶层把其中
+的 `memory` 投影为同一 tuple，分别构造 `ReactRunRequest` 和 `ReportRunRequest`；两个子模型再次
+检查 status=confirmed。这样 Planner 不能看到 Auditor 未看到的历史事实，确定性报告规则也能检查
+最终类似案例引用是否来自本轮确认上下文。
+
+similarity 目前保留在顶层 `DiagnosisRunResult.recalled_memories`，尚未进入 Planner Prompt；生产
+Builder 也尚未生成 `SimilarCaseReference` 的共同点/差异点。因此本切片证明“召回并安全注入”，
+不宣称已经完成历史对比文本生成。
+
+### 14.4 审计后 staging 与失败语义
+
+`stage_case_memory` 永远位于 report 子图之后。顶层不读取自然语言判断是否 accepted，而是把完整
+`ReportRunResult` 交给 `CaseMemoryService`：accepted 有根因时 staged/merged，accepted 无根因时
+`skipped_no_root_cause`，degraded 时 `skipped_not_accepted`。最终 `DiagnosisRunResult` 还校验 ReAct
+与 report 的 run/session 相同，并禁止 degraded 搭配写入成功状态。
+
+staging 完成后，顶层会重新通过 `ReportRunResult` Schema 构造终态，并把 `stage.memory` 同步到
+`AgentState.memory_candidate`；跳过时则明确清空该字段。最终结果再次要求 state 内候选与外层
+`memory_stage.memory` 相同，避免未来 checkpoint、run API 和直接 workflow 调用观察到两套状态。
+
+历史搜索错误在任何 Agent 调用前传播；ReAct、报告或 staging 的编程/数据库错误同样不吞掉。
+这是有意的失败策略：无历史命中是正常空列表，依赖故障不是空列表；持久化状态未知时也不能向
+调用方返回“诊断完整完成”。未来 HTTP 层应把这些异常映射为明确运行失败事件，而不是改成 200。
+
+### 14.5 验证范围与当前限制
+
+单元测试使用记录型协议替身验证 trigger、查询优先级/截断、同一案例跨子图复用、degraded 跳过和
+搜索异常短路。PostgreSQL 集成测试运行真实顶层图、真实 ReAct/报告 LangGraph 和真实 memory
+runtime：首个 session 暂存并确认，第二个 session pgvector 召回，Planner/Auditor 均收到案例，
+最终 exact signature 合并且 occurrence_count 从 1 增至 2。
+
+当前尚未提供 `/api/v1/sessions`、message/run/event 资源、LangGraph checkpoint 或顶层 runtime
+lifespan factory；也未完成 similarity/common points/differences 的 Prompt/报告投影和 GraphRAG
+`case`/`SIMILAR_TO` 注册。这些是后续切片，不应由当前内部工作流完成度代替。
+
+## 15. 测试分层
 
 - 单元测试：Pydantic 约束、Fixture、Planner/Auditor Prompt 与 Structured Output 修复、Observation、固定 capability registry、LangGraph ReAct/报告返工门禁、Provider 稳定性、向量元数据、混合评分、Evidence Bundle 预算和消融 Schema。
 - 模型/MCP/编排集成测试：官方 AsyncOpenAI MockTransport、真实 stdio 握手、九工具发现、成功/失败响应、重试 trace、Planner → Action → Observation → Planner 回环，以及规则否决 → Auditor → 唯一报告返工。
@@ -609,7 +675,7 @@ $env:DATAOPS_TEST_DATABASE_URL='postgresql+asyncpg://...'
 python -m pytest -m postgres
 ```
 
-## 15. 配置与生成文件说明
+## 16. 配置与生成文件说明
 
 | 文件 | 为什么不逐行注释 | 如何理解和验证 |
 |---|---|---|
@@ -619,7 +685,7 @@ python -m pytest -m postgres
 | `data/evals/*.json` | 标准评测数据不能加入非标准注释。 | `GraphAblationCase` Schema、快速加载测试、本文档和实测报告。 |
 | PNG / DOCX | 二进制格式不能可靠保存代码式注释。 | Markdown 产品基线、本文档和正式阅读版正文。 |
 
-## 16. 当前完成度与下一步
+## 17. 当前完成度与下一步
 
 已经完成：
 
@@ -635,10 +701,11 @@ python -m pytest -m postgres
 - Planner v2 双消息 Prompt、OpenAI-compatible Structured Outputs Provider 与一次 Schema 修复。
 - 确定性报告草稿、引用/风险门禁、独立 Auditor Structured Outputs 与最多一次报告级返工。
 - `case-memory:v1` 受控长期案例候选、pending/confirmed/rejected 决策、exact/pgvector 去重、同 run 幂等和 confirmed-only 搜索 API。
+- `audited-diagnosis-workflow:v1` 按需召回、ReAct、Auditor 和审计后 memory staging 顶层闭环。
 
 尚未完成：
 
 - 模型级 Embedding Provider（当前默认实现是离线 feature hashing 基线）。
-- 完整诊断资源 API 与 report workflow → memory staging 自动接线。
+- 完整诊断 session/message/run/event 资源 API 与顶层 runtime lifespan factory。
 - 会话 checkpoint、已确认案例 GraphRAG `case`/`SIMILAR_TO` 注册，以及历史共同点/差异点生成。
 - 删除案例 API、28 个完整 Golden Cases 和长期记忆召回评测。

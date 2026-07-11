@@ -26,7 +26,7 @@ from app.memory.models import (
     MemoryStageStatus,
     StoredCaseMemory,
 )
-from app.orchestration import ReportRunResult, ReportWorkflowOutcome
+from app.orchestration.report_models import ReportRunResult, ReportWorkflowOutcome
 from app.retrieval.embeddings import EmbeddingProvider
 
 _WHITESPACE = re.compile(r"\s+")

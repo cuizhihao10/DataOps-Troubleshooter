@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     retrieval_context_max_paths: int = Field(default=4, ge=0, le=20)
     memory_dedup_similarity_threshold: float = Field(default=0.92, ge=0, le=1)
     memory_search_limit: int = Field(default=5, ge=1, le=20)
+    memory_query_max_chars: int = Field(default=4000, ge=256, le=20_000)
 
     fixture_directory: Path = Path("data/fixtures/scenarios")
     golden_case_file: Path = Path("data/fixtures/golden_cases.json")
@@ -79,6 +80,7 @@ class Settings(BaseSettings):
     capabilities_contract_id: str = "runtime-capabilities:v1"
     react_loop_contract_id: str = "langgraph-react-loop:v1"
     audited_report_workflow_contract_id: str = "audited-report-workflow:v1"
+    diagnosis_workflow_contract_id: str = "audited-diagnosis-workflow:v1"
     case_memory_contract_id: str = "case-memory:v1"
     graphrag_retrieval_contract_id: str = "graphrag-retrieval:v2"
     graphrag_evidence_bundle_contract_id: str = "graphrag-evidence-bundle:v1"

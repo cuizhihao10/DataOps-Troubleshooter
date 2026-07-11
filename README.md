@@ -23,8 +23,9 @@
 - `auditor-report:v1` 使用独立 Structured Outputs Agent；确定性问题可否决错误 accept，`audited-report-workflow:v1` 最多返工一次，二次未通过或 Provider 不可用时返回安全降级报告。
 - `case-memory:v1` 只接收 Auditor accepted 且含根因的报告，新候选默认为 pending；exact signature 优先、pgvector cosine 次之，同 run 重放不会重复增加 occurrence。
 - `POST /api/v1/memories/{memory_id}/confirm` 支持 confirm、reject 和重新 confirm；`GET /api/v1/memories/search` 只返回 confirmed 案例，数据库未启用时明确返回 503。
+- `audited-diagnosis-workflow:v1` 按 history trigger 执行 confirmed 案例召回，并固定串联 ReAct、独立 Auditor 和审计后 memory staging；依赖失败不会伪装为空召回。
 
-当前已完成全部 MCP 工具、GraphRAG 检索闭环、五项固定 runtime capabilities、Planner ReAct 控制器、结构化报告草稿、独立 Auditor 返工协议，以及长期案例记忆的暂存、去重、确认/拒绝和 confirmed-only 搜索。默认模型 Provider 仍为 disabled，自动化测试使用真实 SDK + MockTransport，不宣称已经调用付费模型或取得模型质量成绩。完整诊断 API、会话 checkpoint、已确认案例自动注册 GraphRAG、完整历史差异生成和更多 Golden Case 仍待后续实现。
+当前已完成全部 MCP 工具、GraphRAG 检索闭环、五项固定 runtime capabilities、Planner ReAct 控制器、结构化报告草稿、独立 Auditor 返工协议、长期案例记忆，以及按需召回到审计后暂存的顶层诊断工作流。默认模型 Provider 仍为 disabled，自动化测试使用真实 SDK + MockTransport，不宣称已经调用付费模型或取得模型质量成绩。完整 session/run API、会话 checkpoint、已确认案例自动注册 GraphRAG、相似案例共同点/差异点生成和更多 Golden Case 仍待后续实现。
 
 ## 本地启动
 

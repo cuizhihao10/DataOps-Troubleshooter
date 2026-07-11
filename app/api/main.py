@@ -35,7 +35,11 @@ from app.memory import (
     MemoryDecision,
     PostgresMemoryRuntime,
 )
-from app.orchestration import AUDITED_REPORT_WORKFLOW_CONTRACT_ID, REACT_LOOP_CONTRACT_ID
+from app.orchestration import (
+    AUDITED_REPORT_WORKFLOW_CONTRACT_ID,
+    DIAGNOSIS_WORKFLOW_CONTRACT_ID,
+    REACT_LOOP_CONTRACT_ID,
+)
 from app.persistence.database import (
     check_database_connection,
     create_database_engine,
@@ -69,6 +73,7 @@ class ContractVersions(BaseModel):
     runtime_capabilities: str
     react_loop: str
     audited_report_workflow: str
+    diagnosis_workflow: str
     case_memory: str
     graph_retrieval: str
     graph_evidence_bundle: str
@@ -140,10 +145,11 @@ class AuditorConfiguration(BaseModel):
 
 
 class MemoryConfiguration(BaseModel):
-    """公开长期记忆存储状态、向量空间、去重阈值和三类状态计数。
+    """公开长期记忆存储状态、向量空间、去重/查询预算和三类状态计数。
 
     响应不包含案例正文、embedding 或数据库 URL；disabled 表示未配置 PostgreSQL，因此记忆 API
-    返回 503。Provider/维度与 GraphRAG 共用同一已验证 Embedding 空间。
+    返回 503。Provider/维度与 GraphRAG 共用同一已验证 Embedding 空间；查询字符上限约束顶层
+    诊断把实时上下文组合成历史检索文本时的成本。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -154,6 +160,7 @@ class MemoryConfiguration(BaseModel):
     embedding_dimensions: int
     dedup_similarity_threshold: float
     default_search_limit: int
+    query_max_chars: int
     counts: MemoryCounts
 
 
@@ -274,6 +281,8 @@ async def lifespan(app: FastAPI):
         raise ValueError(
             "configured audited report workflow contract ID does not match the package"
         )
+    if settings.diagnosis_workflow_contract_id != DIAGNOSIS_WORKFLOW_CONTRACT_ID:
+        raise ValueError("configured diagnosis workflow contract ID does not match the package")
     if settings.case_memory_contract_id != CASE_MEMORY_CONTRACT_ID:
         raise ValueError("configured case memory contract ID does not match the package")
 
@@ -404,6 +413,7 @@ async def health(request: Request) -> HealthResponse:
             runtime_capabilities=settings.capabilities_contract_id,
             react_loop=settings.react_loop_contract_id,
             audited_report_workflow=settings.audited_report_workflow_contract_id,
+            diagnosis_workflow=settings.diagnosis_workflow_contract_id,
             case_memory=settings.case_memory_contract_id,
             graph_retrieval=settings.graphrag_retrieval_contract_id,
             graph_evidence_bundle=settings.graphrag_evidence_bundle_contract_id,
@@ -438,6 +448,7 @@ async def health(request: Request) -> HealthResponse:
             embedding_dimensions=settings.embedding_dimensions,
             dedup_similarity_threshold=settings.memory_dedup_similarity_threshold,
             default_search_limit=settings.memory_search_limit,
+            query_max_chars=settings.memory_query_max_chars,
             counts=request.app.state.memory_counts,
         ),
         retrieval=RetrievalConfiguration(

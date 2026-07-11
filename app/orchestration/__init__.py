@@ -1,9 +1,16 @@
 """公开 DataOps Troubleshooter 的强类型 LangGraph 编排入口。
 
-包提供有界 Planner Action/Observation 循环，以及其后的确定性报告、独立 Auditor 和一次返工；
-长期记忆仍在后续切片接入。调用方不需要导入内部图节点函数。
+包提供有界 Planner Action/Observation 循环、确定性报告/独立 Auditor，以及按需历史召回和审计后
+记忆暂存的顶层诊断图。调用方不需要导入内部图节点函数。
 """
 
+from app.orchestration.diagnosis_models import (
+    DIAGNOSIS_WORKFLOW_CONTRACT_ID,
+    DiagnosisRunRequest,
+    DiagnosisRunResult,
+    DiagnosisWorkflowConfig,
+)
+from app.orchestration.diagnosis_workflow import AuditedDiagnosisWorkflow
 from app.orchestration.models import (
     REACT_LOOP_CONTRACT_ID,
     ReactEventType,
@@ -26,10 +33,15 @@ from app.orchestration.report_models import (
 from app.orchestration.report_workflow import AuditedReportWorkflow
 
 __all__ = [
+    "DIAGNOSIS_WORKFLOW_CONTRACT_ID",
     "REACT_LOOP_CONTRACT_ID",
     "AUDITED_REPORT_WORKFLOW_CONTRACT_ID",
+    "AuditedDiagnosisWorkflow",
     "AuditedReportWorkflow",
     "BoundedReactLoop",
+    "DiagnosisRunRequest",
+    "DiagnosisRunResult",
+    "DiagnosisWorkflowConfig",
     "ReactEventType",
     "ReactLoopConfig",
     "ReactPublicEvent",

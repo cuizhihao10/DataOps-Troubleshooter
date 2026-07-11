@@ -24,6 +24,7 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/agents/auditor_prompting.py"),
     Path("app/orchestration/react_loop.py"),
     Path("app/orchestration/report_workflow.py"),
+    Path("app/orchestration/diagnosis_workflow.py"),
     Path("app/reporting/draft.py"),
     Path("app/reporting/policy.py"),
     Path("app/reporting/revision.py"),
@@ -57,6 +58,7 @@ REQUIRED_GUIDE_SECTIONS = (
     "OpenAI-compatible Planner Structured Outputs",
     "确定性报告草稿与 Auditor Structured Outputs",
     "受控长期案例记忆",
+    "端到端诊断编排",
     "测试分层",
 )
 
@@ -262,6 +264,24 @@ def test_case_memory_contract_is_versioned_audited_and_confirmed_only() -> None:
     assert "same run idempotency" in prompt_contract
     assert "confirmed-only" in prompt_contract
     assert "memory_evidence" in prompt_contract
+
+
+def test_top_level_diagnosis_workflow_contract_orders_recall_audit_and_staging() -> None:
+    """确认顶层诊断契约锁定按需历史召回、双子图复用和审计后 staging 顺序。
+
+    该测试防止后续 API 接线绕过顶层 workflow，或把案例查询变成每轮默认动作。文档必须说明
+    ``recall_case_memories`` 只在 trigger 后执行、同一批 confirmed 案例进入 Planner/Auditor，且
+    ``stage_case_memory`` 位于报告审计之后；缺少任一边界都应阻止合并。
+    """
+
+    prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
+
+    assert "audited-diagnosis-workflow:v1" in prompt_contract
+    assert "recall_case_memories" in prompt_contract
+    assert "history_trigger=not_requested" in prompt_contract
+    assert "Planner 与 Auditor" in prompt_contract
+    assert "stage_case_memory" in prompt_contract
+    assert "skipped_not_accepted" in prompt_contract
 
 
 def test_ablation_report_labels_measured_values_and_honest_zero_gain() -> None:

@@ -551,5 +551,33 @@ embedding 只保存在内部存储模型和 pgvector 列，不进入 Planner Pro
 
 只允许返回已确认案例。每个共同点、差异点和建议都必须能追溯到历史案例字段或证据；当历史案例与当前 Observation 冲突时，将冲突写入 `differences`，不得覆盖本次实时事实。
 
-当前切片已实现 confirmed 案例向量搜索和 API，但尚未把结果自动接入 Planner，也尚未生成共同点、
-差异点和 `SIMILAR_TO` 关系。文档保留完整输出契约，不能把未接线的部分宣称为运行时已完成。
+当前顶层诊断图已把 confirmed 搜索命中的结构化 CaseMemory 同时接入 Planner 与 Auditor，并在最终
+结果保留 similarity；但 Planner Prompt 尚未直接接收相似度，确定性报告也尚未生成共同点、差异点、
+参考方案、避坑提示或 `SIMILAR_TO` 关系。文档保留完整输出契约，不能把这些部分宣称为已完成。
+
+## 6. 顶层诊断编排运行契约
+
+顶层契约版本为 `audited-diagnosis-workflow:v1`，固定顺序为：
+
+```text
+recall_case_memories
+  -> run_react
+  -> run_report
+  -> stage_case_memory
+  -> end
+```
+
+- `history_trigger=not_requested` 时，`recall_case_memories` 不调用数据库，也不生成伪查询；
+  `user_requested`、`planner_validation` 或 `reusable_signature` 才执行 confirmed-only 搜索。
+- 查询文本按“用户问题 → 本次非 CASE_MEMORY Evidence → 当前假设”的优先级组合，并受字符预算；
+  旧案例 Evidence 不递归加入查询，防止历史记录自我强化。
+- 同一批 confirmed CaseMemory 必须同时进入 Planner 与 Auditor。Planner 可把它们作为参考，Auditor
+  必须检查历史与实时 Observation 的冲突；两者都不能把历史结论覆盖本次工具事实。
+- report 子图先完成 deterministic Builder、规则门禁、独立 Auditor 和最多一次返工，随后才允许
+  `stage_case_memory`。顶层不复制 accepted 判定，而是调用 `case-memory:v1` 返回 staged/merged、
+  skipped_no_root_cause 或 `skipped_not_accepted`。
+- 历史搜索、ReAct、报告或 staging 的未预期异常必须传播，不能伪装为空召回或完成结果。最终结果
+  校验 ReAct/report 的 run_id、session_id，以及 report outcome 与 memory stage 状态的一致性。
+
+该契约当前作为内部应用工作流供测试和后续资源化 API 复用；尚未实现会话/run 持久化、HTTP 诊断
+入口、checkpoint，也未把 similarity/common points/differences 投影进最终 DiagnosisReport。
