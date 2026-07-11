@@ -1,0 +1,16 @@
+[
+  {
+    "case_id": "ablation_sync_backlog_causal_chain",
+    "query": "sync backlog",
+    "expected_root_cause_node_ids": [
+      "root_cause_primary_key_conflict"
+    ],
+    "required_path_node_ids": [
+      "symptom_sync_backlog",
+      "root_cause_primary_key_conflict",
+      "solution_resolve_pk_conflict"
+    ],
+    "seed_limit": 5,
+    "max_hops": 2
+  }
+]

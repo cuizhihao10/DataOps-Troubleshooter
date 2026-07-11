@@ -13,8 +13,10 @@ from sqlalchemy.exc import IntegrityError
 
 from app.persistence.database import create_database_engine, create_session_factory
 from app.persistence.models import KnowledgeEdgeRecord
+from app.retrieval.ablation import evaluate_graph_ablation, load_graph_ablation_cases
+from app.retrieval.budget import build_evidence_bundle
 from app.retrieval.embeddings import DeterministicHashEmbeddingProvider, embed_knowledge_bundle
-from app.retrieval.models import RetrievalChannel
+from app.retrieval.models import EvidenceBundleBudget, RetrievalChannel, RetrievalMode
 from app.retrieval.repository import PostgresGraphRepository
 from app.retrieval.seeds import load_knowledge_seed
 from app.retrieval.service import GraphRetrievalService
@@ -125,6 +127,50 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
             assert component_path.path_id.startswith("path_")
             assert component_path.hybrid_score > component_path.score * result.score_weights.path
             assert component_path.seed_node_id == "component_lts"
+
+            # 使用同一查询和预算运行 vector-only/vector+graph，结构化记录图扩展的实测增益。
+            ablation_case = load_graph_ablation_cases(
+                Path("data/evals/graphrag_ablation_cases.json")
+            )[0]
+            vector_only = await service.retrieve(
+                ablation_case.query,
+                seed_limit=ablation_case.seed_limit,
+                max_hops=ablation_case.max_hops,
+                mode=RetrievalMode.VECTOR_ONLY,
+            )
+            vector_graph = await service.retrieve(
+                ablation_case.query,
+                seed_limit=ablation_case.seed_limit,
+                max_hops=ablation_case.max_hops,
+                mode=RetrievalMode.VECTOR_GRAPH,
+            )
+            ablation_report = evaluate_graph_ablation(
+                ablation_case,
+                vector_only=vector_only,
+                vector_graph=vector_graph,
+            )
+            assert vector_only.paths == []
+            assert ablation_report.vector_graph.root_cause_hit is True
+            assert ablation_report.root_cause_hit_delta >= 0
+            assert ablation_report.vector_only.chain_completeness == 0
+            assert ablation_report.vector_graph.chain_completeness == 1
+            assert ablation_report.chain_completeness_delta == 1
+
+            # Bundle 必须在默认预算中原子保留完整因果路径，并公开所有稳定证据引用。
+            evidence_bundle = build_evidence_bundle(
+                vector_graph,
+                budget=EvidenceBundleBudget(),
+            )
+            causal_path = next(
+                path
+                for path in evidence_bundle.selected_paths
+                if path.node_ids == ablation_case.required_path_node_ids
+            )
+            assert causal_path.evidence_id == causal_path.path_id
+            assert evidence_bundle.used_bytes <= evidence_bundle.budget.max_bytes
+            assert set(causal_path.node_ids) <= {
+                node.node_id for node in evidence_bundle.selected_nodes
+            }
 
             # 删除只在当前事务可见且稍后回滚，用消融证明路径不是提示词或硬编码结果。
             await session.execute(

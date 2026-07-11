@@ -24,6 +24,8 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/persistence/seed.py"),
     Path("app/retrieval/repository.py"),
     Path("app/retrieval/embeddings.py"),
+    Path("app/retrieval/budget.py"),
+    Path("app/retrieval/ablation.py"),
     Path("app/retrieval/service.py"),
     Path("mcp_server/repository.py"),
 )
@@ -126,9 +128,43 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
     assert "原始人工知识 JSON 的 embedding 仍为 `null`" in guide
     assert "可替换 Embedding Provider" in guide
     assert "五项混合评分" in guide
+    assert "Evidence Bundle 上下文预算" in guide
+    assert "Vector-only / Vector+Graph 消融" in guide
     assert "尚未完成" in guide
     assert "代码注释的强制粒度" in guide
     assert "callable 级 docstring" in guide
+
+
+def test_prompt_contract_versions_budgeted_retrieval_inputs() -> None:
+    """确认 Prompt 契约区分完整检索 v2 与预算化 Evidence Bundle v1 输入。
+
+    Planner Prompt 文本未改变，但两个占位符的数据语义已经版本化；测试防止后续代码升级 contract ID
+    后文档仍声称旧结构，或遗漏路径原子选择和 truncated 的解释。
+    """
+
+    prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
+
+    assert "graphrag-retrieval:v2" in prompt_contract
+    assert "graphrag-evidence-bundle:v1" in prompt_contract
+    assert "路径只有在其全部节点、边和来源能一起进入预算" in prompt_contract
+    assert "truncated=true" in prompt_contract
+
+
+def test_ablation_report_labels_measured_values_and_honest_zero_gain() -> None:
+    """确认消融报告明确标注实测条件，并保留根因命中没有提升的真实结果。
+
+    该门禁防止作品集只展示链路正增益却删除根因差值为零的事实，也要求报告记录 Provider、预算、
+    path_id 和适用范围，避免把单个合成案例外推为通用准确率。
+    """
+
+    report = Path("docs/graphrag-ablation-results.md").read_text(encoding="utf-8")
+
+    assert "实测值" in report
+    assert "deterministic-hash:v1" in report
+    assert "根因节点命中 | 1 | 1 | 0" in report
+    assert "必要有序链路完整率 | 0.0 | 1.0 | +1.0" in report
+    assert "path_4f6638ec28f7073d" in report
+    assert "不能将本次结果外推" in report
 
 
 def test_agents_policy_marks_documentation_as_definition_of_done() -> None:

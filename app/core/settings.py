@@ -12,7 +12,7 @@ from pathlib import Path
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.retrieval.models import HybridScoringWeights
+from app.retrieval.models import EvidenceBundleBudget, HybridScoringWeights
 
 
 class Settings(BaseSettings):
@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     retrieval_path_weight: float = Field(default=0.25, ge=0, le=1)
     retrieval_reliability_weight: float = Field(default=0.10, ge=0, le=1)
     retrieval_freshness_weight: float = Field(default=0.10, ge=0, le=1)
+    retrieval_context_max_bytes: int = Field(default=6000, ge=256, le=100_000)
+    retrieval_context_max_nodes: int = Field(default=8, ge=1, le=50)
+    retrieval_context_max_paths: int = Field(default=4, ge=0, le=20)
 
     fixture_directory: Path = Path("data/fixtures/scenarios")
     golden_case_file: Path = Path("data/fixtures/golden_cases.json")
@@ -58,17 +61,19 @@ class Settings(BaseSettings):
     planner_prompt_id: str = "planner-react:v1"
     mcp_contract_id: str = "mcp-tools:v1"
     golden_case_contract_id: str = "golden-case:v1"
-    graphrag_retrieval_contract_id: str = "graphrag-retrieval:v1"
+    graphrag_retrieval_contract_id: str = "graphrag-retrieval:v2"
+    graphrag_evidence_bundle_contract_id: str = "graphrag-evidence-bundle:v1"
 
     @model_validator(mode="after")
     def validate_retrieval_configuration(self) -> Settings:
-        """在应用启动时校验混合评分权重，而不是等到第一次检索才暴露错误。
+        """在应用启动时校验混合评分和上下文预算，而不是等到首次检索才暴露错误。
 
-        构造 `HybridScoringWeights` 会复用同一总和与范围契约；Provider 名称和维度由工厂继续校验，
-        从而把通用配置一致性与具体 Provider 支持范围分开，错误会阻止半配置实例启动。
+        两个 Pydantic 配置模型复用总和与范围契约；Provider 名称和维度由工厂继续校验，从而把
+        通用配置一致性与具体 Provider 支持范围分开，任一错误都会阻止半配置实例启动。
         """
 
         self.hybrid_scoring_weights()
+        self.evidence_bundle_budget()
         return self
 
     def hybrid_scoring_weights(self) -> HybridScoringWeights:
@@ -84,6 +89,19 @@ class Settings(BaseSettings):
             path=self.retrieval_path_weight,
             reliability=self.retrieval_reliability_weight,
             freshness=self.retrieval_freshness_weight,
+        )
+
+    def evidence_bundle_budget(self) -> EvidenceBundleBudget:
+        """把环境中的字节、节点和路径上限组装为不可变 Evidence Bundle 预算。
+
+        三项限制分别防止长文本、过多短节点和过多关系路径挤占 Planner 上下文；返回 Pydantic 模型
+        让构建器、健康接口和测试共享同一边界，非法值在 Settings 初始化阶段失败。
+        """
+
+        return EvidenceBundleBudget(
+            max_bytes=self.retrieval_context_max_bytes,
+            max_nodes=self.retrieval_context_max_nodes,
+            max_paths=self.retrieval_context_max_paths,
         )
 
 

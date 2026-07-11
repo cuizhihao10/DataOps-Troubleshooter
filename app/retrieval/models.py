@@ -12,7 +12,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-GRAPH_RETRIEVAL_CONTRACT_ID = "graphrag-retrieval:v1"
+GRAPH_RETRIEVAL_CONTRACT_ID = "graphrag-retrieval:v2"
+GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID = "graphrag-evidence-bundle:v1"
 
 
 class KnowledgeNodeType(StrEnum):
@@ -58,6 +59,18 @@ class RetrievalChannel(StrEnum):
 
     LEXICAL = "lexical"
     VECTOR = "vector"
+
+
+class RetrievalMode(StrEnum):
+    """定义消融和生产检索允许的三种显式执行模式。
+
+    `vector_only` 只保留向量种子且不扩图，`vector_graph` 隔离图关系增益，`hybrid_graph` 再加入
+    全文通道并作为默认生产模式。显式枚举防止评测通过隐藏布尔开关得到无法复现的比较结果。
+    """
+
+    VECTOR_ONLY = "vector_only"
+    VECTOR_GRAPH = "vector_graph"
+    HYBRID_GRAPH = "hybrid_graph"
 
 
 class HybridScoringWeights(BaseModel):
@@ -276,6 +289,85 @@ class ScoredGraphPath(GraphPath):
     hybrid_score: float = Field(ge=0, le=1)
 
 
+class EvidenceBundleBudget(BaseModel):
+    """定义注入 Planner 上下文前必须同时满足的字节、节点和路径预算。
+
+    字节预算使用模型无关且可精确重放的 UTF-8 JSON 长度，节点/路径上限防止大量短记录绕过字节
+    控制。该模型不可变并限制合理范围，调用方不能用零预算制造看似成功但完全无证据的 Bundle。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    max_bytes: int = Field(default=6000, ge=256, le=100_000)
+    max_nodes: int = Field(default=8, ge=1, le=50)
+    max_paths: int = Field(default=4, ge=0, le=20)
+
+
+class BundledKnowledgeNode(BaseModel):
+    """表示进入上下文的紧凑知识节点证据及其稳定引用和检索优先级。
+
+    Bundle 只保留 Planner/Auditor 需要的名称、正文、来源跨度、可靠性和最高检索分；embedding
+    派生数组、别名和数据库状态不会注入 Prompt。`kn_<node_id>` 可直接进入 evidence_refs。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str = Field(pattern=r"^kn_[a-z][a-z0-9_-]{2,99}$")
+    node_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,99}$")
+    node_type: KnowledgeNodeType
+    name: str = Field(min_length=1, max_length=300)
+    content: str = Field(min_length=1, max_length=4000)
+    source_id: str = Field(min_length=1, max_length=200)
+    source_span: str = Field(min_length=1, max_length=2000)
+    reliability: float = Field(ge=0, le=1)
+    retrieval_score: float = Field(ge=0, le=1)
+
+
+class BundledGraphPath(BaseModel):
+    """表示进入上下文的紧凑图路径证据，不重复嵌入完整节点正文。
+
+    节点正文由 `BundledKnowledgeNode` 去重保存；本模型保留有序 node/edge ID、关系类型、边来源跨度、
+    原始路径分和最终混合分，使 Planner 可引用真实 `path_id`，Auditor 可逐边核对关系依据。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str = Field(pattern=r"^path_[a-f0-9]{16}$")
+    path_id: str = Field(pattern=r"^path_[a-f0-9]{16}$")
+    seed_node_id: str = Field(min_length=3, max_length=100)
+    node_ids: list[str] = Field(min_length=2)
+    edge_ids: list[str] = Field(min_length=1)
+    relation_types: list[KnowledgeRelationType] = Field(min_length=1)
+    edge_source_spans: list[str] = Field(min_length=1)
+    source_ids: list[str] = Field(min_length=1)
+    depth: int = Field(ge=1, le=2)
+    path_score: float = Field(gt=0, le=1)
+    hybrid_score: float = Field(ge=0, le=1)
+
+
+class GraphEvidenceBundle(BaseModel):
+    """封装预算化知识节点和图路径，以及所有因预算被省略的稳定 ID。
+
+    `used_bytes` 只计算 selected_nodes/selected_paths 的规范 JSON 载荷，便于精确断言上下文主体
+    不超限；诊断元数据和 omitted IDs 不计入模型上下文预算。`truncated` 明确提示 Planner 证据
+    集合并非全量，防止其把预算裁剪误解为知识库不存在其他候选。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    contract_id: Literal["graphrag-evidence-bundle:v1"] = GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID
+    retrieval_contract_id: Literal["graphrag-retrieval:v2"] = GRAPH_RETRIEVAL_CONTRACT_ID
+    query: str = Field(min_length=1, max_length=2000)
+    retrieval_mode: RetrievalMode
+    budget: EvidenceBundleBudget
+    used_bytes: int = Field(ge=0)
+    selected_nodes: list[BundledKnowledgeNode] = Field(default_factory=list)
+    selected_paths: list[BundledGraphPath] = Field(default_factory=list)
+    omitted_node_ids: list[str] = Field(default_factory=list)
+    omitted_path_ids: list[str] = Field(default_factory=list)
+    truncated: bool = False
+
+
 class GraphRetrievalResult(BaseModel):
     """表示一次检索的原始查询、种子节点和去重图路径集合。
 
@@ -285,8 +377,11 @@ class GraphRetrievalResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    contract_id: Literal["graphrag-retrieval:v1"] = GRAPH_RETRIEVAL_CONTRACT_ID
+    contract_id: Literal["graphrag-retrieval:v2"] = GRAPH_RETRIEVAL_CONTRACT_ID
     query: str = Field(min_length=1, max_length=2000)
+    mode: RetrievalMode = RetrievalMode.HYBRID_GRAPH
+    seed_limit: int = Field(default=5, ge=1, le=20)
+    max_hops: int = Field(default=2, ge=1, le=2)
     embedding_provider: str = Field(min_length=1, max_length=100)
     score_weights: HybridScoringWeights
     seeds: list[HybridSeedMatch] = Field(default_factory=list)

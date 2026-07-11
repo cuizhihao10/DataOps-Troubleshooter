@@ -24,14 +24,19 @@ from app.persistence.database import (
     create_session_factory,
 )
 from app.retrieval.embeddings import create_embedding_provider
-from app.retrieval.models import GRAPH_RETRIEVAL_CONTRACT_ID, HybridScoringWeights
+from app.retrieval.models import (
+    GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID,
+    GRAPH_RETRIEVAL_CONTRACT_ID,
+    EvidenceBundleBudget,
+    HybridScoringWeights,
+)
 from app.retrieval.repository import PostgresGraphRepository
 
 
 class ContractVersions(BaseModel):
-    """描述健康检查公开的三类版本化契约标识。
+    """描述健康检查公开的 Prompt、工具、评测和两类 GraphRAG 契约标识。
 
-    客户端可用这些 ID 判断 Prompt、MCP Schema 与 Golden Case 是否和预期环境一致；
+    客户端可判断 Planner、MCP、Golden Case、完整检索和预算 Bundle 是否与预期环境一致；
     `extra="forbid"` 阻止服务端无意增加未约定字段，避免展示脚本静默依赖漂移后的响应。
     """
 
@@ -41,6 +46,7 @@ class ContractVersions(BaseModel):
     mcp: str
     golden_case: str
     graph_retrieval: str
+    graph_evidence_bundle: str
 
 
 class RuntimeLimits(BaseModel):
@@ -59,10 +65,10 @@ class RuntimeLimits(BaseModel):
 
 
 class RetrievalConfiguration(BaseModel):
-    """公开当前 Embedding 空间和五项混合评分配置，不包含任何模型凭据。
+    """公开当前 Embedding 空间、混合评分和 Evidence Bundle 预算，不含模型凭据。
 
-    Provider ID、维度和权重让演示者能够解释一次检索使用的数学空间与排序公式；响应只来自经过
-    Settings/Provider 工厂校验的值，避免健康接口报告一个运行时无法创建的配置。
+    Provider ID、维度、权重和预算让演示者解释检索空间、排序公式和上下文上限；响应只来自经过
+    Settings/Provider 工厂校验的值，避免健康接口报告运行时无法创建或无法满足的配置。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -70,6 +76,7 @@ class RetrievalConfiguration(BaseModel):
     embedding_provider: str
     embedding_dimensions: int
     score_weights: HybridScoringWeights
+    evidence_budget: EvidenceBundleBudget
 
 
 class HealthResponse(BaseModel):
@@ -125,6 +132,10 @@ async def lifespan(app: FastAPI):
         raise ValueError("planner prompt must not be empty")
     if settings.graphrag_retrieval_contract_id != GRAPH_RETRIEVAL_CONTRACT_ID:
         raise ValueError("configured GraphRAG retrieval contract ID does not match the package")
+    if settings.graphrag_evidence_bundle_contract_id != GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID:
+        raise ValueError(
+            "configured GraphRAG evidence bundle contract ID does not match the package"
+        )
 
     # Provider 工厂在任何部署模式都执行，使未知 ID 或非法维度不能等到首次检索才失败。
     embedding_provider = create_embedding_provider(
@@ -219,6 +230,7 @@ async def health(request: Request) -> HealthResponse:
             mcp=settings.mcp_contract_id,
             golden_case=settings.golden_case_contract_id,
             graph_retrieval=settings.graphrag_retrieval_contract_id,
+            graph_evidence_bundle=settings.graphrag_evidence_bundle_contract_id,
         ),
         limits=RuntimeLimits(
             max_react_steps=settings.max_react_steps,
@@ -230,5 +242,6 @@ async def health(request: Request) -> HealthResponse:
             embedding_provider=settings.embedding_provider,
             embedding_dimensions=settings.embedding_dimensions,
             score_weights=settings.hybrid_scoring_weights(),
+            evidence_budget=settings.evidence_bundle_budget(),
         ),
     )

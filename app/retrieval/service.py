@@ -16,6 +16,7 @@ from app.retrieval.models import (
     KnowledgeRelationType,
     LexicalSeedMatch,
     RetrievalChannel,
+    RetrievalMode,
     ScoredGraphPath,
     VectorSeedMatch,
 )
@@ -53,12 +54,13 @@ class GraphRetrievalService:
         *,
         seed_limit: int = 5,
         max_hops: int = 2,
+        mode: RetrievalMode = RetrievalMode.HYBRID_GRAPH,
     ) -> GraphRetrievalResult:
-        """执行查询 embedding、双路 top-k、节点去重、图扩展和最终路径评分。
+        """按显式模式执行向量/全文召回、节点去重、可选图扩展和最终路径评分。
 
-        Provider 必须返回恰好一个符合固定维度的向量；全文和向量查询各取 top-k，再由融合函数按
-        hybrid_score 截断为总 seed_limit。每条路径继承种子的语义/全文/可靠性分量，并加入边权
-        乘积形成的路径分量；同 path_id 只保留得分最高版本。无命中返回空列表，不伪造知识证据。
+        Provider 必须返回恰好一个固定维度向量；所有模式执行向量 top-k，只有 hybrid_graph 加入
+        全文候选，只有 vector_only 跳过关系扩展。路径继承种子分量并加入边权乘积，同 path_id 仅
+        保留最高混合分版本。模式进入输出契约，确保消融结果可重放而非依赖隐藏开关。
         """
 
         if not query.strip():
@@ -74,8 +76,13 @@ class GraphRetrievalService:
         if len(query_embedding) != self._embedding_provider.dimensions:
             raise ValueError("query embedding length does not match provider dimensions")
 
-        # 同一个 AsyncSession 不并发执行 SQL；顺序查询仍保持两路召回边界和独立原始分数。
-        lexical_matches = await self._repository.search_lexical_seeds(query, limit=seed_limit)
+        # vector-only/vector-graph 故意关闭全文通道，隔离图结构相对于纯向量检索的真实增益。
+        lexical_matches = []
+        if mode is RetrievalMode.HYBRID_GRAPH:
+            lexical_matches = await self._repository.search_lexical_seeds(
+                query,
+                limit=seed_limit,
+            )
         vector_matches = await self._repository.search_vector_seeds(
             query_embedding,
             provider_id=self._embedding_provider.provider_id,
@@ -99,21 +106,29 @@ class GraphRetrievalService:
             KnowledgeRelationType.CONSUMES,
         }
         paths_by_id: dict[str, ScoredGraphPath] = {}
-        for seed in seeds:
-            paths = await self._repository.expand_paths(
-                seed.node.node_id,
-                max_hops=max_hops,
-                allowed_relations=allowed_relations,
-            )
-            for path in paths:
-                scored_path = score_graph_path(path, seed=seed, weights=self._score_weights)
-                current = paths_by_id.get(path.path_id)
-                if current is None or scored_path.hybrid_score > current.hybrid_score:
-                    # 多个种子到达同一路径时保留解释分量更强的一版，path_id 仍由真实边序列决定。
-                    paths_by_id[path.path_id] = scored_path
+        if mode is not RetrievalMode.VECTOR_ONLY:
+            for seed in seeds:
+                paths = await self._repository.expand_paths(
+                    seed.node.node_id,
+                    max_hops=max_hops,
+                    allowed_relations=allowed_relations,
+                )
+                for path in paths:
+                    scored_path = score_graph_path(
+                        path,
+                        seed=seed,
+                        weights=self._score_weights,
+                    )
+                    current = paths_by_id.get(path.path_id)
+                    if current is None or scored_path.hybrid_score > current.hybrid_score:
+                        # 多种子命中同一路径时只保留解释分更强的一版，真实 edge 序列保持不变。
+                        paths_by_id[path.path_id] = scored_path
 
         return GraphRetrievalResult(
             query=query,
+            mode=mode,
+            seed_limit=seed_limit,
+            max_hops=max_hops,
             embedding_provider=self._embedding_provider.provider_id,
             score_weights=self._score_weights,
             seeds=seeds,

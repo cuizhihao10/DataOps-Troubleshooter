@@ -44,7 +44,8 @@ async def test_health_reports_validated_contract_baseline() -> None:
         "planner_prompt": "planner-react:v1",
         "mcp": "mcp-tools:v1",
         "golden_case": "golden-case:v1",
-        "graph_retrieval": "graphrag-retrieval:v1",
+        "graph_retrieval": "graphrag-retrieval:v2",
+        "graph_evidence_bundle": "graphrag-evidence-bundle:v1",
     }
     assert payload["limits"] == {
         "max_react_steps": 6,
@@ -61,5 +62,10 @@ async def test_health_reports_validated_contract_baseline() -> None:
             "path": 0.25,
             "reliability": 0.1,
             "freshness": 0.1,
+        },
+        "evidence_budget": {
+            "max_bytes": 6000,
+            "max_nodes": 8,
+            "max_paths": 4,
         },
     }
