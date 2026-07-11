@@ -247,6 +247,24 @@ class CaseMemory(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    @model_validator(mode="after")
+    def validate_memory_timestamps_and_collections(self) -> CaseMemory:
+        """保证案例时间可跨时区比较，并拒绝集合字段中的重复审计信息。
+
+        created/updated 必须带时区且更新时间不能早于创建时间；症状、组件、标签和证据引用使用
+        首次顺序语义但不得重复。失败在进入数据库前显式暴露，避免去重服务反复合并相同值。
+        """
+
+        if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
+            raise ValueError("case memory timestamps must include a timezone")
+        if self.updated_at < self.created_at:
+            raise ValueError("case memory updated_at cannot precede created_at")
+        for field_name in ("symptoms", "components", "tags", "evidence_refs"):
+            values = getattr(self, field_name)
+            if len(values) != len(set(values)):
+                raise ValueError(f"case memory {field_name} must not contain duplicates")
+        return self
+
 
 class ToolEvent(BaseModel):
     """记录一次具体 MCP 调用尝试的请求、响应、时间与重试属性。

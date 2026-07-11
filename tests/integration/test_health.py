@@ -52,6 +52,7 @@ async def test_health_reports_validated_contract_baseline() -> None:
         "runtime_capabilities": "runtime-capabilities:v1",
         "react_loop": "langgraph-react-loop:v1",
         "audited_report_workflow": "audited-report-workflow:v1",
+        "case_memory": "case-memory:v1",
         "graph_retrieval": "graphrag-retrieval:v2",
         "graph_evidence_bundle": "graphrag-evidence-bundle:v1",
     }
@@ -77,6 +78,15 @@ async def test_health_reports_validated_contract_baseline() -> None:
         "endpoint_host": "api.openai.com",
         "timeout_seconds": 30.0,
         "schema_repair_count": 1,
+    }
+    assert payload["memory"] == {
+        "status": "disabled",
+        "contract_id": "case-memory:v1",
+        "embedding_provider": "deterministic-hash:v1",
+        "embedding_dimensions": 128,
+        "dedup_similarity_threshold": 0.92,
+        "default_search_limit": 5,
+        "counts": {"pending": 0, "confirmed": 0, "rejected": 0},
     }
     assert payload["retrieval"] == {
         "embedding_provider": "deterministic-hash:v1",

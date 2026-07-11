@@ -1,6 +1,6 @@
 # DataOps Troubleshooter
 
-面向公开作品集的、证据驱动的大数据链路智能排障 Agent。当前已经完成领域契约、九工具真实 MCP、GraphRAG、五项固定 capability、LangGraph 有界循环，以及 Planner/Auditor OpenAI-compatible Structured Outputs。
+面向公开作品集的、证据驱动的大数据链路智能排障 Agent。当前已经完成领域契约、九工具真实 MCP、GraphRAG、五项固定 capability、LangGraph 有界循环、Planner/Auditor OpenAI-compatible Structured Outputs，以及受控长期案例记忆。
 
 本项目同时是学习与求职展示项目。代码中的模块级说明、每个 callable 的详细 docstring 和复杂函数关键步骤注释负责解释局部设计，完整技术原理、数据流、设计取舍和验证方法统一维护在 [`docs/implementation-guide.md`](docs/implementation-guide.md)。
 
@@ -21,8 +21,10 @@
 - `planner-react:v2` 将 system 规则与 user 运行数据隔离；官方异步 SDK 从 Pydantic 提交 strict Schema，首次无效输出最多修复一次，refusal 和 Provider 错误安全停止。
 - 确定性 Builder 只把有有效支持引用且无反对证据的假设提升为根因；链路和建议分别引用 `path_id` 与知识节点证据。
 - `auditor-report:v1` 使用独立 Structured Outputs Agent；确定性问题可否决错误 accept，`audited-report-workflow:v1` 最多返工一次，二次未通过或 Provider 不可用时返回安全降级报告。
+- `case-memory:v1` 只接收 Auditor accepted 且含根因的报告，新候选默认为 pending；exact signature 优先、pgvector cosine 次之，同 run 重放不会重复增加 occurrence。
+- `POST /api/v1/memories/{memory_id}/confirm` 支持 confirm、reject 和重新 confirm；`GET /api/v1/memories/search` 只返回 confirmed 案例，数据库未启用时明确返回 503。
 
-当前已完成全部 MCP 工具、GraphRAG 检索闭环、五项固定 runtime capabilities、Planner ReAct 控制器、结构化报告草稿和独立 Auditor 返工协议。默认模型 Provider 仍为 disabled，自动化测试使用真实 SDK + MockTransport，不宣称已经调用付费模型或取得模型质量成绩。长期记忆、完整诊断 API 和更多 Golden Case 仍待后续实现。
+当前已完成全部 MCP 工具、GraphRAG 检索闭环、五项固定 runtime capabilities、Planner ReAct 控制器、结构化报告草稿、独立 Auditor 返工协议，以及长期案例记忆的暂存、去重、确认/拒绝和 confirmed-only 搜索。默认模型 Provider 仍为 disabled，自动化测试使用真实 SDK + MockTransport，不宣称已经调用付费模型或取得模型质量成绩。完整诊断 API、会话 checkpoint、已确认案例自动注册 GraphRAG、完整历史差异生成和更多 Golden Case 仍待后续实现。
 
 ## 本地启动
 

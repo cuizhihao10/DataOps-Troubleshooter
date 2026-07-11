@@ -1,7 +1,7 @@
-"""知识节点与关系边的 SQLAlchemy 表映射。
+"""知识图与受控长期案例记忆的 SQLAlchemy 表映射。
 
-表级约束重复验证领域枚举、权重范围和禁止自环，形成数据库最后一道防线。节点包含可空
-pgvector 字段，为下一切片的语义召回预留存储，但当前不会把空向量宣称为已完成检索。
+表级约束重复验证领域枚举、向量空间、状态和计数，形成数据库最后一道防线。知识图与案例记忆
+共享 PostgreSQL/pgvector，但保持独立表和仓储职责。
 """
 
 from __future__ import annotations
@@ -151,4 +151,80 @@ class KnowledgeEdgeRecord(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+
+class CaseMemoryRecord(Base):
+    """把结构化案例、确认状态、去重签名和 embedding 映射到 PostgreSQL。
+
+    JSONB 保存有序列表字段，Vector 保存不进入领域/API 的检索向量；签名唯一约束提供精确去重，
+    状态/计数/向量 CheckConstraint 防止绕过 Service 的直接写入污染默认 confirmed 召回。
+    """
+
+    __tablename__ = "case_memories"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','confirmed','rejected')",
+            name="ck_case_memories_status",
+        ),
+        CheckConstraint(
+            "occurrence_count >= 1",
+            name="ck_case_memories_occurrence_count",
+        ),
+        CheckConstraint(
+            "embedding_dimensions >= 8 AND vector_dims(embedding) = embedding_dimensions",
+            name="ck_case_memories_embedding_dimensions",
+        ),
+        UniqueConstraint("signature", name="uq_case_memories_signature"),
+        Index("ix_case_memories_status", "status"),
+        Index("ix_case_memories_embedding_space", "embedding_provider", "embedding_dimensions"),
+    )
+
+    memory_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    signature: Mapped[str] = mapped_column(String(64), nullable=False)
+    symptoms: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    root_cause: Mapped[str] = mapped_column(Text, nullable=False)
+    fault_path: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    solution_steps: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    components: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    tags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    evidence_refs: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    occurrence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    embedding: Mapped[list[float]] = mapped_column(Vector(), nullable=False)
+    embedding_provider: Mapped[str] = mapped_column(String(100), nullable=False)
+    embedding_dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class MemoryEvidenceRecord(Base):
+    """保存案例与每次来源 run 的 Evidence 引用关联，支持幂等 occurrence 统计。
+
+    三列复合主键允许不同运行引用同名证据，同时阻止同一运行重复插入同一引用；source_run_id
+    让 Service 判断重放是否已经计数。删除案例时级联清理关联，不遗留不可追溯证据。
+    """
+
+    __tablename__ = "memory_evidence"
+    __table_args__ = (Index("ix_memory_evidence_source_run", "source_run_id"),)
+
+    memory_id: Mapped[str] = mapped_column(
+        ForeignKey("case_memories.memory_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    evidence_ref: Mapped[str] = mapped_column(String(100), primary_key=True)
+    source_run_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )

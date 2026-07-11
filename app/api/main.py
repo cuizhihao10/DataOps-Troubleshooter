@@ -9,8 +9,8 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import FastAPI, Request
-from pydantic import BaseModel, ConfigDict
+from fastapi import FastAPI, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
 
 from app import __version__
 from app.agents.auditor_chat import AUDITOR_PROVIDER_CONTRACT_ID
@@ -25,8 +25,16 @@ from app.agents.prompts import (
 from app.capabilities import CAPABILITY_CONTRACT_ID, get_capability_registry
 from app.core.fixture_registry import FixtureRegistry, load_golden_cases
 from app.core.settings import get_settings
+from app.domain.models import CaseMemory
 from app.domain.tooling import ToolName
 from app.mcp.client import StdioMcpClient
+from app.memory import (
+    CASE_MEMORY_CONTRACT_ID,
+    CaseMemoryMatch,
+    MemoryCounts,
+    MemoryDecision,
+    PostgresMemoryRuntime,
+)
 from app.orchestration import AUDITED_REPORT_WORKFLOW_CONTRACT_ID, REACT_LOOP_CONTRACT_ID
 from app.persistence.database import (
     check_database_connection,
@@ -61,6 +69,7 @@ class ContractVersions(BaseModel):
     runtime_capabilities: str
     react_loop: str
     audited_report_workflow: str
+    case_memory: str
     graph_retrieval: str
     graph_evidence_bundle: str
 
@@ -130,6 +139,24 @@ class AuditorConfiguration(BaseModel):
     schema_repair_count: int
 
 
+class MemoryConfiguration(BaseModel):
+    """公开长期记忆存储状态、向量空间、去重阈值和三类状态计数。
+
+    响应不包含案例正文、embedding 或数据库 URL；disabled 表示未配置 PostgreSQL，因此记忆 API
+    返回 503。Provider/维度与 GraphRAG 共用同一已验证 Embedding 空间。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["disabled", "ok"]
+    contract_id: str
+    embedding_provider: str
+    embedding_dimensions: int
+    dedup_similarity_threshold: float
+    default_search_limit: int
+    counts: MemoryCounts
+
+
 class HealthResponse(BaseModel):
     """定义 `/health` 返回的已验证依赖、数据规模与契约快照。
 
@@ -156,7 +183,46 @@ class HealthResponse(BaseModel):
     limits: RuntimeLimits
     planner: PlannerConfiguration
     auditor: AuditorConfiguration
+    memory: MemoryConfiguration
     retrieval: RetrievalConfiguration
+
+
+class MemoryDecisionRequest(BaseModel):
+    """定义用户对指定案例执行 confirm 或 reject 的显式请求体。
+
+    有限枚举阻止任意状态字符串；接口路径沿用产品基线 `/confirm`，body 决定确认或拒绝，便于同一
+    审计入口支持纠错和取消确认。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: MemoryDecision
+
+
+class MemoryDecisionResponse(BaseModel):
+    """返回记忆契约版本和状态转换后的完整 CaseMemory。
+
+    响应不包含 embedding 或 ORM 字段；未命中由路由返回 404，不使用空 memory 模糊表示。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    contract_id: str
+    memory: CaseMemory
+
+
+class MemorySearchResponse(BaseModel):
+    """返回查询文本和仅包含 confirmed 案例的有界相似度列表。
+
+    Pydantic `CaseMemoryMatch` 会再次拒绝 pending/rejected；query 原样回显便于演示和审计，不包含
+    查询 embedding。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    contract_id: str
+    query: str = Field(min_length=1, max_length=2000)
+    matches: list[CaseMemoryMatch]
 
 
 @asynccontextmanager
@@ -208,6 +274,8 @@ async def lifespan(app: FastAPI):
         raise ValueError(
             "configured audited report workflow contract ID does not match the package"
         )
+    if settings.case_memory_contract_id != CASE_MEMORY_CONTRACT_ID:
+        raise ValueError("configured case memory contract ID does not match the package")
 
     # Provider 工厂在任何部署模式都执行，使未知 ID 或非法维度不能等到首次检索才失败。
     embedding_provider = create_embedding_provider(
@@ -230,6 +298,8 @@ async def lifespan(app: FastAPI):
     knowledge_nodes_embedded = 0
     planner_runtime = None
     auditor_runtime = None
+    memory_runtime = None
+    memory_counts = MemoryCounts(pending=0, confirmed=0, rejected=0)
     try:
         if settings.database_url is not None:
             # 数据库是可选依赖：纯单测模式标记 disabled；配置后则必须真正连接并查询。
@@ -247,6 +317,13 @@ async def lifespan(app: FastAPI):
                     raise ValueError(
                         "all knowledge nodes must be embedded in the configured provider space"
                     )
+            memory_runtime = PostgresMemoryRuntime(
+                factory,
+                embedding_provider,
+                dedup_similarity_threshold=settings.memory_dedup_similarity_threshold,
+                default_search_limit=settings.memory_search_limit,
+            )
+            memory_counts = await memory_runtime.counts()
             database_status = "ok"
 
         # 在数据库审计后构造两个模型角色；若第二个失败，finally 会关闭已经创建的第一个。
@@ -262,6 +339,8 @@ async def lifespan(app: FastAPI):
         app.state.capability_registry = capability_registry
         app.state.planner_runtime = planner_runtime
         app.state.auditor_runtime = auditor_runtime
+        app.state.memory_runtime = memory_runtime
+        app.state.memory_counts = memory_counts
         app.state.database_engine = database_engine
         app.state.database_status = database_status
         app.state.knowledge_nodes_loaded = knowledge_nodes_loaded
@@ -325,6 +404,7 @@ async def health(request: Request) -> HealthResponse:
             runtime_capabilities=settings.capabilities_contract_id,
             react_loop=settings.react_loop_contract_id,
             audited_report_workflow=settings.audited_report_workflow_contract_id,
+            case_memory=settings.case_memory_contract_id,
             graph_retrieval=settings.graphrag_retrieval_contract_id,
             graph_evidence_bundle=settings.graphrag_evidence_bundle_contract_id,
         ),
@@ -351,6 +431,15 @@ async def health(request: Request) -> HealthResponse:
             timeout_seconds=settings.chat_timeout_seconds,
             schema_repair_count=settings.auditor_schema_repair_count,
         ),
+        memory=MemoryConfiguration(
+            status=("disabled" if request.app.state.memory_runtime is None else "ok"),
+            contract_id=settings.case_memory_contract_id,
+            embedding_provider=settings.embedding_provider,
+            embedding_dimensions=settings.embedding_dimensions,
+            dedup_similarity_threshold=settings.memory_dedup_similarity_threshold,
+            default_search_limit=settings.memory_search_limit,
+            counts=request.app.state.memory_counts,
+        ),
         retrieval=RetrievalConfiguration(
             embedding_provider=settings.embedding_provider,
             embedding_dimensions=settings.embedding_dimensions,
@@ -358,3 +447,71 @@ async def health(request: Request) -> HealthResponse:
             evidence_budget=settings.evidence_bundle_budget(),
         ),
     )
+
+
+@app.post(
+    "/api/v1/memories/{memory_id}/confirm",
+    response_model=MemoryDecisionResponse,
+)
+async def decide_memory(
+    memory_id: str,
+    payload: MemoryDecisionRequest,
+    request: Request,
+) -> MemoryDecisionResponse:
+    """确认或拒绝一个案例记忆，并返回状态转换后的结构化对象。
+
+    路由要求 PostgreSQL memory runtime 已启用，否则 503；不存在的 ID 返回 404。事务、行锁和状态
+    更新时间由 runtime/service 管理，API 不直接操作 ORM 或允许恢复 pending。
+    """
+
+    runtime = _require_memory_runtime(request)
+    memory = await runtime.decide(memory_id, payload.decision)
+    if memory is None:
+        raise HTTPException(status_code=404, detail="case memory not found")
+    # 每次决策后刷新健康快照，使高频 /health 不需要自己打开数据库连接。
+    request.app.state.memory_counts = await runtime.counts()
+    return MemoryDecisionResponse(
+        contract_id=CASE_MEMORY_CONTRACT_ID,
+        memory=memory,
+    )
+
+
+@app.get(
+    "/api/v1/memories/search",
+    response_model=MemorySearchResponse,
+)
+async def search_memories(
+    request: Request,
+    query: str = Query(min_length=1, max_length=2000, pattern=r".*\S.*"),
+    limit: int | None = Query(default=None, ge=1, le=20),
+) -> MemorySearchResponse:
+    """按自然语言查询 pgvector，并只返回 confirmed 案例。
+
+    limit 缺省使用集中配置；query 必须至少含一个非空白字符，避免 Service 的领域 ValueError
+    越过 HTTP 校验变成 500。pending/rejected 在 SQL 层排除并由响应模型再次校验。数据库未配置时
+    返回 503，Provider 或 SQL 异常不吞掉为假空结果。
+    """
+
+    runtime = _require_memory_runtime(request)
+    matches = await runtime.search(query, limit=limit)
+    return MemorySearchResponse(
+        contract_id=CASE_MEMORY_CONTRACT_ID,
+        query=query,
+        matches=matches,
+    )
+
+
+def _require_memory_runtime(request: Request) -> PostgresMemoryRuntime:
+    """读取 lifespan 发布的 memory runtime，未配置 PostgreSQL 时抛出 HTTP 503。
+
+    该检查集中两个路由的降级语义，避免 AttributeError 或把禁用存储误报为空搜索；测试可注入满足
+    相同方法的 runtime 替身验证 HTTP Schema。
+    """
+
+    runtime = request.app.state.memory_runtime
+    if runtime is None:
+        raise HTTPException(
+            status_code=503,
+            detail="case memory requires configured PostgreSQL",
+        )
+    return runtime

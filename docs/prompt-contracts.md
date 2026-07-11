@@ -507,7 +507,29 @@ CAUSED_BY, RESOLVED_BY, SIMILAR_TO
 
 ## 5. 历史案例匹配 capability 契约
 
-历史案例匹配首先使用组件/标签过滤、pgvector 相似度和 `SIMILAR_TO` 关系确定候选；模型只负责基于候选证据生成共同点、差异点、参考方案和避坑提示，不负责虚构或扩大候选集合。
+### 5.1 `case-memory:v1` 写入与可见性契约
+
+长期案例记忆运行契约版本为 `case-memory:v1`。它是确定性存储协议，不是第三个 Agent，也不允许
+模型直接执行 SQL。只有最终 `ReportRunResult` 同时满足 workflow outcome=`accepted`、Auditor
+status=`accept` 且报告至少有一个根因时，才能投影候选；degraded、revise、Provider 失败或无根因
+报告必须安全跳过。新候选固定为 `pending`，不能仅因 Auditor 通过就进入默认检索。
+
+写入按 exact signature → pgvector cosine 两阶段去重。exact signature 由排序组件和规范化根因计算，
+用于稳定重放；未命中时才生成 embedding，并只在相同组件、Provider ID 和维度空间内比较 cosine。
+命中重复时保留旧 memory ID、canonical root cause、signature 和确认状态，只合并结构字段与新证据。
+
+`memory_evidence(memory_id, evidence_ref, source_run_id)` 保存每次诊断的证据来源。same run idempotency
+要求同一 run 重放不能再次增加 occurrence_count；新 run 只能关联本次候选携带的 Evidence，不能把
+历史合并引用伪装成本次 Observation。主记录和关联必须处于同一事务，任一失败整体回滚。
+
+默认检索是 confirmed-only：pending 与 rejected 必须在 SQL 层排除，领域响应再次校验状态。
+confirm/reject 是显式用户决策，允许 rejected 重新 confirm，但不提供恢复 pending 的隐式动作。
+embedding 只保存在内部存储模型和 pgvector 列，不进入 Planner Prompt、公开 API、事件或日志。
+
+### 5.2 历史匹配输出契约
+
+历史案例匹配首先使用组件/标签过滤、confirmed-only pgvector 相似度和未来的 `SIMILAR_TO` 关系确定
+候选；模型只负责基于候选证据生成共同点、差异点、参考方案和避坑提示，不负责虚构或扩大候选集合。
 
 ```json
 {
@@ -528,3 +550,6 @@ CAUSED_BY, RESOLVED_BY, SIMILAR_TO
 ```
 
 只允许返回已确认案例。每个共同点、差异点和建议都必须能追溯到历史案例字段或证据；当历史案例与当前 Observation 冲突时，将冲突写入 `differences`，不得覆盖本次实时事实。
+
+当前切片已实现 confirmed 案例向量搜索和 API，但尚未把结果自动接入 Planner，也尚未生成共同点、
+差异点和 `SIMILAR_TO` 关系。文档保留完整输出契约，不能把未接线的部分宣称为运行时已完成。

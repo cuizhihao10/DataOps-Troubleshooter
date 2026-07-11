@@ -39,6 +39,10 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/retrieval/budget.py"),
     Path("app/retrieval/ablation.py"),
     Path("app/retrieval/service.py"),
+    Path("app/memory/service.py"),
+    Path("app/memory/repository.py"),
+    Path("app/memory/runtime.py"),
+    Path("app/persistence/migrations/versions/20260713_0003_case_memories.py"),
     Path("mcp_server/repository.py"),
 )
 REQUIRED_GUIDE_SECTIONS = (
@@ -52,6 +56,7 @@ REQUIRED_GUIDE_SECTIONS = (
     "LangGraph 有界 ReAct",
     "OpenAI-compatible Planner Structured Outputs",
     "确定性报告草稿与 Auditor Structured Outputs",
+    "受控长期案例记忆",
     "测试分层",
 )
 
@@ -238,6 +243,25 @@ def test_auditor_prompt_and_bounded_revision_contract_are_documented() -> None:
     assert "audited-report-workflow:v1" in prompt_contract
     assert "最多一次报告级返工" in prompt_contract
     assert "安全降级报告" in prompt_contract
+
+
+def test_case_memory_contract_is_versioned_audited_and_confirmed_only() -> None:
+    """确认长期案例记忆文档锁定审计门禁、两阶段去重、来源幂等和默认可见性边界。
+
+    该测试读取 Prompt/运行契约而不是实现源码，防止后续重构在代码仍能运行时悄悄把 pending 候选
+    暴露给 Planner，或遗漏 ``memory_evidence`` 对同 run 重放和证据审计的约束。缺少任一关键术语
+    都表示学习文档没有与 ``case-memory:v1`` 实现同步，应在合并前失败。
+    """
+
+    prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
+
+    assert "case-memory:v1" in prompt_contract
+    assert "pending" in prompt_contract
+    assert "exact signature" in prompt_contract
+    assert "pgvector cosine" in prompt_contract
+    assert "same run idempotency" in prompt_contract
+    assert "confirmed-only" in prompt_contract
+    assert "memory_evidence" in prompt_contract
 
 
 def test_ablation_report_labels_measured_values_and_honest_zero_gain() -> None:
