@@ -165,11 +165,11 @@ class AuditorConfiguration(BaseModel):
 
 
 class MemoryConfiguration(BaseModel):
-    """公开长期记忆存储状态、向量空间、去重/查询预算和三类状态计数。
+    """公开长期记忆存储状态、向量空间、去重/图关系/查询预算和三类状态计数。
 
     响应不包含案例正文、embedding 或数据库 URL；disabled 表示未配置 PostgreSQL，因此记忆 API
-    返回 503。Provider/维度与 GraphRAG 共用同一已验证 Embedding 空间；查询字符上限约束顶层
-    诊断把实时上下文组合成历史检索文本时的成本。
+    返回 503。Provider/维度与 GraphRAG 共用同一已验证 Embedding 空间；独立图阈值连接未达到
+    canonical 去重条件的 confirmed 案例，查询字符上限则约束顶层诊断组合历史检索文本的成本。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -179,6 +179,7 @@ class MemoryConfiguration(BaseModel):
     embedding_provider: str
     embedding_dimensions: int
     dedup_similarity_threshold: float
+    graph_similarity_threshold: float
     default_search_limit: int
     query_max_chars: int
     counts: MemoryCounts
@@ -424,6 +425,7 @@ async def lifespan(app: FastAPI):
                 embedding_provider,
                 dedup_similarity_threshold=settings.memory_dedup_similarity_threshold,
                 default_search_limit=settings.memory_search_limit,
+                graph_similarity_threshold=settings.case_graph_similarity_threshold,
             )
             memory_counts = await memory_runtime.counts()
             database_status = "ok"
@@ -589,6 +591,7 @@ async def health(request: Request) -> HealthResponse:
             embedding_provider=settings.embedding_provider,
             embedding_dimensions=settings.embedding_dimensions,
             dedup_similarity_threshold=settings.memory_dedup_similarity_threshold,
+            graph_similarity_threshold=settings.case_graph_similarity_threshold,
             default_search_limit=settings.memory_search_limit,
             query_max_chars=settings.memory_query_max_chars,
             counts=request.app.state.memory_counts,

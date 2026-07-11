@@ -95,7 +95,8 @@ class GraphRetrievalService:
             limit=seed_limit,
         )
 
-        # SIMILAR_TO 留给已确认案例能力；当前在线故障链只沿事实、因果和方案关系扩展。
+        # SIMILAR_TO 只由已确认案例注册器写入；纳入白名单后，case 向量种子才能从任一方向扩展
+        # 到相关先例，同时 pending/rejected 因没有图节点而无法借此进入上下文。
         allowed_relations = {
             KnowledgeRelationType.DEPENDS_ON,
             KnowledgeRelationType.CAUSED_BY,
@@ -104,6 +105,7 @@ class GraphRetrievalService:
             KnowledgeRelationType.RUNS_ON,
             KnowledgeRelationType.PRODUCES,
             KnowledgeRelationType.CONSUMES,
+            KnowledgeRelationType.SIMILAR_TO,
         }
         paths_by_id: dict[str, ScoredGraphPath] = {}
         if mode is not RetrievalMode.VECTOR_ONLY:

@@ -1,7 +1,8 @@
 """公开经审计长期案例记忆的候选、去重、状态决策和检索服务。
 
 本包只在 Auditor accepted 后暂存 pending 记忆，使用 PostgreSQL/pgvector 去重，并只召回 confirmed
-案例。它不是第三个 Agent，也不覆盖本次实时 Observation。
+案例；confirmed 还会在同一事务注册 GraphRAG case 节点和相似边。它不是第三个 Agent，也不覆盖
+本次实时 Observation。
 """
 
 from app.memory.models import (

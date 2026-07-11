@@ -540,10 +540,14 @@ status=`accept` 且报告至少有一个根因时，才能投影候选；degrade
 默认检索是 confirmed-only：pending 与 rejected 必须在 SQL 层排除，领域响应再次校验状态。
 confirm/reject 是显式用户决策，允许 rejected 重新 confirm，但不提供恢复 pending 的隐式动作。
 embedding 只保存在内部存储模型和 pgvector 列，不进入 Planner Prompt、公开 API、事件或日志。
+confirm 还会在同一数据库事务把案例注册为 GraphRAG `case` 节点，并按独立阈值写入双向
+`SIMILAR_TO`；reject 删除节点并级联清边。图同步失败必须回滚状态，不能返回部分成功。
 
 ### 5.2 历史匹配输出契约
 
-历史案例匹配首先使用 confirmed-only pgvector 相似度和未来的 `SIMILAR_TO` 关系确定候选；当前
+历史案例匹配当前首先使用 confirmed-only pgvector 相似度确定候选；confirmed 案例已经注册为
+GraphRAG `case` 节点并建立 `SIMILAR_TO`，通用 GraphRAG 可沿该关系扩展，但 history matcher 尚未
+把图邻居合并进候选集。当前
 `explain_case_matches` 使用确定性规则比较组件、症状、候选根因和 TOOL Evidence，生成共同点、
 差异点、参考方案和避坑提示。它不调用第三个 Agent，不重新排序、过滤或修改 similarity。
 
@@ -570,7 +574,8 @@ pitfall_warnings 和 evidence_refs；evidence_refs 必须包含 case_id，并最
 根因不一致时 differences 明确写出冲突，pitfall_warnings 禁止直接复用历史方案。
 
 当前顶层诊断图已把 raw CaseMemory 和确定性解释同时接入 Planner/Auditor，并投影进最终报告。
-`SIMILAR_TO` 图关系仍未实现，matcher 的文本重叠规则也不冒充 LLM 语义判断或事实证明。
+`SIMILAR_TO` 已由确定性注册器写入并可被 GraphRAG 路径召回；matcher 仍只使用 pgvector 候选，
+其文本重叠规则也不冒充 LLM 语义判断或事实证明。
 
 ## 6. 顶层诊断编排运行契约
 

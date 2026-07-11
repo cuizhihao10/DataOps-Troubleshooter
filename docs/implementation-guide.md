@@ -569,24 +569,68 @@ Planner/历史 capability 使用这些结果时仍必须让本次实时 Observat
 签名再次命中某条旧案例时会用当前 Provider 重算该条向量，但完整 Provider 切换仍应先提供显式的
 离线重嵌入与审计命令，不能直接修改 Provider ID 冒充向量兼容。
 
-### 13.6 生命周期、健康检查与当前范围
+### 13.6 confirmed 案例注册 GraphRAG 与 `SIMILAR_TO`
+
+`PostgresCaseGraphRegistrar` 是确定性持久化组件，不是第三个 Agent，也不调用 Chat/Embedding
+Provider。它只接收仓储已经验证的 `StoredCaseMemory`，把 `mem_<16hex>` 稳定映射为
+`case_<16hex>` 节点。节点类型固定为 `case`，`source_id` 保留原 memory ID，正文按症状、根因、
+故障路径、方案、组件、标签和证据引用的稳定顺序生成；超出知识节点上限时从 4000 字符处裁剪，
+并把根因/症状放在前部以保留主要检索语义。节点 reliability 固定为 0.9，表示“用户确认且来源可
+追踪的结构化案例”，但不把历史结论提升为实时事实。
+
+案例节点直接复用 `case_memories.embedding`、`embedding_provider` 和 `embedding_dimensions`。
+确认动作不会再次访问远端 Provider，因而记忆搜索和 GraphRAG 节点始终位于同一数学空间；内部
+向量仍不进入 API、Prompt、日志或事件。upsert 前会锁定同 ID 节点，并要求已有节点同时满足
+`node_type=case` 和 `source_id=memory_id`。若人工种子或其他来源占用了该稳定 ID，注册显式失败而
+不是覆盖来源，外层事务随后回滚用户确认。
+
+图相似阈值使用独立配置 `DATAOPS_CASE_GRAPH_SIMILARITY_THRESHOLD`，默认 0.75，并由 Settings
+保证不高于记忆去重阈值 0.92。两者必须分开：去重回答“是否是同一 canonical 案例”，图关系回答
+“两个保留案例是否足够相似可供参考”；若两个阈值完全相同，达到相似边阈值的同组件候选通常已经
+先被合并，案例图会很难形成有意义关系。邻居查询只比较 confirmed、相同 Provider 和相同维度，
+排除自身及零相似度，并用每节点最多 20 个邻居控制小型图写放大。
+
+PostgreSQL 的边是有向的，而案例相似在业务上对称，因此每对案例写 A→B 与 B→A 两条
+`SIMILAR_TO`。方向、两端节点和来源版本 `case-memory-graph:v1` 共同生成稳定 SHA-256 短 edge ID；
+weight 保存裁剪后的 cosine similarity，`source_span` 明确记录两个节点和分数。每次注册先删除本
+组件拥有且触及当前节点的旧相似边，再按最新向量快照重建，保证重复 confirm、重新 confirm 和已
+confirmed 案例后续合并都幂等且不遗留过期关系。候选旧案例节点会在写边前渐进 upsert，因此升级
+前已经 confirmed 但尚未注册的相似邻居也能被补齐。
+
+`PostgresMemoryRuntime.decide()` 在一个 `AsyncSession.begin()` 内依次执行状态变更和图同步：
+confirm 读取内部快照并注册节点/边；reject 删除动态节点，`knowledge_edges` 两端外键的
+`ON DELETE CASCADE` 原子清除所有入边/出边。`stage()` 也会在重复报告合并到已 confirmed 案例后
+重建图，因为该合并可能改变正文和 embedding。节点冲突、pgvector、唯一约束、外键或 Pydantic
+任一步失败都会回滚状态/合并与图写入，不允许出现“confirmed 但没有图节点”或“记忆已更新但图
+仍使用旧向量”的部分成功。
+
+在线 `GraphRetrievalService` 现在把 `SIMILAR_TO` 加入批准关系白名单。case 节点可以通过全文或
+相同 Provider 的 pgvector 成为种子，再沿真实双向边扩展为带 node/edge/source/path_id 的证据路径。
+独立历史案例搜索目前仍以 confirmed-only pgvector 返回候选；图关系已经能参与通用 GraphRAG
+上下文，但把它加入 history matcher 的候选合并/去重仍是后续切片，不能把当前实现宣传为已经用图
+重新排序所有历史匹配。
+
+### 13.7 生命周期、健康检查与当前范围
 
 FastAPI lifespan 仅在 PostgreSQL 配置并通过连接/种子检查后创建 `PostgresMemoryRuntime`。Runtime
 只保存 session factory、Embedding Provider 和预算；每次写入创建独立事务，每次查询创建短只读
 会话，避免跨请求共享非线程安全 `AsyncSession`。`/health` 报告契约、Provider、维度、去重阈值、
-默认 limit 及 pending/confirmed/rejected 计数，但不公开数据库 URL、密码或 embedding 内容。
+图相似阈值、默认 limit 及 pending/confirmed/rejected 计数，但不公开数据库 URL、密码或 embedding
+内容。知识节点/边数字仍是 lifespan 启动快照；动态案例图的实时规模通过 PostgreSQL 专项查询验证，
+后续若 UI 需要实时图计数再单独设计读接口，避免高频健康探针放大数据库负载。
 
 本切片已经实现并验证候选构建、暂存/合并、两阶段去重、确认状态、默认搜索和 API。顶层工作流
 还会把 raw matches 交给 `explain_case_matches`，生成共同点、差异点、参考动作、避坑提示和引用，并
-投影到 Planner/Auditor/报告。尚未实现的是 GraphRAG `case` 节点、`SIMILAR_TO`、删除 API 和模型级
-语义解释；确定性 matcher 不应被宣传成通用自然语言理解。
+投影到 Planner/Auditor/报告。GraphRAG `case` 节点、双向 `SIMILAR_TO`、拒绝清理和真实路径召回
+已经接通；尚未实现的是删除案例 API、history matcher 将图关系并入候选集，以及模型级复杂语义
+解释。确定性 matcher 不应被宣传成通用自然语言理解。
 
-### 13.7 验证方式
+### 13.8 验证方式
 
 - 单元测试覆盖审计资格、无根因跳过、exact/vector 合并、same run 幂等、canonical 字段保留和状态可见性。
 - API 集成测试覆盖数据库禁用 503、confirm/reject/search Schema 和健康计数刷新。
-- PostgreSQL 集成测试真实执行 Alembic、advisory lock 范围、pgvector cosine、复合来源关联和数据库约束。
-- `tests/unit/test_documentation_policy.py` 把 Service、Repository、Runtime 和迁移列为关键边界文件，要求 callable docstring 与关键步骤内联注释同步存在。
+- PostgreSQL 集成测试真实执行 Alembic、advisory lock、pgvector cosine、节点/双向边 upsert、重复确认幂等、GraphRAG 路径、reject 级联清理和节点冲突事务回滚。
+- `tests/unit/test_documentation_policy.py` 把 Service、Repository、Runtime、Graph Registrar 和迁移列为关键边界文件，要求 callable docstring 与关键步骤内联注释同步存在。
 
 ```powershell
 $env:DATAOPS_TEST_DATABASE_URL='postgresql+asyncpg://...'
@@ -668,8 +712,9 @@ runtime：首个 session 暂存并确认，第二个 session pgvector 召回，P
 最终 exact signature 合并且 occurrence_count 从 1 增至 2。
 
 当前已提供 `/api/v1/sessions`、message/run/event 资源、顶层 runtime 和 session checkpoint 恢复；
-可靠后台执行仍未完成。GraphRAG `case`/`SIMILAR_TO` 注册、模型级复杂语义对比和历史解释评测仍
-未完成；当前确定性规则只覆盖可客观比较的字段，不宣称理解任意自然语言冲突。
+可靠后台执行仍未完成。GraphRAG `case`/`SIMILAR_TO` 已在记忆决策事务接通，但 history matcher
+尚未合并图邻居；模型级复杂语义对比和历史解释评测也仍未完成。当前确定性规则只覆盖可客观比较
+的字段，不宣称理解任意自然语言冲突。
 
 ## 15. 资源化诊断 API
 
@@ -812,5 +857,5 @@ python -m pytest -m postgres
 
 - 模型级 Embedding Provider（当前默认实现是离线 feature hashing 基线）。
 - LangGraph 逐节点中断恢复、可靠后台 run worker/取消/重试，以及超长会话滚动摘要归档。
-- 已确认案例 GraphRAG `case`/`SIMILAR_TO` 注册，以及模型级复杂历史语义对比。
+- history matcher 使用 `SIMILAR_TO` 合并候选，以及模型级复杂历史语义对比。
 - 删除案例 API、28 个完整 Golden Cases 和长期记忆召回评测。

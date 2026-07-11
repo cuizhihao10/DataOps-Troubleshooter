@@ -44,6 +44,7 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/memory/service.py"),
     Path("app/memory/repository.py"),
     Path("app/memory/runtime.py"),
+    Path("app/memory/graph_registration.py"),
     Path("app/persistence/migrations/versions/20260713_0003_case_memories.py"),
     Path("app/persistence/migrations/versions/20260715_0004_diagnosis_resources.py"),
     Path("app/persistence/run_repository.py"),
@@ -270,6 +271,9 @@ def test_case_memory_contract_is_versioned_audited_and_confirmed_only() -> None:
     assert "same run idempotency" in prompt_contract
     assert "confirmed-only" in prompt_contract
     assert "memory_evidence" in prompt_contract
+    assert "GraphRAG `case` 节点" in prompt_contract
+    assert "双向" in prompt_contract
+    assert "图同步失败必须回滚状态" in prompt_contract
 
 
 def test_top_level_diagnosis_workflow_contract_orders_recall_audit_and_staging() -> None:

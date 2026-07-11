@@ -88,6 +88,7 @@ async def test_health_reports_validated_contract_baseline() -> None:
         "embedding_provider": "deterministic-hash:v1",
         "embedding_dimensions": 128,
         "dedup_similarity_threshold": 0.92,
+        "graph_similarity_threshold": 0.75,
         "default_search_limit": 5,
         "query_max_chars": 4000,
         "counts": {"pending": 0, "confirmed": 0, "rejected": 0},

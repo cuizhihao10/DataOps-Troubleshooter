@@ -40,6 +40,16 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
     engine = create_database_engine(DATABASE_URL)
     factory = create_session_factory(engine)
     try:
+        # 动态 confirmed 案例与人工 seed 共用 knowledge_nodes；本专项只验证固定 seed 数量，因此先
+        # 清理测试运行可能残留的 case 节点，外键级联会同步删除其 SIMILAR_TO 边。
+        async with factory.begin() as session:
+            await session.execute(
+                text(
+                    "DELETE FROM knowledge_nodes "
+                    "WHERE node_type = 'case' AND source_id LIKE 'mem_%'"
+                )
+            )
+
         # 扩展检查证明迁移已真正启用 pgvector，而不是仅在 ORM 中声明 Vector 类型。
         async with engine.connect() as connection:
             vector_version = await connection.scalar(

@@ -211,8 +211,15 @@ async def test_confirmed_memory_is_recalled_next_session_and_new_report_is_merge
     )
 
     try:
-        # 案例表由本专项测试独占；知识图种子不修改，关联表必须先删以满足外键顺序。
+        # 动态 case 节点不属于人工种子；先删节点触发关系级联，再清 Evidence 和案例主表，避免
+        # 上次中断残留影响本轮 confirmed 注册及后续图种子数量断言。
         async with factory.begin() as session:
+            await session.execute(
+                text(
+                    "DELETE FROM knowledge_nodes "
+                    "WHERE node_type = 'case' AND source_id LIKE 'mem_%'"
+                )
+            )
             await session.execute(text("DELETE FROM memory_evidence"))
             await session.execute(text("DELETE FROM case_memories"))
 
@@ -279,8 +286,14 @@ async def test_confirmed_memory_is_recalled_next_session_and_new_report_is_merge
         assert len(visible) == 1
         assert visible[0].memory.occurrence_count == 2
     finally:
-        # 失败路径同样清理合成案例并释放 asyncpg 池，避免后续 postgres marker 观察到残留状态。
+        # 失败路径同样先清动态图节点再清案例审计数据，并释放连接池，避免后续 marker 观察残留。
         async with factory.begin() as session:
+            await session.execute(
+                text(
+                    "DELETE FROM knowledge_nodes "
+                    "WHERE node_type = 'case' AND source_id LIKE 'mem_%'"
+                )
+            )
             await session.execute(text("DELETE FROM memory_evidence"))
             await session.execute(text("DELETE FROM case_memories"))
         await engine.dispose()

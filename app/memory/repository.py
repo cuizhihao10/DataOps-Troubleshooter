@@ -234,6 +234,27 @@ class PostgresCaseMemoryRepository:
         record = await self._session.scalar(statement)
         return _memory_from_record(record) if record is not None else None
 
+    async def get_stored(
+        self,
+        memory_id: str,
+        *,
+        for_update: bool = False,
+    ) -> StoredCaseMemory | None:
+        """按 ID 读取包含 embedding 元数据的内部案例快照，并可获取事务行锁。
+
+        该方法只供 memory/persistence 边界同步 GraphRAG 使用，不能作为 API 或 Planner 响应；未命中
+        返回 ``None``。``for_update`` 锁随调用方事务释放，数据库污染会在 ``StoredCaseMemory``
+        转换时显式失败，避免损坏向量进入图注册流程。
+        """
+
+        if not memory_id.strip():
+            raise ValueError("memory_id must not be blank")
+        statement = select(CaseMemoryRecord).where(CaseMemoryRecord.memory_id == memory_id)
+        if for_update:
+            statement = statement.with_for_update()
+        record = await self._session.scalar(statement)
+        return _stored_from_record(record) if record is not None else None
+
     async def set_status(self, memory_id: str, status: MemoryStatus) -> CaseMemory | None:
         """把案例显式切换为 confirmed/rejected，并支持同目标幂等与纠错反向切换。
 

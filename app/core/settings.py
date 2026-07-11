@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     retrieval_context_max_paths: int = Field(default=4, ge=0, le=20)
     diagnosis_retrieval_seed_limit: int = Field(default=5, ge=1, le=20)
     memory_dedup_similarity_threshold: float = Field(default=0.92, ge=0, le=1)
+    case_graph_similarity_threshold: float = Field(default=0.75, ge=0, le=1)
     memory_search_limit: int = Field(default=5, ge=1, le=20)
     memory_query_max_chars: int = Field(default=4000, ge=256, le=20_000)
 
@@ -92,12 +93,18 @@ class Settings(BaseSettings):
     def validate_runtime_configuration(self) -> Settings:
         """在启动时联合校验检索预算和可选 Planner Provider 的安全配置。
 
-        检索模型复用权重/预算契约；Planner/Auditor 共享 Chat 端点，禁止 URL 凭据，启用模型时
-        强制 SecretStr key。任一错误都会阻止半配置实例启动，而不是延迟到首次模型请求。
+        检索模型复用权重/预算契约；案例图阈值不能高于 canonical 去重阈值；Planner/Auditor 共享
+        Chat 端点，禁止 URL 凭据，启用模型时强制 SecretStr key。任一错误都会阻止半配置实例
+        启动，而不是延迟到首次模型请求。
         """
 
         self.hybrid_scoring_weights()
         self.evidence_bundle_budget()
+        # 图关系应覆盖“相似但未达到合并条件”的区间；若阈值更高，配置语义与产品说明相反。
+        if self.case_graph_similarity_threshold > self.memory_dedup_similarity_threshold:
+            raise ValueError(
+                "case_graph_similarity_threshold must not exceed memory dedup threshold"
+            )
         # 模型端点不得在 URL 中携带用户名/密码；凭据只能进入 SecretStr chat_api_key。
         if self.chat_base_url.username or self.chat_base_url.password:
             raise ValueError("chat_base_url must not include user information")
