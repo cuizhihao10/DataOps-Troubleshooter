@@ -1,0 +1,61 @@
+{
+  "contract_id": "history-impact-eval:v1",
+  "cases": [
+    {
+      "case_id": "history_impact_action_guidance",
+      "user_query": "请检查 LTS 任务等待上游，并参考已确认案例选择最有信息增益的只读检查。",
+      "components": [
+        "lts"
+      ],
+      "scenario_id": "history_action_guidance",
+      "required_tool_names": [
+        "lts.get_dependency_topology"
+      ],
+      "optional_tool_names": [],
+      "allowed_root_causes": [
+        "上游数据未按时就绪"
+      ],
+      "forbidden_root_causes": [],
+      "minimum_history_matches": 1,
+      "expect_history_conflict": false
+    },
+    {
+      "case_id": "history_impact_realtime_conflict_guard",
+      "user_query": "请检查本次 LTS 资源队列异常，并说明旧的上游未就绪案例是否仍可直接复用。",
+      "components": [
+        "lts"
+      ],
+      "scenario_id": "history_realtime_conflict",
+      "required_tool_names": [
+        "lts.get_task_status"
+      ],
+      "optional_tool_names": [],
+      "allowed_root_causes": [
+        "LTS 资源队列配额不足"
+      ],
+      "forbidden_root_causes": [
+        "上游数据未按时就绪"
+      ],
+      "minimum_history_matches": 1,
+      "expect_history_conflict": true
+    },
+    {
+      "case_id": "history_impact_stable_reference",
+      "user_query": "请检查 BDS 任务资源压力，并对照已确认的同根因历史案例。",
+      "components": [
+        "bds"
+      ],
+      "scenario_id": "history_stable_reference",
+      "required_tool_names": [
+        "bds.get_task_log"
+      ],
+      "optional_tool_names": [],
+      "allowed_root_causes": [
+        "BDS 资源配额不足"
+      ],
+      "forbidden_root_causes": [],
+      "minimum_history_matches": 1,
+      "expect_history_conflict": false
+    }
+  ]
+}

@@ -26,6 +26,7 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/orchestration/report_workflow.py"),
     Path("app/orchestration/diagnosis_workflow.py"),
     Path("app/orchestration/diagnosis_runtime.py"),
+    Path("app/orchestration/history_evaluation.py"),
     Path("app/reporting/draft.py"),
     Path("app/reporting/policy.py"),
     Path("app/reporting/revision.py"),
@@ -161,6 +162,8 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
     assert "Vector-only / Vector+Graph 消融" in guide
     assert "长期记忆召回消融评测" in guide
     assert "memory-recall-eval:v1" in guide
+    assert "历史案例端到端影响消融评测" in guide
+    assert "history-impact-eval:v1" in guide
     assert "尚未完成" in guide
     assert "代码注释的强制粒度" in guide
     assert "callable 级 docstring" in guide
@@ -182,6 +185,26 @@ def test_memory_recall_measured_report_documents_scope_and_no_generalized_claim(
     assert "Macro Precision@K" in report
     assert "Forbidden hit" in report
     assert "不能外推" in report
+
+
+def test_history_impact_report_documents_measured_scope_and_realtime_priority() -> None:
+    """确认端到端历史影响报告同时记录行为增益、零根因增益和不可外推边界。
+
+    该门禁防止作品集只展示必要 Action 覆盖提高，却删除根因命中持平、确定性替身、小样本和实时
+    事实优先限制；报告还必须说明 off/on、ToolEvent、历史投影和冲突保护的具体实测口径。
+    """
+
+    report = Path("docs/history-impact-eval-results.md").read_text(encoding="utf-8")
+
+    assert "history-impact-eval:v1" in report
+    assert "Memory off" in report
+    assert "Memory on" in report
+    assert "必要 Action Macro 覆盖率 | 0.6667 | 1.0000 | +0.3333" in report
+    assert "Top-1 根因命中率 | 1.0000 | 1.0000 | 0.0000" in report
+    assert "根因 TOOL 引用率 | 1.0000 | 1.0000 | 0.0000" in report
+    assert "历史冲突保护通过率" in report
+    assert "确定性替身" in report
+    assert "不能据此宣称真实模型" in report
 
 
 def test_prompt_contract_versions_budgeted_retrieval_inputs() -> None:
@@ -319,6 +342,11 @@ def test_top_level_diagnosis_workflow_contract_orders_recall_audit_and_staging()
     assert "Planner 与 Auditor" in prompt_contract
     assert "stage_case_memory" in prompt_contract
     assert "skipped_not_accepted" in prompt_contract
+    assert "history-impact-eval:v1" in prompt_contract
+    assert "memory_off" in prompt_contract
+    assert "memory_on" in prompt_contract
+    assert "ToolEvent" in prompt_contract
+    assert "不能单独" in prompt_contract
 
 
 def test_diagnosis_resource_contract_documents_persistence_events_and_failure_semantics() -> None:

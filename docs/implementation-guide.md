@@ -851,6 +851,45 @@ rejected 等安全负样本。逐案例还记录 graph rescued label 与 regress
 和 Precision@K 均从 0.8333 变为 1.0000，禁止案例命中为零。该 +0.1667 只适用于小型角度 fixture，
 不能外推为通用提升；替换模型、数据或预算后必须重跑。
 
+### 16.2 历史案例端到端影响消融评测
+
+检索层 Recall 提高并不能自动证明 Planner 行为或最终报告更好，因此 `history-impact-eval:v1` 在
+`app/orchestration/history_evaluation.py` 增加第二层 Memory off/on 消融。`data/evals/history_impact_cases.json`
+固定三条合成诊断：历史引导必要 Action、历史根因与实时事实冲突、同根因稳定参考。每条 case 同时
+标注意图输入、组件、scenario、必要/可选工具、允许/禁止根因、最小历史命中和是否要求冲突保护。
+
+调用链如下：
+
+```text
+load_history_impact_eval_suite
+  -> runner.run(case, memory_off)
+  -> runner.run(case, memory_on)
+  -> validate paired trigger/query/history boundary
+  -> read actual ToolEvent and audited DiagnosisReport
+  -> calculate per-case delta and macro measured report
+```
+
+必要 Action 从实际 `ToolEvent` 而不是 Planner 摘要提取，因此被 capability、trace、重复调用或引用
+门禁拦截的 Action 不会虚增覆盖。根因实时引用率只认可本次 TOOL Evidence；案例 ID、相似度或
+`SIMILAR_TO` edge 只能说明历史来源，不能单独支撑当前根因。memory-on 的 raw memory ID 还必须按
+原顺序完整进入 `DiagnosisReport.similar_cases`，否则历史投影失败。
+
+冲突案例进一步从 raw `CaseMemory.root_cause` 找到 forbidden 历史根因，并要求对应确定性解释同时
+包含“根因不一致/冲突”和“禁止直接复用”提示。最终报告若采纳 forbidden 根因、根因缺少 TOOL 引用
+或冲突提示被删，都会计入 realtime priority failure；这比只断言“报告有 similar_cases”更能证明
+旧经验没有覆盖本次事实。
+
+`tests/integration/test_history_impact_langgraph.py` 运行真实 `BoundedReactLoop`、
+`AuditedReportWorkflow` 和 `AuditedDiagnosisWorkflow`。Planner/Auditor 使用确定性协议替身，工具响应
+仍经过生产 `normalize_observation`，因此 Action、Evidence、ToolEvent、Builder、规则 Validator、
+Auditor 和 staging 都走真实边界。历史搜索使用合成 confirmed match；真实 PostgreSQL/pgvector
+召回准确性已由 16.1 单独验证，两个实验不混用变量。
+
+当前三案例实测记录在 `docs/history-impact-eval-results.md`：必要 Action macro 覆盖从 0.6667 变为
+1.0000，意外 Action macro 率从 0.3333 变为 0；Memory off/on 的 Top-1 根因命中与 TOOL 引用率都为
+1.0000，历史投影和冲突保护通过率也为 1.0000。这些结果只证明固定脚本下编排和安全契约生效，
+不能外推为真实模型准确率、时延或成本提升。
+
 PostgreSQL 测试使用 `postgres` marker。普通 `pytest` 默认排除它，保持无 Docker 环境下的快速反馈；显式数据库验证使用：
 
 ```powershell
@@ -865,7 +904,7 @@ python -m pytest -m postgres
 | `requirements*.lock` | 由 pip-tools 机械生成，手工注释会在再生成时丢失。 | 依赖来源在 `pyproject.toml`，一致性由 `pip check` 和 Docker 构建验证。 |
 | `data/fixtures/**/*.json` | 标准 JSON 不允许注释。 | Pydantic Scenario Schema 和 Fixture 测试。 |
 | `data/knowledge/*.json` | 需要被标准加载器和其他语言读取。 | `KnowledgeSeedBundle`、source_span 校验和 PostgreSQL 集成测试。 |
-| `data/evals/*.json` | 标准评测数据不能加入非标准注释。 | Graph/Memory Eval Schema、快速加载测试、本文档和两份实测报告。 |
+| `data/evals/*.json` | 标准评测数据不能加入非标准注释。 | Graph/Memory/History Impact Eval Schema、快速加载测试、本文档和三份实测报告。 |
 | PNG / DOCX | 二进制格式不能可靠保存代码式注释。 | Markdown 产品基线、本文档和正式阅读版正文。 |
 
 ## 18. 当前完成度与下一步
@@ -885,6 +924,7 @@ python -m pytest -m postgres
 - 确定性报告草稿、引用/风险门禁、独立 Auditor Structured Outputs 与最多一次报告级返工。
 - `case-memory:v2` 受控长期案例、向量/图融合召回、检索通道/分量/edge 引用、同 run 幂等和 confirmed-only API。
 - `memory-recall-eval:v1` 三条长期记忆召回案例、双模式消融、Recall/Precision/forbidden 指标和 PostgreSQL 实测报告。
+- `history-impact-eval:v1` 三条 Memory off/on 诊断案例、实际 ToolEvent 行为指标、实时事实优先门禁和真实 LangGraph 实测报告。
 - `audited-diagnosis-workflow:v2` 按需召回、两阶段案例解释、ReAct、Auditor 和审计后 staging 顶层闭环。
 - `diagnosis-resources:v2` session/message/run/event PostgreSQL 资源 API、完整相似案例结果和安全失败事件。
 - `session-checkpoint:v1` 同 session 成功快照、追问恢复、版本门禁、失败保护和跨 run Action 去重。

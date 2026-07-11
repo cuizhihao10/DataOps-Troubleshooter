@@ -609,6 +609,29 @@ LLM 语义判断或事实证明，历史结论继续服从本次实时 Observati
 和 Precision@K；逐案例输出 graph rescued/regressed label；suite 输出 macro 平均和差值。报告固定
 `metric_kind=measured`，只描述当前小型合成检索集，不得写成最终诊断准确率或通用模型提升。
 
+### 5.4 历史案例端到端影响消融契约
+
+`history-impact-eval:v1` 对应产品设计中的 Memory off/on 消融。它不修改 Planner/Auditor Prompt，
+而是用同一条已校验合成 case 顺序运行 `memory_off` 与 `memory_on`；唯一批准变量是 capability 的
+history trigger。off 必须使用 `not_requested` 且不能含 query、raw memory 或解释，on 必须真实触发
+confirmed-only 召回并达到 case 标注的最小命中数。两组最终 `AgentState.user_query` 必须与 fixture
+完全一致，防止通过偷换问题制造增益。
+
+评测从强类型运行结果读取以下客观数据：
+
+- 必要 Action 覆盖和意外 Action 只读取 `ToolEvent`，Planner 提出但被策略门禁拦截的 Action 不计入；
+- Top-1 根因和 forbidden 根因只读取最终审计报告；
+- 根因实时引用完整率只认可本次 `EvidenceSourceType.TOOL` ID，case ID 或 `SIMILAR_TO` edge 不能单独
+  支持当前根因；
+- raw recalled memory ID 必须按顺序完整投影为最终 `similar_cases`；
+- 历史根因与本次允许根因冲突时，matcher 必须同时给出根因差异和“禁止直接复用”避坑提示。
+
+逐案例输出 off/on 指标、Action 覆盖/意外率差值、Top-1 是否保持、实时事实优先是否保持和 Action
+回归标记；suite 输出 macro Action 覆盖、macro 意外率、根因命中率、实时引用率、历史投影通过率、
+冲突保护通过率及失败计数。报告固定 `metric_kind=measured`。当前集成 runner 使用真实三段 LangGraph
+和生产 Observation 标准化，但 Planner/Auditor、历史搜索数据均为确定性合成替身；它证明编排和
+安全契约，不代表付费模型质量或 PostgreSQL 召回效果，后者由 `memory-recall-eval:v1` 单独测量。
+
 ## 6. 顶层诊断编排运行契约
 
 顶层契约版本为 `audited-diagnosis-workflow:v2`，固定顺序为：
