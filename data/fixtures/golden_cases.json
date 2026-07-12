@@ -531,5 +531,28 @@
       "need_user_input"
     ],
     "expected_risk_level": "low"
+  },
+  {
+    "contract_id": "golden-case:v7",
+    "case_id": "golden_ambiguous_flashsync_missing_causal_log",
+    "case_category": "ambiguous_or_insufficient",
+    "user_query": "ods_inventory_delta 同步延迟很高，请检查是否能确认根因。",
+    "scenario_id": "flashsync_incomplete_root_cause_evidence",
+    "expected_intent": "single_component_diagnosis",
+    "required_tools": [
+      "flashsync.get_sync_delay",
+      "flashsync.get_sync_log",
+      "flashsync.check_consistency"
+    ],
+    "required_fault_paths": [],
+    "allowed_root_causes": [],
+    "required_evidence_sources": [
+      "flashsync_delay_inventory_incomplete",
+      "flashsync_consistency_inventory_incomplete"
+    ],
+    "expected_stop_reasons": [
+      "evidence_insufficient"
+    ],
+    "expected_risk_level": "low"
   }
 ]

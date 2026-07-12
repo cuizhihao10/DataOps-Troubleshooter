@@ -1,0 +1,87 @@
+{
+  "scenario_id": "flashsync_incomplete_root_cause_evidence",
+  "title": "FlashSync 症状证据完整但根因日志缺失",
+  "description": "延迟与一致性工具成功确认同步积压，但根因日志返回 EMPTY_RESULT；用于验证系统区分症状事实和因果结论。",
+  "components": ["flashsync"],
+  "expected_behavior": "系统应保留延迟和一致性 Observation，明确根因日志缺失，并在没有因果证据时安全停止而不是猜测根因。",
+  "tool_results": [
+    {
+      "tool_name": "flashsync.get_sync_delay",
+      "request": {
+        "resource_id": "ods_inventory_delta",
+        "time_range": {
+          "start": "2026-07-13T08:00:00+08:00",
+          "end": "2026-07-13T09:00:00+08:00"
+        },
+        "scenario_id": "flashsync_incomplete_root_cause_evidence",
+        "trace_id": "trace_flashsync_incomplete_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "delay_seconds": 2100,
+          "backlog_records": 74,
+          "throughput_per_second": 0
+        },
+        "evidence": [
+          {
+            "source_id": "flashsync_delay_inventory_incomplete",
+            "content": "同步延迟达到 2100 秒，存在 74 条积压且当前吞吐为零。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T09:01:00+08:00"
+      }
+    },
+    {
+      "tool_name": "flashsync.get_sync_log",
+      "request": {
+        "resource_id": "ods_inventory_delta",
+        "time_range": {
+          "start": "2026-07-13T08:00:00+08:00",
+          "end": "2026-07-13T09:00:00+08:00"
+        },
+        "scenario_id": "flashsync_incomplete_root_cause_evidence",
+        "trace_id": "trace_flashsync_incomplete_001"
+      },
+      "response": {
+        "ok": false,
+        "data": {},
+        "evidence": [],
+        "error_code": "EMPTY_RESULT",
+        "error_message": "配置时间窗内没有可用于判断根因的合成同步日志。",
+        "observed_at": "2026-07-13T09:01:10+08:00"
+      }
+    },
+    {
+      "tool_name": "flashsync.check_consistency",
+      "request": {
+        "resource_id": "ods_inventory_delta",
+        "time_range": {
+          "start": "2026-07-13T08:00:00+08:00",
+          "end": "2026-07-13T09:00:00+08:00"
+        },
+        "scenario_id": "flashsync_incomplete_root_cause_evidence",
+        "trace_id": "trace_flashsync_incomplete_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "consistent": false,
+          "difference_count": 74,
+          "sampled_records": 800
+        },
+        "evidence": [
+          {
+            "source_id": "flashsync_consistency_inventory_incomplete",
+            "content": "一致性抽检发现 74 条目标端缺失记录，与当前积压数量一致，但未提供产生差异的原因。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T09:01:20+08:00"
+      }
+    }
+  ]
+}

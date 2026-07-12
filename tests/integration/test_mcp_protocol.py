@@ -443,6 +443,52 @@ async def test_lts_to_bds_resource_exhaustion_chain_crosses_real_mcp_protocol() 
 
 
 @pytest.mark.asyncio
+async def test_flashsync_partial_evidence_preserves_symptoms_without_fake_cause() -> None:
+    """验证症状工具成功而根因日志为空时，真实 MCP 保留部分证据和失败边界。
+
+    延迟与一致性响应应各产生一条 Evidence，日志 EMPTY_RESULT 则只产生不可重试 ToolEvent、没有伪
+    Evidence。差异数量与积压相等只能确认症状一致，不能让协议层编造 component_error_code；该边界
+    为上层安全降级提供可审计输入。
+    """
+
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    observations = {}
+    for tool_name in (
+        "flashsync.get_sync_delay",
+        "flashsync.get_sync_log",
+        "flashsync.check_consistency",
+    ):
+        observations[tool_name] = await executor.execute(
+            _action(
+                "flashsync_incomplete_root_cause_evidence",
+                "ods_inventory_delta",
+                f"trace_partial_{tool_name.replace('.', '_')}",
+                tool_name=tool_name,
+            )
+        )
+
+    delay = observations["flashsync.get_sync_delay"]
+    log = observations["flashsync.get_sync_log"]
+    consistency = observations["flashsync.check_consistency"]
+    assert delay.response.ok is True
+    assert consistency.response.ok is True
+    assert delay.response.data["backlog_records"] == 74
+    assert consistency.response.data["difference_count"] == 74
+    assert log.response.ok is False
+    assert log.response.error_code is ToolErrorCode.EMPTY_RESULT
+    assert log.evidence == []
+    assert len(log.tool_events) == 1
+    assert log.tool_event.retryable is False
+    assert {
+        delay.response.evidence[0].source_id,
+        consistency.response.evidence[0].source_id,
+    } == {
+        "flashsync_delay_inventory_incomplete",
+        "flashsync_consistency_inventory_incomplete",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "expected_data_key"),
     [
