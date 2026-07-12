@@ -21,8 +21,8 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-PORTFOLIO_EVAL_MANIFEST_CONTRACT_ID = "portfolio-eval-manifest:v3"
-PORTFOLIO_EVAL_RUN_CONTRACT_ID = "portfolio-eval-run:v3"
+PORTFOLIO_EVAL_MANIFEST_CONTRACT_ID = "portfolio-eval-manifest:v4"
+PORTFOLIO_EVAL_RUN_CONTRACT_ID = "portfolio-eval-run:v4"
 DEFAULT_MANIFEST_PATH = Path("data/evals/portfolio_eval_manifest.json")
 _V1_REQUIRED_SUITE_IDS = {
     "graphrag_ablation",
@@ -35,10 +35,17 @@ _REQUIRED_SUITE_IDS_BY_CONTRACT = {
     "portfolio-eval-manifest:v1": _V1_REQUIRED_SUITE_IDS,
     "portfolio-eval-manifest:v2": _V2_REQUIRED_SUITE_IDS,
     "portfolio-eval-manifest:v3": _V2_REQUIRED_SUITE_IDS,
+    "portfolio-eval-manifest:v4": _V2_REQUIRED_SUITE_IDS,
 }
 _GOLDEN_SOURCE_CONTRACT_BY_MANIFEST = {
     "portfolio-eval-manifest:v2": "golden-diagnosis-eval:v1",
     "portfolio-eval-manifest:v3": "golden-diagnosis-eval:v2",
+    "portfolio-eval-manifest:v4": "golden-diagnosis-eval:v3",
+}
+_GOLDEN_COVERAGE_VALUE_BY_MANIFEST = {
+    "portfolio-eval-manifest:v2": 0.1786,
+    "portfolio-eval-manifest:v3": 0.1786,
+    "portfolio-eval-manifest:v4": 0.2857,
 }
 _TEST_TARGET = re.compile(r"^tests/[a-zA-Z0-9_./-]+\.py(?:::[a-zA-Z0-9_\[\]-]+)?$")
 
@@ -129,8 +136,8 @@ class PortfolioSuiteSpec(BaseModel):
 class PortfolioEvalManifest(BaseModel):
     """封装版本化作品集评测层并保证 suite/metric 全局身份唯一。
 
-    v1 保留原四层消融兼容读取；v2 增加 Golden 结果评分；v3 再增加路径“检索并报告”完整率。
-    版本与精确 suite/Golden 来源契约绑定，旧 JSON 不会被新代码静默解释成当前完整运行。
+    v1 保留原四层；v2 增加 Golden 评分；v3 增加路径完整率；v4 将数据扩展到 8 条并增加类别配额。
+    版本与精确 suite、Golden 来源和覆盖快照绑定，旧 JSON 不会被静默解释成当前完整运行。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -139,6 +146,7 @@ class PortfolioEvalManifest(BaseModel):
         "portfolio-eval-manifest:v1",
         "portfolio-eval-manifest:v2",
         "portfolio-eval-manifest:v3",
+        "portfolio-eval-manifest:v4",
     ]
     suites: list[PortfolioSuiteSpec] = Field(min_length=4)
 
@@ -166,6 +174,22 @@ class PortfolioEvalManifest(BaseModel):
             if golden_suite.source_contract_id != expected_golden_source:
                 raise ValueError(
                     f"{self.contract_id} requires Golden source {expected_golden_source}"
+                )
+            coverage_metric = next(
+                (
+                    metric
+                    for metric in golden_suite.metrics
+                    if metric.metric_id == "golden_case_coverage"
+                ),
+                None,
+            )
+            expected_coverage = _GOLDEN_COVERAGE_VALUE_BY_MANIFEST[self.contract_id]
+            if (
+                coverage_metric is None
+                or abs(coverage_metric.treatment_value - expected_coverage) > 1e-4
+            ):
+                raise ValueError(
+                    f"{self.contract_id} requires Golden coverage snapshot {expected_coverage}"
                 )
         metric_ids = [metric.metric_id for suite in self.suites for metric in suite.metrics]
         if len(metric_ids) != len(set(metric_ids)):
@@ -243,11 +267,12 @@ class PortfolioEvalRunReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    contract_id: Literal["portfolio-eval-run:v3"]
+    contract_id: Literal["portfolio-eval-run:v4"]
     manifest_contract_id: Literal[
         "portfolio-eval-manifest:v1",
         "portfolio-eval-manifest:v2",
         "portfolio-eval-manifest:v3",
+        "portfolio-eval-manifest:v4",
     ]
     metric_kind: Literal["measured"] = "measured"
     suites: list[PortfolioSuiteRun] = Field(min_length=4)

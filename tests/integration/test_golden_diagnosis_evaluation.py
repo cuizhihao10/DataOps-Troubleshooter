@@ -1,4 +1,4 @@
-"""用五条版本化 Golden Cases 验证顶层诊断评分与 5/28 发布边界。
+"""用八条版本化 Golden Cases 验证顶层诊断评分、类别配额与 8/28 发布边界。
 
 测试运行器从合成 Fixture 构造真实 ``ToolEvent``/``Evidence``，再通过生产 Pydantic 顶层结果契约
 进入评测器。Planner、Auditor 和报告文本是确定性脚本，因此这些数字只证明数据流与评分规则可
@@ -35,7 +35,7 @@ from app.domain.models import (
     RootCauseConclusion,
     ToolEvent,
 )
-from app.domain.scenarios import GoldenCaseSpec
+from app.domain.scenarios import GoldenCaseCategory, GoldenCaseSpec
 from app.evaluation.golden_diagnosis import (
     GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID,
     evaluate_golden_diagnosis,
@@ -139,12 +139,12 @@ class FixtureBackedGoldenRunner:
 
 
 @pytest.mark.asyncio
-async def test_five_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
-    """验证五条合成案例命中客观契约，同时保持 5/28 未完成标记。
+async def test_eight_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
+    """验证八条合成案例命中客观契约，同时保持 8/28 与分类配额未完成标记。
 
     确定性基线预期意图、必要 Action、允许根因、关键来源、停止原因、引用、风险和安全降级全部
-    命中；三条故意异常/空结果使尝试成功率低于一。覆盖标记必须保持 false，防止 5 条通过被宣传为
-    产品文档要求的 28 条验收已经完成。
+    命中；三条故意异常/空结果使尝试成功率低于一。覆盖标记必须保持 false，防止 8 条通过被宣传为
+    产品文档要求的 28 条验收已经完成；类别计数还必须与 8/10/4/3/3 目标分别对齐。
     """
 
     cases = load_golden_cases(GOLDEN_CASE_FILE)
@@ -154,10 +154,17 @@ async def test_five_golden_cases_produce_versioned_measured_diagnosis_baseline()
 
     assert report.contract_id == GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID
     assert report.metric_kind == "measured"
-    assert report.case_count == 5
+    assert report.case_count == 8
     assert report.target_case_count == 28
-    assert report.case_coverage_rate == pytest.approx(5 / 28)
+    assert report.case_coverage_rate == pytest.approx(8 / 28)
     assert report.target_coverage_complete is False
+    assert report.category_case_counts == {
+        GoldenCaseCategory.SINGLE_COMPONENT: 4,
+        GoldenCaseCategory.CROSS_COMPONENT: 1,
+        GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 1,
+        GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 2,
+        GoldenCaseCategory.MEMORY_RECALL: 0,
+    }
     assert report.intent_accuracy == 1
     assert report.root_cause_top1_hit_rate == 1
     assert report.necessary_action_coverage == 1
@@ -167,7 +174,7 @@ async def test_five_golden_cases_produce_versioned_measured_diagnosis_baseline()
     assert report.citation_completeness == 1
     assert report.unsupported_critical_claim_rate == 0
     assert report.duplicate_action_rate == 0
-    assert report.tool_attempt_success_rate == pytest.approx(0.7)
+    assert report.tool_attempt_success_rate == pytest.approx(16 / 19)
     assert report.risk_level_hit_rate == 1
     assert report.safe_degradation_rate == 1
     assert report.accepted_report_rate == 1

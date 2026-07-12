@@ -61,7 +61,7 @@ class RecordingPytestExecutor:
 
 
 def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -> None:
-    """确认 v3 manifest 精确覆盖五层、十六个指标，并拒绝任意 pytest flag/命令目标。
+    """确认 v4 manifest 精确覆盖五层、十六个指标，并拒绝任意 pytest flag/命令目标。
 
     复制 payload 后把第一 target 改为 ``--collect-only``；Pydantic 必须在执行器之前失败，证明 JSON
     不能把受限 test target 字段变成自由命令入口。
@@ -69,7 +69,7 @@ def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -
 
     manifest = load_portfolio_eval_manifest(MANIFEST_PATH)
 
-    assert manifest.contract_id == "portfolio-eval-manifest:v3"
+    assert manifest.contract_id == "portfolio-eval-manifest:v4"
     assert len(manifest.suites) == 5
     assert sum(len(suite.metrics) for suite in manifest.suites) == 16
     assert sum(suite.requires_postgres for suite in manifest.suites) == 2
@@ -117,12 +117,51 @@ def test_portfolio_manifest_v2_requires_the_original_golden_v1_source() -> None:
         for metric in golden_suite["metrics"]
         if metric["metric_id"] != "golden_fault_path_completeness"
     ]
+    coverage = next(
+        metric
+        for metric in golden_suite["metrics"]
+        if metric["metric_id"] == "golden_case_coverage"
+    )
+    coverage["treatment_label"] = "measured_scripted_5_cases"
+    coverage["treatment_value"] = 0.1786
+    coverage["delta"] = -0.8214
 
     manifest = PortfolioEvalManifest.model_validate(payload)
     assert manifest.contract_id == "portfolio-eval-manifest:v2"
 
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v2"
     with pytest.raises(ValidationError, match="requires Golden source"):
+        PortfolioEvalManifest.model_validate(payload)
+
+
+def test_portfolio_manifest_v3_preserves_five_case_path_scoring_snapshot() -> None:
+    """验证历史 v3 绑定 Golden v2 与 5/28 覆盖快照，不能借用当前 8 条数字。
+
+    v3 已包含路径完整率但尚未增加类别配额和三条新案例；测试回写来源与覆盖值后应通过，再把
+    coverage 改回当前 8/28 时必须失败，证明实测快照变化确实需要 v4。
+    """
+
+    payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    payload["contract_id"] = "portfolio-eval-manifest:v3"
+    golden_suite = next(
+        suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
+    )
+    golden_suite["source_contract_id"] = "golden-diagnosis-eval:v2"
+    coverage = next(
+        metric
+        for metric in golden_suite["metrics"]
+        if metric["metric_id"] == "golden_case_coverage"
+    )
+    coverage["treatment_label"] = "measured_scripted_5_cases"
+    coverage["treatment_value"] = 0.1786
+    coverage["delta"] = -0.8214
+
+    manifest = PortfolioEvalManifest.model_validate(payload)
+    assert manifest.contract_id == "portfolio-eval-manifest:v3"
+
+    coverage["treatment_value"] = 0.2857
+    coverage["delta"] = -0.7143
+    with pytest.raises(ValidationError, match="requires Golden coverage snapshot"):
         PortfolioEvalManifest.model_validate(payload)
 
 

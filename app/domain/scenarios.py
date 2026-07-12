@@ -6,6 +6,7 @@ ScenarioFixture 描述工具在指定 scenario_id 下的确定性响应；Golden
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -77,6 +78,20 @@ GoldenRelationType = Literal[
 GoldenNodeId = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{2,99}$")]
 
 
+class GoldenCaseCategory(StrEnum):
+    """对应产品设计 28 条 Golden Cases 的五类互斥配额。
+
+    显式类别让数据集扩展能够按 8/10/4/3/3 目标审计，而不是只增加总数；字符串枚举可稳定进入
+    JSON、评测报告和文档快照。案例只能属于一类，跨类别能力可由工具、路径和标签继续表达。
+    """
+
+    SINGLE_COMPONENT = "single_component"
+    CROSS_COMPONENT = "cross_component"
+    AMBIGUOUS_OR_INSUFFICIENT = "ambiguous_or_insufficient"
+    TOOL_ANOMALY_OR_CONFLICT = "tool_anomaly_or_conflict"
+    MEMORY_RECALL = "memory_recall"
+
+
 class GoldenFaultPathRequirement(BaseModel):
     """描述 Golden Case 必须识别并在最终报告中使用的一条有序图路径。
 
@@ -114,8 +129,9 @@ class GoldenCaseSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    contract_id: Literal["golden-case:v2"]
+    contract_id: Literal["golden-case:v3"]
     case_id: str = Field(pattern=r"^golden_[a-z0-9][a-z0-9_-]{2,79}$")
+    case_category: GoldenCaseCategory
     user_query: str = Field(min_length=1, max_length=4000)
     scenario_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{2,79}$")
     expected_intent: str = Field(min_length=1, max_length=100)

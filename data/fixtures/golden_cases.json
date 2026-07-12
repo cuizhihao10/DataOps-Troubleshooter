@@ -1,7 +1,8 @@
 [
   {
-    "contract_id": "golden-case:v2",
+    "contract_id": "golden-case:v3",
     "case_id": "golden_cross_chain_pk_conflict",
+    "case_category": "cross_component",
     "user_query": "LTS 任务 dws_order_report_daily 执行失败，请帮我定位根因。",
     "scenario_id": "cross_chain_pk_conflict",
     "expected_intent": "cross_component_diagnosis",
@@ -41,8 +42,9 @@
     "expected_risk_level": "medium"
   },
   {
-    "contract_id": "golden-case:v2",
+    "contract_id": "golden-case:v3",
     "case_id": "golden_bds_resource_pressure",
+    "case_category": "single_component",
     "user_query": "BDS 作业 bds_customer_profile_hourly 运行很慢，帮我检查。",
     "scenario_id": "bds_resource_pressure",
     "expected_intent": "single_component_diagnosis",
@@ -54,8 +56,9 @@
     "expected_risk_level": "medium"
   },
   {
-    "contract_id": "golden-case:v2",
+    "contract_id": "golden-case:v3",
     "case_id": "golden_lts_empty_result",
+    "case_category": "ambiguous_or_insufficient",
     "user_query": "查看 lts_inventory_snapshot_daily 的失败日志。",
     "scenario_id": "lts_empty_result",
     "expected_intent": "single_component_diagnosis",
@@ -67,8 +70,9 @@
     "expected_risk_level": "low"
   },
   {
-    "contract_id": "golden-case:v2",
+    "contract_id": "golden-case:v3",
     "case_id": "golden_flashsync_timeout",
+    "case_category": "tool_anomaly_or_conflict",
     "user_query": "检查 ods_payment_delta 的同步延迟。",
     "scenario_id": "flashsync_timeout",
     "expected_intent": "single_component_diagnosis",
@@ -80,8 +84,9 @@
     "expected_risk_level": "low"
   },
   {
-    "contract_id": "golden-case:v2",
+    "contract_id": "golden-case:v3",
     "case_id": "golden_bds_permission_denied",
+    "case_category": "tool_anomaly_or_conflict",
     "user_query": "检查 dwd_sensitive_segment_mock 的分区情况。",
     "scenario_id": "bds_permission_denied",
     "expected_intent": "single_component_diagnosis",
@@ -91,5 +96,108 @@
     "required_evidence_sources": [],
     "expected_stop_reasons": ["permission_denied_requires_access"],
     "expected_risk_level": "low"
+  },
+  {
+    "contract_id": "golden-case:v3",
+    "case_id": "golden_lts_upstream_not_ready_single",
+    "case_category": "single_component",
+    "user_query": "只从 LTS 调度侧检查 dws_order_report_daily 为什么提示上游未就绪。",
+    "scenario_id": "cross_chain_pk_conflict",
+    "expected_intent": "single_component_diagnosis",
+    "required_tools": [
+      "lts.get_task_status",
+      "lts.get_task_log",
+      "lts.get_dependency_topology"
+    ],
+    "required_fault_paths": [
+      {
+        "path_label": "lts_upstream_not_ready_symptom",
+        "required_node_ids": [
+          "task_lts_order_report",
+          "symptom_upstream_not_ready"
+        ],
+        "required_relation_types": ["MANIFESTS_AS"]
+      }
+    ],
+    "allowed_root_causes": [
+      "LTS 上游数据未就绪",
+      "依赖数据集未在截止时间前就绪"
+    ],
+    "required_evidence_sources": [
+      "lts_status_dws_order_report_daily",
+      "lts_log_dws_order_report_daily",
+      "lts_topology_dws_order_report_daily"
+    ],
+    "expected_stop_reasons": ["evidence_sufficient"],
+    "expected_risk_level": "low"
+  },
+  {
+    "contract_id": "golden-case:v3",
+    "case_id": "golden_bds_missing_partition_single",
+    "case_category": "single_component",
+    "user_query": "只检查 BDS 作业 bds_order_aggregate_daily 为什么一直停在源表读取阶段。",
+    "scenario_id": "cross_chain_pk_conflict",
+    "expected_intent": "single_component_diagnosis",
+    "required_tools": [
+      "bds.get_task_status",
+      "bds.get_task_log",
+      "bds.get_table_info"
+    ],
+    "required_fault_paths": [
+      {
+        "path_label": "bds_consumes_delayed_dataset",
+        "required_node_ids": [
+          "task_bds_order_aggregate",
+          "dataset_ods_order_delta"
+        ],
+        "required_relation_types": ["CONSUMES"]
+      }
+    ],
+    "allowed_root_causes": [
+      "BDS 等待 ods_order_delta 最新分区",
+      "上游数据分区缺失"
+    ],
+    "required_evidence_sources": [
+      "bds_status_order_aggregate",
+      "bds_log_order_aggregate",
+      "bds_table_ods_order_delta"
+    ],
+    "expected_stop_reasons": ["evidence_sufficient"],
+    "expected_risk_level": "medium"
+  },
+  {
+    "contract_id": "golden-case:v3",
+    "case_id": "golden_flashsync_pk_conflict_single",
+    "case_category": "single_component",
+    "user_query": "只检查 FlashSync 的 ods_order_delta 为什么停止同步并产生积压。",
+    "scenario_id": "cross_chain_pk_conflict",
+    "expected_intent": "single_component_diagnosis",
+    "required_tools": [
+      "flashsync.get_sync_delay",
+      "flashsync.get_sync_log",
+      "flashsync.check_consistency"
+    ],
+    "required_fault_paths": [
+      {
+        "path_label": "flashsync_backlog_causal_chain",
+        "required_node_ids": [
+          "symptom_sync_backlog",
+          "root_cause_primary_key_conflict",
+          "solution_resolve_pk_conflict"
+        ],
+        "required_relation_types": ["CAUSED_BY", "RESOLVED_BY"]
+      }
+    ],
+    "allowed_root_causes": [
+      "FlashSync 主键冲突",
+      "同步批次因主键冲突暂停"
+    ],
+    "required_evidence_sources": [
+      "flashsync_delay_ods_order_delta",
+      "flashsync_log_ods_order_delta",
+      "flashsync_consistency_ods_order_delta"
+    ],
+    "expected_stop_reasons": ["evidence_sufficient"],
+    "expected_risk_level": "medium"
   }
 ]

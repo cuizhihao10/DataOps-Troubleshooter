@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from app.core.fixture_registry import FixtureRegistry, load_golden_cases
+from app.domain.scenarios import GoldenCaseCategory
 from app.domain.tooling import ToolErrorCode
 
 FIXTURE_DIRECTORY = Path("data/fixtures/scenarios")
@@ -28,9 +29,20 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     golden_cases = load_golden_cases(GOLDEN_CASE_FILE)
 
     assert len(registry) == 5
-    assert len(golden_cases) == 5
+    assert len(golden_cases) == 8
     assert {case.scenario_id for case in golden_cases} == set(registry.scenario_ids)
-    assert {case.contract_id for case in golden_cases} == {"golden-case:v2"}
+    assert {case.contract_id for case in golden_cases} == {"golden-case:v3"}
+    category_counts = {
+        category: sum(case.case_category is category for case in golden_cases)
+        for category in GoldenCaseCategory
+    }
+    assert category_counts == {
+        GoldenCaseCategory.SINGLE_COMPONENT: 4,
+        GoldenCaseCategory.CROSS_COMPONENT: 1,
+        GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 1,
+        GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 2,
+        GoldenCaseCategory.MEMORY_RECALL: 0,
+    }
     cross_chain = next(
         case for case in golden_cases if case.case_id == "golden_cross_chain_pk_conflict"
     )

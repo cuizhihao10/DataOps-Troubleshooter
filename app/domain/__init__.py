@@ -21,7 +21,12 @@ from app.domain.models import (
     ToolEvent,
 )
 from app.domain.planner import PlannerDecision
-from app.domain.scenarios import GoldenCaseSpec, GoldenFaultPathRequirement, ScenarioFixture
+from app.domain.scenarios import (
+    GoldenCaseCategory,
+    GoldenCaseSpec,
+    GoldenFaultPathRequirement,
+    ScenarioFixture,
+)
 from app.domain.tooling import McpToolRequest, McpToolResponse, ToolName
 
 __all__ = [
@@ -35,6 +40,7 @@ __all__ = [
     "Evidence",
     "FaultChainStep",
     "FaultHypothesis",
+    "GoldenCaseCategory",
     "GoldenCaseSpec",
     "GoldenFaultPathRequirement",
     "McpToolRequest",

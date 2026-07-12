@@ -5,6 +5,7 @@
 """
 
 from app.evaluation.golden_diagnosis import (
+    GOLDEN_DIAGNOSIS_CATEGORY_TARGETS,
     GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID,
     GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT,
     GoldenDiagnosisCaseResult,
@@ -28,6 +29,7 @@ from app.evaluation.portfolio import (
 
 __all__ = [
     "GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID",
+    "GOLDEN_DIAGNOSIS_CATEGORY_TARGETS",
     "GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT",
     "PORTFOLIO_EVAL_MANIFEST_CONTRACT_ID",
     "PORTFOLIO_EVAL_RUN_CONTRACT_ID",

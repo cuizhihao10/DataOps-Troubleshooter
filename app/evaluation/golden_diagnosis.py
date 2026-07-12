@@ -2,8 +2,8 @@
 
 本模块不调用模型、MCP 或数据库，而是消费 ``DiagnosisRunResult`` 这一顶层强类型结果；运行器可
 替换为确定性测试替身或真实演示配置。评测只读取公开 Action、Observation、停止原因和已审计
-报告，不读取 Prompt、模型原始响应或 Thought。当前数据集只有 5 条案例，因此报告显式保存
-``5/28`` 覆盖边界，不能把小样本实测写成产品目标已经达成。
+报告，不读取 Prompt、模型原始响应或 Thought。报告同时保存总覆盖率与五类案例配额，不能把当前
+子集实测写成产品 28 条目标已经达成。
 """
 
 from __future__ import annotations
@@ -14,12 +14,23 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.models import RetrievedPath, RiskLevel
-from app.domain.scenarios import GoldenCaseSpec, GoldenFaultPathRequirement
+from app.domain.scenarios import (
+    GoldenCaseCategory,
+    GoldenCaseSpec,
+    GoldenFaultPathRequirement,
+)
 from app.orchestration.diagnosis_models import DiagnosisRunResult
 from app.orchestration.report_models import ReportWorkflowOutcome
 
-GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID = "golden-diagnosis-eval:v2"
+GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID = "golden-diagnosis-eval:v3"
 GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT = 28
+GOLDEN_DIAGNOSIS_CATEGORY_TARGETS: dict[GoldenCaseCategory, int] = {
+    GoldenCaseCategory.SINGLE_COMPONENT: 8,
+    GoldenCaseCategory.CROSS_COMPONENT: 10,
+    GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 4,
+    GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
+    GoldenCaseCategory.MEMORY_RECALL: 3,
+}
 
 
 class GoldenDiagnosisRunner(Protocol):
@@ -50,6 +61,7 @@ class GoldenDiagnosisCaseResult(BaseModel):
 
     case_id: str
     scenario_id: str
+    case_category: GoldenCaseCategory
     intent_hit: bool
     executed_tools: list[str]
     missing_required_tools: list[str]
@@ -104,18 +116,20 @@ class GoldenDiagnosisCaseResult(BaseModel):
 class GoldenDiagnosisEvalReport(BaseModel):
     """汇总当前 Golden 子集的宏观实测指标和 28 条目标集覆盖资格。
 
-    ``target_coverage_complete`` 只由案例数量决定，不由指标高低决定；这样 5 条确定性脚本即使全部
-    命中，也不能宣称满足产品文档中以 28 条案例为分母的验收目标。
+    ``target_coverage_complete`` 只由案例数量决定，不由指标高低决定；当前子集即使全部命中，也
+    不能宣称满足产品文档中以 28 条案例为分母的验收目标。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    contract_id: Literal["golden-diagnosis-eval:v2"]
+    contract_id: Literal["golden-diagnosis-eval:v3"]
     metric_kind: Literal["measured"] = "measured"
     case_count: int = Field(ge=1)
     target_case_count: int = Field(default=GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT, ge=1)
     case_coverage_rate: float = Field(ge=0, le=1)
     target_coverage_complete: bool
+    category_case_counts: dict[GoldenCaseCategory, int]
+    category_target_counts: dict[GoldenCaseCategory, int]
     intent_accuracy: float = Field(ge=0, le=1)
     root_cause_top1_hit_rate: float = Field(ge=0, le=1)
     necessary_action_coverage: float = Field(ge=0, le=1)
@@ -133,7 +147,7 @@ class GoldenDiagnosisEvalReport(BaseModel):
 
     @model_validator(mode="after")
     def validate_case_coverage(self) -> GoldenDiagnosisEvalReport:
-        """从案例明细重算数量与覆盖资格，拒绝手工美化 ``5/28`` 边界。
+        """从案例明细重算数量、类别配额与覆盖资格，拒绝手工美化子集边界。
 
         浮点覆盖率允许 JSON 四舍五入造成的极小误差；案例 ID 必须唯一，否则同一容易案例可能被
         重复计数。超过目标条数同样拒绝，因为这意味着产品目标或契约版本应先显式升级。
@@ -151,6 +165,20 @@ class GoldenDiagnosisEvalReport(BaseModel):
             raise ValueError("golden diagnosis case coverage rate is inconsistent")
         if self.target_coverage_complete != (self.case_count == self.target_case_count):
             raise ValueError("golden diagnosis coverage flag is inconsistent")
+        actual_category_counts = {category: 0 for category in GoldenCaseCategory}
+        for case in self.cases:
+            actual_category_counts[case.case_category] += 1
+        if self.category_case_counts != actual_category_counts:
+            raise ValueError("golden diagnosis category counts must match case details")
+        if self.category_target_counts != GOLDEN_DIAGNOSIS_CATEGORY_TARGETS:
+            raise ValueError("golden diagnosis category targets must match product design")
+        if sum(self.category_target_counts.values()) != self.target_case_count:
+            raise ValueError("golden diagnosis category targets must sum to target_case_count")
+        if any(
+            self.category_case_counts[category] > self.category_target_counts[category]
+            for category in GoldenCaseCategory
+        ):
+            raise ValueError("golden diagnosis category count cannot exceed its target")
         return self
 
 
@@ -202,6 +230,9 @@ async def evaluate_golden_diagnosis(
     unsupported_claims = sum(result.unsupported_critical_claim_count for result in case_results)
     total_actions = sum(result.logical_action_count for result in case_results)
     duplicate_actions = sum(result.duplicate_action_count for result in case_results)
+    category_counts = {category: 0 for category in GoldenCaseCategory}
+    for case in cases:
+        category_counts[case.case_category] += 1
 
     # 空分母仅出现在某类标注暂不存在时；返回 1.0 表示“没有违反项”，而不是声称模型能力完美。
     return GoldenDiagnosisEvalReport(
@@ -210,6 +241,8 @@ async def evaluate_golden_diagnosis(
         target_case_count=GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT,
         case_coverage_rate=len(case_results) / GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT,
         target_coverage_complete=len(case_results) == GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT,
+        category_case_counts=category_counts,
+        category_target_counts=GOLDEN_DIAGNOSIS_CATEGORY_TARGETS,
         intent_accuracy=_mean([result.intent_hit for result in case_results]),
         root_cause_top1_hit_rate=_mean(root_results),
         necessary_action_coverage=_mean(
@@ -320,6 +353,7 @@ def score_golden_diagnosis_case(
     return GoldenDiagnosisCaseResult(
         case_id=case.case_id,
         scenario_id=case.scenario_id,
+        case_category=case.case_category,
         intent_hit=state.intent == case.expected_intent,
         executed_tools=executed_tools,
         missing_required_tools=missing_tools,
