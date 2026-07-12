@@ -1,5 +1,5 @@
 {
-  "contract_id": "portfolio-eval-manifest:v2",
+  "contract_id": "portfolio-eval-manifest:v3",
   "suites": [
     {
       "suite_id": "graphrag_ablation",
@@ -151,7 +151,7 @@
     {
       "suite_id": "golden_diagnosis_baseline",
       "layer": "Golden Case 顶层诊断确定性回归基线",
-      "source_contract_id": "golden-diagnosis-eval:v1",
+      "source_contract_id": "golden-diagnosis-eval:v2",
       "result_document": "docs/golden-diagnosis-eval-results.md",
       "requires_postgres": false,
       "test_targets": [
@@ -201,6 +201,17 @@
           "delta": 0.1,
           "direction": "higher_is_better",
           "note": "Action 来自强类型 ToolEvent；runner 按 Golden 标注确定性回放 Fixture。"
+        },
+        {
+          "metric_id": "golden_fault_path_completeness",
+          "label": "当前有路径子集故障链完整率",
+          "control_label": "product_target_minimum",
+          "treatment_label": "measured_scripted_1_path_case",
+          "control_value": 0.85,
+          "treatment_value": 1.0,
+          "delta": 0.15,
+          "direction": "higher_is_better",
+          "note": "仅跨组件主案例标注两条路径；路径必须同时出现在 RetrievedPath 并被最终 fault_chain 引用。"
         },
         {
           "metric_id": "golden_citation_completeness",

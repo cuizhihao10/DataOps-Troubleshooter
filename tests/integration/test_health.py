@@ -48,7 +48,7 @@ async def test_health_reports_validated_contract_baseline() -> None:
         "auditor_prompt": "auditor-report:v2",
         "auditor_provider": "openai-compatible-auditor:v1",
         "mcp": "mcp-tools:v1",
-        "golden_case": "golden-case:v1",
+        "golden_case": "golden-case:v2",
         "runtime_capabilities": "runtime-capabilities:v1",
         "react_loop": "langgraph-react-loop:v2",
         "audited_report_workflow": "audited-report-workflow:v2",

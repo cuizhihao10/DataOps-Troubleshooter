@@ -30,6 +30,7 @@ from app.domain.models import (
     HypothesisStatus,
     MemoryStatus,
     RemediationStep,
+    RetrievedPath,
     RiskLevel,
     RootCauseConclusion,
     ToolEvent,
@@ -161,6 +162,7 @@ async def test_five_golden_cases_produce_versioned_measured_diagnosis_baseline()
     assert report.root_cause_top1_hit_rate == 1
     assert report.necessary_action_coverage == 1
     assert report.evidence_source_coverage == 1
+    assert report.fault_path_completeness == 1
     assert report.stop_reason_hit_rate == 1
     assert report.citation_completeness == 1
     assert report.unsupported_critical_claim_rate == 0
@@ -215,6 +217,37 @@ async def test_golden_diagnosis_evaluator_exposes_missing_action_and_unsafe_root
     assert result.unsupported_critical_claim_count == 1
 
 
+@pytest.mark.asyncio
+async def test_golden_diagnosis_requires_retrieved_path_to_be_used_by_final_report() -> None:
+    """确认仅检索到正确图路径但最终报告未引用时，链路完整率仍为零。
+
+    主案例基线含两条完整 RetrievedPath；测试删除最终 fault_chain，但保留检索状态和根因引用。评分器
+    必须把两个路径标签都列为 missing，证明指标衡量“检索并使用”而不是仅检查候选池。
+    """
+
+    cases = load_golden_cases(GOLDEN_CASE_FILE)
+    target = next(case for case in cases if case.case_id == "golden_cross_chain_pk_conflict")
+    baseline = await FixtureBackedGoldenRunner(
+        FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
+    ).run(target)
+    report = baseline.report.state.draft_report
+    assert report is not None
+    unreported = report.model_copy(update={"fault_chain": []})
+    unreported_state = baseline.report.state.model_copy(update={"draft_report": unreported})
+    diagnosis = baseline.model_copy(
+        update={"report": baseline.report.model_copy(update={"state": unreported_state})}
+    )
+
+    result = (await evaluate_golden_diagnosis([target], _SingleResultRunner(diagnosis))).cases[0]
+
+    assert result.fault_path_completeness == 0
+    assert result.matched_fault_path_labels == []
+    assert result.missing_fault_path_labels == [
+        "component_dependency_chain",
+        "sync_backlog_causal_chain",
+    ]
+
+
 class _SingleResultRunner:
     """在负向单测中返回一个预先组装的强类型诊断结果。
 
@@ -267,6 +300,7 @@ def _build_diagnosis_result(
         )
     )
     evidence_ids = [item.evidence_id for item in evidence]
+    retrieved_paths = _build_retrieved_paths(case)
     root_cause = case.allowed_root_causes[0] if case.allowed_root_causes else None
     hypotheses = []
     if root_cause:
@@ -291,11 +325,17 @@ def _build_diagnosis_result(
         hypotheses=hypotheses,
         evidence=evidence,
         tool_events=tool_events,
+        retrieved_paths=retrieved_paths,
         react_step=len(tool_events),
         observation_refs=evidence_ids,
         stop_reason=case.expected_stop_reasons[0],
     )
-    report = _build_report(case, root_cause=root_cause, evidence_ids=evidence_ids)
+    report = _build_report(
+        case,
+        root_cause=root_cause,
+        evidence_ids=evidence_ids,
+        retrieved_paths=retrieved_paths,
+    )
     memory = _build_pending_memory(case, components, evidence_ids) if root_cause else None
     final_state = state.model_copy(
         update={
@@ -335,6 +375,7 @@ def _build_report(
     *,
     root_cause: str | None,
     evidence_ids: list[str],
+    retrieved_paths: list[RetrievedPath],
 ) -> DiagnosisReport:
     """生成引用完整且风险与 Golden 标注一致的确定性报告。
 
@@ -356,9 +397,10 @@ def _build_report(
             summary="确定性 Golden 基线已形成有证据的候选根因。",
             fault_chain=[
                 FaultChainStep(
-                    description="合成 Observation 支持当前故障传播结论。",
-                    evidence_refs=evidence_ids,
+                    description=f"合成 GraphRAG 路径 {path.path_id} 支持当前故障传播结论。",
+                    evidence_refs=[path.path_id],
                 )
+                for path in retrieved_paths
             ],
             root_causes=[
                 RootCauseConclusion(
@@ -367,7 +409,7 @@ def _build_report(
                     evidence_refs=evidence_ids,
                 )
             ],
-            evidence_refs=evidence_ids,
+            evidence_refs=[*evidence_ids, *(path.path_id for path in retrieved_paths)],
             remediation_steps=[remediation],
         )
     return DiagnosisReport(
@@ -375,6 +417,25 @@ def _build_report(
         remediation_steps=[remediation],
         uncertainties=["缺少可支持根因的实时成功 Observation，需补充权限或稍后重试。"],
     )
+
+
+def _build_retrieved_paths(case: GoldenCaseSpec) -> list[RetrievedPath]:
+    """把 Golden v2 必要路径标注投影为确定性 RetrievedPath 运行结果。
+
+    该投影只用于评分管线基线，不伪装成 PostgreSQL 检索；真实 GraphRAG 路径由独立数据库测试验证。
+    稳定 path_id 与有序节点/关系完整保留，使最终报告必须引用同一对象才能获得链路分数。
+    """
+
+    return [
+        RetrievedPath(
+            path_id=f"path_{_digest(case.case_id, requirement.path_label)}",
+            node_ids=requirement.required_node_ids,
+            relation_types=list(requirement.required_relation_types),
+            score=0.9,
+            source_ids=["synthetic_cross_chain_knowledge_v1"],
+        )
+        for requirement in case.required_fault_paths
+    ]
 
 
 def _build_pending_memory(

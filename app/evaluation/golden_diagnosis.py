@@ -13,12 +13,12 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.domain.models import RiskLevel
-from app.domain.scenarios import GoldenCaseSpec
+from app.domain.models import RetrievedPath, RiskLevel
+from app.domain.scenarios import GoldenCaseSpec, GoldenFaultPathRequirement
 from app.orchestration.diagnosis_models import DiagnosisRunResult
 from app.orchestration.report_models import ReportWorkflowOutcome
 
-GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID = "golden-diagnosis-eval:v1"
+GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID = "golden-diagnosis-eval:v2"
 GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT = 28
 
 
@@ -62,6 +62,11 @@ class GoldenDiagnosisCaseResult(BaseModel):
     observed_evidence_sources: list[str]
     missing_evidence_sources: list[str]
     evidence_source_coverage: float = Field(ge=0, le=1)
+    required_fault_path_labels: list[str]
+    matched_fault_path_labels: list[str]
+    missing_fault_path_labels: list[str]
+    matched_fault_path_ids: list[str]
+    fault_path_completeness: float | None = Field(default=None, ge=0, le=1)
     stop_reason_hit: bool
     actual_stop_reason: str
     citation_completeness: float = Field(ge=0, le=1)
@@ -74,6 +79,27 @@ class GoldenDiagnosisCaseResult(BaseModel):
     tool_attempt_success_rate: float = Field(ge=0, le=1)
     report_accepted: bool
 
+    @model_validator(mode="after")
+    def validate_fault_path_partition(self) -> GoldenDiagnosisCaseResult:
+        """校验必要路径被 matched/missing 精确分区，并绑定适用性与 completeness。
+
+        分区约束阻止同一路径同时成功和失败，或从明细中消失；无路径要求时 completeness 必须为
+        ``None``，有要求时必须是数值。匹配 path ID 只允许在至少一项要求完整命中时出现。
+        """
+
+        required = self.required_fault_path_labels
+        matched = self.matched_fault_path_labels
+        missing = self.missing_fault_path_labels
+        if len(required) != len(set(required)):
+            raise ValueError("Golden case result required path labels must be unique")
+        if set(matched) & set(missing) or set(matched) | set(missing) != set(required):
+            raise ValueError("Golden case result path labels must form an exact partition")
+        if bool(required) != (self.fault_path_completeness is not None):
+            raise ValueError("Golden case result path applicability is inconsistent")
+        if self.matched_fault_path_ids and not matched:
+            raise ValueError("Golden case result path IDs require a matched requirement")
+        return self
+
 
 class GoldenDiagnosisEvalReport(BaseModel):
     """汇总当前 Golden 子集的宏观实测指标和 28 条目标集覆盖资格。
@@ -84,7 +110,7 @@ class GoldenDiagnosisEvalReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    contract_id: Literal["golden-diagnosis-eval:v1"]
+    contract_id: Literal["golden-diagnosis-eval:v2"]
     metric_kind: Literal["measured"] = "measured"
     case_count: int = Field(ge=1)
     target_case_count: int = Field(default=GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT, ge=1)
@@ -94,6 +120,7 @@ class GoldenDiagnosisEvalReport(BaseModel):
     root_cause_top1_hit_rate: float = Field(ge=0, le=1)
     necessary_action_coverage: float = Field(ge=0, le=1)
     evidence_source_coverage: float = Field(ge=0, le=1)
+    fault_path_completeness: float = Field(ge=0, le=1)
     stop_reason_hit_rate: float = Field(ge=0, le=1)
     citation_completeness: float = Field(ge=0, le=1)
     unsupported_critical_claim_rate: float = Field(ge=0, le=1)
@@ -166,6 +193,11 @@ async def evaluate_golden_diagnosis(
         for result in case_results
         if result.safe_degradation_hit is not None
     ]
+    path_results = [
+        result.fault_path_completeness
+        for result in case_results
+        if result.fault_path_completeness is not None
+    ]
     total_claims = sum(result.critical_claim_count for result in case_results)
     unsupported_claims = sum(result.unsupported_critical_claim_count for result in case_results)
     total_actions = sum(result.logical_action_count for result in case_results)
@@ -186,6 +218,7 @@ async def evaluate_golden_diagnosis(
         evidence_source_coverage=_mean(
             [result.evidence_source_coverage for result in case_results]
         ),
+        fault_path_completeness=_mean(path_results),
         stop_reason_hit_rate=_mean([result.stop_reason_hit for result in case_results]),
         citation_completeness=(1.0 if total_claims == 0 else 1 - unsupported_claims / total_claims),
         unsupported_critical_claim_rate=(
@@ -238,6 +271,31 @@ def score_golden_diagnosis_case(
         source for source in case.required_evidence_sources if source not in observed_sources
     ]
 
+    # 路径只有同时存在于检索状态并被最终报告 fault_chain 引用，才算真正参与了诊断输出。
+    reported_path_refs = {
+        reference for step in report.fault_chain for reference in step.evidence_refs
+    }
+    eligible_paths = [path for path in state.retrieved_paths if path.path_id in reported_path_refs]
+    path_scores = [
+        _score_fault_path_requirement(requirement, eligible_paths)
+        for requirement in case.required_fault_paths
+    ]
+    matched_path_labels = [
+        requirement.path_label
+        for requirement, (coverage, _) in zip(case.required_fault_paths, path_scores, strict=True)
+        if coverage == 1.0
+    ]
+    missing_path_labels = [
+        requirement.path_label
+        for requirement, (coverage, _) in zip(case.required_fault_paths, path_scores, strict=True)
+        if coverage < 1.0
+    ]
+    matched_path_ids = list(
+        dict.fromkeys(
+            path_id for coverage, path_ids in path_scores if coverage == 1.0 for path_id in path_ids
+        )
+    )
+
     # Graph path 与 confirmed memory 是合法引用源，但不会混入实时 Evidence source 覆盖率。
     valid_refs = {evidence.evidence_id for evidence in state.evidence}
     valid_refs.update(path.path_id for path in state.retrieved_paths)
@@ -276,6 +334,13 @@ def score_golden_diagnosis_case(
         observed_evidence_sources=observed_sources,
         missing_evidence_sources=missing_sources,
         evidence_source_coverage=_coverage(case.required_evidence_sources, observed_sources),
+        required_fault_path_labels=[path.path_label for path in case.required_fault_paths],
+        matched_fault_path_labels=matched_path_labels,
+        missing_fault_path_labels=missing_path_labels,
+        matched_fault_path_ids=matched_path_ids,
+        fault_path_completeness=(
+            None if not path_scores else sum(score for score, _ in path_scores) / len(path_scores)
+        ),
         stop_reason_hit=state.stop_reason in case.expected_stop_reasons,
         actual_stop_reason=state.stop_reason or "missing",
         citation_completeness=(1.0 if claim_count == 0 else 1 - unsupported_claims / claim_count),
@@ -305,6 +370,48 @@ def _coverage(required: Sequence[object], actual: Sequence[object]) -> float:
         return 1.0
     actual_set = set(actual)
     return sum(item in actual_set for item in required) / len(required)
+
+
+def _score_fault_path_requirement(
+    requirement: GoldenFaultPathRequirement,
+    actual_paths: Sequence[RetrievedPath],
+) -> tuple[float, list[str]]:
+    """计算一条必要路径在“已检索且已报告”候选中的最佳节点/关系覆盖。
+
+    节点和关系分别按最长有序子序列覆盖，最终取较小值，避免只命中节点名称却使用错误边类型。
+    返回所有达到最佳正覆盖率的 path_id 供失败定位；空候选自然得到零分而不是伪造路径。
+    """
+
+    scored_paths: list[tuple[str, float]] = []
+    for path in actual_paths:
+        node_coverage = _ordered_coverage(path.node_ids, requirement.required_node_ids)
+        relation_coverage = _ordered_coverage(
+            path.relation_types,
+            requirement.required_relation_types,
+        )
+        # 两类结构同时成立才是可解释故障链；取最小值相当于把较弱边界作为瓶颈。
+        scored_paths.append((path.path_id, min(node_coverage, relation_coverage)))
+    best_coverage = max((coverage for _, coverage in scored_paths), default=0.0)
+    matched_ids = sorted(
+        path_id for path_id, coverage in scored_paths if coverage == best_coverage and coverage > 0
+    )
+    return best_coverage, matched_ids
+
+
+def _ordered_coverage(actual: Sequence[object], required: Sequence[object]) -> float:
+    """计算实际序列对必要序列的最长有序子序列覆盖比例。
+
+    实际路径可包含额外中间节点或关系，但不能倒序命中；required 由 Pydantic 保证非空。若内部调用
+    违反该不变量则显式失败，避免除零被误解为满分。
+    """
+
+    if not required:
+        raise ValueError("ordered Golden path coverage requires a non-empty requirement")
+    matched = 0
+    for item in actual:
+        if matched < len(required) and item == required[matched]:
+            matched += 1
+    return matched / len(required)
 
 
 def _mean(values: Sequence[bool | float | None]) -> float:

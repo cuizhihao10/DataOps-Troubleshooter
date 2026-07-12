@@ -1,5 +1,6 @@
 [
   {
+    "contract_id": "golden-case:v2",
     "case_id": "golden_cross_chain_pk_conflict",
     "user_query": "LTS 任务 dws_order_report_daily 执行失败，请帮我定位根因。",
     "scenario_id": "cross_chain_pk_conflict",
@@ -9,6 +10,26 @@
       "lts.get_dependency_topology",
       "bds.get_task_status",
       "flashsync.get_sync_log"
+    ],
+    "required_fault_paths": [
+      {
+        "path_label": "component_dependency_chain",
+        "required_node_ids": [
+          "component_lts",
+          "component_bds",
+          "component_flashsync"
+        ],
+        "required_relation_types": ["DEPENDS_ON", "DEPENDS_ON"]
+      },
+      {
+        "path_label": "sync_backlog_causal_chain",
+        "required_node_ids": [
+          "symptom_sync_backlog",
+          "root_cause_primary_key_conflict",
+          "solution_resolve_pk_conflict"
+        ],
+        "required_relation_types": ["CAUSED_BY", "RESOLVED_BY"]
+      }
     ],
     "allowed_root_causes": ["FlashSync 主键冲突", "同步批次因主键冲突暂停"],
     "required_evidence_sources": [
@@ -20,48 +41,55 @@
     "expected_risk_level": "medium"
   },
   {
+    "contract_id": "golden-case:v2",
     "case_id": "golden_bds_resource_pressure",
     "user_query": "BDS 作业 bds_customer_profile_hourly 运行很慢，帮我检查。",
     "scenario_id": "bds_resource_pressure",
     "expected_intent": "single_component_diagnosis",
     "required_tools": ["bds.get_task_status", "bds.get_task_log", "bds.get_table_info"],
+    "required_fault_paths": [],
     "allowed_root_causes": ["BDS 计算资源不足", "执行器资源压力"],
     "required_evidence_sources": ["bds_status_customer_profile", "bds_log_customer_profile"],
     "expected_stop_reasons": ["evidence_sufficient"],
     "expected_risk_level": "medium"
   },
   {
+    "contract_id": "golden-case:v2",
     "case_id": "golden_lts_empty_result",
     "user_query": "查看 lts_inventory_snapshot_daily 的失败日志。",
     "scenario_id": "lts_empty_result",
     "expected_intent": "single_component_diagnosis",
     "required_tools": ["lts.get_task_log"],
+    "required_fault_paths": [],
     "allowed_root_causes": [],
     "required_evidence_sources": [],
     "expected_stop_reasons": ["evidence_insufficient", "need_user_input"],
     "expected_risk_level": "low"
   },
   {
+    "contract_id": "golden-case:v2",
     "case_id": "golden_flashsync_timeout",
     "user_query": "检查 ods_payment_delta 的同步延迟。",
     "scenario_id": "flashsync_timeout",
     "expected_intent": "single_component_diagnosis",
     "required_tools": ["flashsync.get_sync_delay"],
+    "required_fault_paths": [],
     "allowed_root_causes": [],
     "required_evidence_sources": [],
     "expected_stop_reasons": ["tool_unavailable_degraded"],
     "expected_risk_level": "low"
   },
   {
+    "contract_id": "golden-case:v2",
     "case_id": "golden_bds_permission_denied",
     "user_query": "检查 dwd_sensitive_segment_mock 的分区情况。",
     "scenario_id": "bds_permission_denied",
     "expected_intent": "single_component_diagnosis",
     "required_tools": ["bds.get_table_info"],
+    "required_fault_paths": [],
     "allowed_root_causes": [],
     "required_evidence_sources": [],
     "expected_stop_reasons": ["permission_denied_requires_access"],
     "expected_risk_level": "low"
   }
 ]
-

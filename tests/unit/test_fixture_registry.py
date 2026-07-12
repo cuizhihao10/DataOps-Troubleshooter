@@ -30,6 +30,14 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     assert len(registry) == 5
     assert len(golden_cases) == 5
     assert {case.scenario_id for case in golden_cases} == set(registry.scenario_ids)
+    assert {case.contract_id for case in golden_cases} == {"golden-case:v2"}
+    cross_chain = next(
+        case for case in golden_cases if case.case_id == "golden_cross_chain_pk_conflict"
+    )
+    assert [path.path_label for path in cross_chain.required_fault_paths] == [
+        "component_dependency_chain",
+        "sync_backlog_causal_chain",
+    ]
 
 
 def test_main_scenario_exercises_all_nine_tool_contracts() -> None:
@@ -95,3 +103,37 @@ def test_fixture_scenario_id_must_match_tool_request(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="scenario_id must match"):
         FixtureRegistry.from_directory(tmp_path)
+
+
+def test_golden_fault_path_requires_one_relation_per_adjacent_node(tmp_path: Path) -> None:
+    """验证 Golden v2 路径不能用三个节点只标一条关系来伪造完整链路。
+
+    测试仅删除主案例第二条关系，其他字段保持合法；加载必须在评测执行前失败，避免评分器猜测
+    节点之间的未标注边类型或错误地把半条路径算作完整。
+    """
+
+    payload = json.loads(GOLDEN_CASE_FILE.read_text(encoding="utf-8"))
+    payload[0]["required_fault_paths"][0]["required_relation_types"] = ["DEPENDS_ON"]
+    target = tmp_path / "invalid_golden_cases.json"
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="relations must connect every adjacent node"):
+        load_golden_cases(target)
+
+
+def test_golden_case_rejects_duplicate_path_labels(tmp_path: Path) -> None:
+    """验证同一案例的路径标签不能重复，防止失败明细和宏观分母歧义。
+
+    节点与关系仍合法，只把第二条路径标签改成第一条；Pydantic 跨字段校验应拒绝输入，而不是让
+    评测报告出现两个无法区分的 requirement。
+    """
+
+    payload = json.loads(GOLDEN_CASE_FILE.read_text(encoding="utf-8"))
+    payload[0]["required_fault_paths"][1]["path_label"] = payload[0]["required_fault_paths"][0][
+        "path_label"
+    ]
+    target = tmp_path / "duplicate_path_labels.json"
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="fault path labels must be unique"):
+        load_golden_cases(target)

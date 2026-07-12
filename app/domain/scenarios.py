@@ -6,6 +6,8 @@ ScenarioFixture 描述工具在指定 scenario_id 下的确定性响应；Golden
 
 from __future__ import annotations
 
+from typing import Annotated, Literal
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.models import Component, RiskLevel
@@ -62,21 +64,86 @@ class ScenarioFixture(BaseModel):
         return self
 
 
+GoldenRelationType = Literal[
+    "RUNS_ON",
+    "DEPENDS_ON",
+    "PRODUCES",
+    "CONSUMES",
+    "MANIFESTS_AS",
+    "CAUSED_BY",
+    "RESOLVED_BY",
+    "SIMILAR_TO",
+]
+GoldenNodeId = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{2,99}$")]
+
+
+class GoldenFaultPathRequirement(BaseModel):
+    """描述 Golden Case 必须识别并在最终报告中使用的一条有序图路径。
+
+    节点与关系均使用人工知识图的稳定 ID/白名单关系；评测允许实际路径包含额外中间实体，但要求
+    标注顺序保持一致。``path_label`` 只用于失败报告定位，不参与匹配或自然语言近似判断。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path_label: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,79}$")
+    required_node_ids: list[GoldenNodeId] = Field(min_length=2, max_length=3)
+    required_relation_types: list[GoldenRelationType] = Field(min_length=1, max_length=2)
+
+    @model_validator(mode="after")
+    def validate_path_shape(self) -> GoldenFaultPathRequirement:
+        """保证 N 个节点恰好由 N-1 条关系连接，并拒绝重复节点形成伪路径。
+
+        当前 GraphRAG 最多扩展两跳，所以模型最多接受三个节点；关系数量不匹配或节点重复会在
+        Fixture 加载阶段失败，避免评分器猜测缺失边或把环路当作故障链。
+        """
+
+        if len(self.required_relation_types) != len(self.required_node_ids) - 1:
+            raise ValueError("Golden fault path relations must connect every adjacent node")
+        if len(self.required_node_ids) != len(set(self.required_node_ids)):
+            raise ValueError("Golden fault path nodes must not contain duplicates")
+        return self
+
+
 class GoldenCaseSpec(BaseModel):
     """定义一个诊断评测案例的输入、必要行动和允许结果边界。
 
-    Golden Case 不复制工具返回，而是引用 scenario_id 并描述预期意图、必要工具、证据来源、
-    可接受根因和停止原因；这种分离使 Mock 数据与 Agent 策略可以独立演进和消融。
+    Golden Case 不复制工具返回，而是引用 scenario_id 并描述预期意图、必要工具、图路径、证据来源、
+    可接受根因和停止原因；这种分离使 Mock 数据、GraphRAG 与 Agent 策略可以独立演进和消融。
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    contract_id: Literal["golden-case:v2"]
     case_id: str = Field(pattern=r"^golden_[a-z0-9][a-z0-9_-]{2,79}$")
     user_query: str = Field(min_length=1, max_length=4000)
     scenario_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{2,79}$")
     expected_intent: str = Field(min_length=1, max_length=100)
     required_tools: list[ToolName] = Field(default_factory=list)
+    required_fault_paths: list[GoldenFaultPathRequirement] = Field(default_factory=list)
     allowed_root_causes: list[str] = Field(default_factory=list)
     required_evidence_sources: list[str] = Field(default_factory=list)
     expected_stop_reasons: list[str] = Field(min_length=1)
     expected_risk_level: RiskLevel
+
+    @model_validator(mode="after")
+    def validate_unique_requirements(self) -> GoldenCaseSpec:
+        """拒绝重复工具、路径标签、证据来源和允许答案，保持每项评测分母唯一。
+
+        列表顺序用于失败明细和宏观重放，但同一要求出现两次会人为降低或提高覆盖率，因此在加载
+        阶段直接失败。空路径/根因集合仍合法，用于工具异常和证据不足的安全降级案例。
+        """
+
+        for field_name in (
+            "required_tools",
+            "allowed_root_causes",
+            "required_evidence_sources",
+            "expected_stop_reasons",
+        ):
+            values = getattr(self, field_name)
+            if len(values) != len(set(values)):
+                raise ValueError(f"Golden case {field_name} must not contain duplicates")
+        path_labels = [path.path_label for path in self.required_fault_paths]
+        if len(path_labels) != len(set(path_labels)):
+            raise ValueError("Golden case fault path labels must be unique")
+        return self

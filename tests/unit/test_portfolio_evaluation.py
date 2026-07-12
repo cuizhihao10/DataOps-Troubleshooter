@@ -61,7 +61,7 @@ class RecordingPytestExecutor:
 
 
 def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -> None:
-    """确认 v2 manifest 精确覆盖五层、十五个指标，并拒绝任意 pytest flag/命令目标。
+    """确认 v3 manifest 精确覆盖五层、十六个指标，并拒绝任意 pytest flag/命令目标。
 
     复制 payload 后把第一 target 改为 ``--collect-only``；Pydantic 必须在执行器之前失败，证明 JSON
     不能把受限 test target 字段变成自由命令入口。
@@ -69,9 +69,9 @@ def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -
 
     manifest = load_portfolio_eval_manifest(MANIFEST_PATH)
 
-    assert manifest.contract_id == "portfolio-eval-manifest:v2"
+    assert manifest.contract_id == "portfolio-eval-manifest:v3"
     assert len(manifest.suites) == 5
-    assert sum(len(suite.metrics) for suite in manifest.suites) == 15
+    assert sum(len(suite.metrics) for suite in manifest.suites) == 16
     assert sum(suite.requires_postgres for suite in manifest.suites) == 2
 
     payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
@@ -99,6 +99,33 @@ def test_portfolio_manifest_v1_remains_readable_with_exact_legacy_four_suites() 
     assert len(manifest.suites) == 4
 
 
+def test_portfolio_manifest_v2_requires_the_original_golden_v1_source() -> None:
+    """验证五层历史 v2 只能绑定不含路径指标的 Golden v1 来源契约。
+
+    测试从当前 v3 JSON 删除链路指标并回写两个旧 contract；若只修改 manifest 版本却保留 Golden v2
+    来源，模型必须拒绝，防止旧消费者把新增字段误认为原 v2 语义。
+    """
+
+    payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    payload["contract_id"] = "portfolio-eval-manifest:v2"
+    golden_suite = next(
+        suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
+    )
+    golden_suite["source_contract_id"] = "golden-diagnosis-eval:v1"
+    golden_suite["metrics"] = [
+        metric
+        for metric in golden_suite["metrics"]
+        if metric["metric_id"] != "golden_fault_path_completeness"
+    ]
+
+    manifest = PortfolioEvalManifest.model_validate(payload)
+    assert manifest.contract_id == "portfolio-eval-manifest:v2"
+
+    golden_suite["source_contract_id"] = "golden-diagnosis-eval:v2"
+    with pytest.raises(ValidationError, match="requires Golden source"):
+        PortfolioEvalManifest.model_validate(payload)
+
+
 def test_complete_portfolio_run_publishes_metrics_only_after_all_suites_pass() -> None:
     """验证完整模式五层通过后报告 complete、run_success 和 all_suites_passed 均为真。
 
@@ -120,7 +147,7 @@ def test_complete_portfolio_run_publishes_metrics_only_after_all_suites_pass() -
     assert report.complete is True
     assert report.all_suites_passed is True
     assert all(suite.status is SuiteExecutionStatus.PASSED for suite in report.suites)
-    assert sum(len(suite.metrics) for suite in report.suites) == 15
+    assert sum(len(suite.metrics) for suite in report.suites) == 16
     assert sum("postgres" in command for command in executor.commands) == 2
     assert all(command[1:4] == ["-m", "pytest", "-q"] for command in executor.commands)
 
