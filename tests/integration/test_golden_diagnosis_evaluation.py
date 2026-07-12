@@ -1,4 +1,4 @@
-"""用十四条 Golden Cases 验证顶层诊断、跨组件路径、冲突、记忆安全与 14/28 发布边界。
+"""用十五条 Golden Cases 验证顶层诊断、跨组件路径、冲突、记忆安全与 15/28 发布边界。
 
 测试运行器从合成 Fixture 构造真实 ``ToolEvent``/``Evidence``，再通过生产 Pydantic 顶层结果契约
 进入评测器。Planner、Auditor 和报告文本是确定性脚本，因此这些数字只证明数据流与评分规则可
@@ -145,13 +145,13 @@ class FixtureBackedGoldenRunner:
 
 
 @pytest.mark.asyncio
-async def test_fourteen_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
-    """验证十四条案例命中诊断、路径、冲突与历史安全契约，同时保持 14/28 未完成标记。
+async def test_fifteen_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
+    """验证十五条案例命中诊断、路径、冲突与历史安全契约，同时保持 15/28 未完成标记。
 
     确定性基线预期意图、必要 Action、允许根因、关键来源、停止原因、引用、风险和安全降级全部
     命中；三条故意失败响应使尝试成功率低于一，新增冲突案例的三个调用则全部成功。覆盖标记必须
-    保持 false，防止 14 条通过被宣传为 28 条验收完成；三条记忆案例仍需保持实时根因优先。两条
-    新增跨组件案例分别要求 2 条和 3 条图路径，不能只靠工具来源覆盖获得通过。
+    保持 false，防止 15 条通过被宣传为 28 条验收完成；三条记忆案例仍需保持实时根因优先。新资源
+    耗尽案例必须使用独立 Fixture，并通过表信息反证缺分区/异常输入量，不能只复用主键冲突答案。
     """
 
     cases = load_golden_cases(GOLDEN_CASE_FILE)
@@ -161,13 +161,13 @@ async def test_fourteen_golden_cases_produce_versioned_measured_diagnosis_baseli
 
     assert report.contract_id == GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID
     assert report.metric_kind == "measured"
-    assert report.case_count == 14
+    assert report.case_count == 15
     assert report.target_case_count == 28
-    assert report.case_coverage_rate == pytest.approx(14 / 28)
+    assert report.case_coverage_rate == pytest.approx(15 / 28)
     assert report.target_coverage_complete is False
     assert report.category_case_counts == {
         GoldenCaseCategory.SINGLE_COMPONENT: 4,
-        GoldenCaseCategory.CROSS_COMPONENT: 3,
+        GoldenCaseCategory.CROSS_COMPONENT: 4,
         GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 1,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
         GoldenCaseCategory.MEMORY_RECALL: 3,
@@ -181,7 +181,7 @@ async def test_fourteen_golden_cases_produce_versioned_measured_diagnosis_baseli
     assert report.citation_completeness == 1
     assert report.unsupported_critical_claim_rate == 0
     assert report.duplicate_action_rate == 0
-    assert report.tool_attempt_success_rate == pytest.approx(36 / 39)
+    assert report.tool_attempt_success_rate == pytest.approx(42 / 45)
     assert report.risk_level_hit_rate == 1
     assert report.safe_degradation_rate == 1
     assert report.evidence_conflict_safe_resolution_rate == 1
@@ -226,6 +226,22 @@ async def test_fourteen_golden_cases_produce_versioned_measured_diagnosis_baseli
         "bds_task_depends_on_flashsync_task",
         "flashsync_task_produces_bds_dataset",
         "flashsync_backlog_conflict_solution_chain",
+    ]
+    resource_result = next(
+        result
+        for result in report.cases
+        if result.case_id == "golden_cross_lts_blocked_by_bds_resource_exhaustion"
+    )
+    assert resource_result.executed_tools == [
+        "lts.get_task_status",
+        "lts.get_task_log",
+        "lts.get_dependency_topology",
+        "bds.get_task_status",
+        "bds.get_task_log",
+        "bds.get_table_info",
+    ]
+    assert resource_result.matched_fault_path_labels == [
+        "lts_component_depends_on_bds_component"
     ]
 
 

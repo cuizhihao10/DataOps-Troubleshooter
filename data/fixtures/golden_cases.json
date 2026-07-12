@@ -474,5 +474,45 @@
     ],
     "expected_stop_reasons": ["evidence_sufficient"],
     "expected_risk_level": "medium"
+  },
+  {
+    "contract_id": "golden-case:v6",
+    "case_id": "golden_cross_lts_blocked_by_bds_resource_exhaustion",
+    "case_category": "cross_component",
+    "user_query": "LTS 客户画像日报因上游超时失败，请跨 LTS 和 BDS 判断是输入问题还是计算资源问题。",
+    "scenario_id": "cross_lts_bds_resource_exhaustion",
+    "expected_intent": "cross_component_diagnosis",
+    "required_tools": [
+      "lts.get_task_status",
+      "lts.get_task_log",
+      "lts.get_dependency_topology",
+      "bds.get_task_status",
+      "bds.get_task_log",
+      "bds.get_table_info"
+    ],
+    "required_fault_paths": [
+      {
+        "path_label": "lts_component_depends_on_bds_component",
+        "required_node_ids": [
+          "component_lts",
+          "component_bds"
+        ],
+        "required_relation_types": ["DEPENDS_ON"]
+      }
+    ],
+    "allowed_root_causes": [
+      "BDS 计算资源不足",
+      "执行器资源压力"
+    ],
+    "required_evidence_sources": [
+      "lts_status_customer_profile_daily",
+      "lts_log_customer_profile_daily",
+      "lts_topology_customer_profile_daily",
+      "bds_status_customer_profile_cross",
+      "bds_log_customer_profile_cross",
+      "bds_table_customer_event_cross"
+    ],
+    "expected_stop_reasons": ["evidence_sufficient"],
+    "expected_risk_level": "medium"
   }
 ]

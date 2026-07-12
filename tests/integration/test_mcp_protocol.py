@@ -380,6 +380,69 @@ async def test_bds_to_flashsync_root_cause_chain_crosses_real_mcp_protocol() -> 
 
 
 @pytest.mark.asyncio
+async def test_lts_to_bds_resource_exhaustion_chain_crosses_real_mcp_protocol() -> None:
+    """验证独立事实环境能从 LTS 超时追到 BDS 资源耗尽并排除输入异常。
+
+    六个真实 MCP 调用必须共同证明：LTS 只因上游超时而失败，拓扑指向 BDS；BDS CPU/内存饱和且
+    频繁 spill/丢执行器，但输入分区和数据量正常、倾斜不显著。该组合防止将所有 LTS→BDS 案例都
+    套用缺分区根因，也验证新 Fixture 确实经过协议边界而非被 Golden runner 直接读取。
+    """
+
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    calls = (
+        ("lts.get_task_status", "dws_customer_profile_daily"),
+        ("lts.get_task_log", "dws_customer_profile_daily"),
+        ("lts.get_dependency_topology", "dws_customer_profile_daily"),
+        ("bds.get_task_status", "bds_customer_profile_hourly"),
+        ("bds.get_task_log", "bds_customer_profile_hourly"),
+        ("bds.get_table_info", "dwd_customer_event"),
+    )
+    observations = {}
+    for tool_name, resource_id in calls:
+        # 六项 Action 共享合成场景时间窗，但每个 trace 独立，保留可观察协议调用身份。
+        observations[tool_name] = await executor.execute(
+            _action(
+                "cross_lts_bds_resource_exhaustion",
+                resource_id,
+                f"trace_resource_chain_{tool_name.replace('.', '_')}",
+                tool_name=tool_name,
+            )
+        )
+
+    assert all(observation.response.ok for observation in observations.values())
+    assert observations["lts.get_task_status"].response.data["upstream_ready"] is False
+    assert (
+        observations["lts.get_task_log"].response.data["component_error_code"]
+        == "LTS_UPSTREAM_TIMEOUT"
+    )
+    assert (
+        observations["lts.get_dependency_topology"].response.data["upstream_task"]
+        == "bds_customer_profile_hourly"
+    )
+    status_data = observations["bds.get_task_status"].response.data
+    assert status_data["cpu_percent"] == 99
+    assert status_data["memory_percent"] == 97
+    log_data = observations["bds.get_task_log"].response.data
+    assert log_data["spill_count"] == 63
+    assert log_data["executor_lost"] == 5
+    assert log_data["skew_ratio"] < 1.2
+    table_data = observations["bds.get_table_info"].response.data
+    assert table_data["latest_partition"] == table_data["expected_partition"]
+    assert abs(table_data["row_count"] - table_data["baseline_row_count"]) < 20_000
+    assert {
+        observation.response.evidence[0].source_id
+        for observation in observations.values()
+    } == {
+        "lts_status_customer_profile_daily",
+        "lts_log_customer_profile_daily",
+        "lts_topology_customer_profile_daily",
+        "bds_status_customer_profile_cross",
+        "bds_log_customer_profile_cross",
+        "bds_table_customer_event_cross",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "expected_data_key"),
     [

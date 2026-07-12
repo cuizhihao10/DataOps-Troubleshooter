@@ -17,7 +17,7 @@ from app.evaluation.portfolio import SuiteExecutionStatus
 def test_portfolio_cli_fast_mode_runs_three_suites_and_marks_report_incomplete() -> None:
     """验证快速 CLI 返回零退出码、三层 passed、两层 skipped 和不完整标记。
 
-    子进程 stdout 必须是可解析的 `portfolio-eval-run:v8` JSON；passed 层发布当前已验证指标，
+    子进程 stdout 必须是可解析的 `portfolio-eval-run:v9` JSON；passed 层发布当前已验证指标，
     skipped PostgreSQL 层指标为空。stderr 保留为空，防止运行时 warning 污染一键演示体验。
     """
 
@@ -42,8 +42,8 @@ def test_portfolio_cli_fast_mode_runs_three_suites_and_marks_report_incomplete()
     assert completed.returncode == 0, completed.stderr or completed.stdout
     assert completed.stderr == ""
     report = json.loads(completed.stdout)
-    assert report["contract_id"] == "portfolio-eval-run:v8"
-    assert report["manifest_contract_id"] == "portfolio-eval-manifest:v8"
+    assert report["contract_id"] == "portfolio-eval-run:v9"
+    assert report["manifest_contract_id"] == "portfolio-eval-manifest:v9"
     assert report["metric_kind"] == "measured"
     assert report["run_success"] is True
     assert report["complete"] is False

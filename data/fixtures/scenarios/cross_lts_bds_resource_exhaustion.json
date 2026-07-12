@@ -1,0 +1,188 @@
+{
+  "scenario_id": "cross_lts_bds_resource_exhaustion",
+  "title": "BDS 资源耗尽导致 LTS 上游超时",
+  "description": "独立的 LTS 到 BDS 合成故障环境：输入分区正常，但 BDS 资源持续饱和并发生 spill/执行器丢失，导致下游 LTS 在截止时间前等不到产出。",
+  "components": ["lts", "bds"],
+  "expected_behavior": "诊断应排除输入分区缺失和显著数据倾斜，使用 LTS 依赖证据与 BDS 资源证据定位跨组件阻塞。",
+  "tool_results": [
+    {
+      "tool_name": "lts.get_task_status",
+      "request": {
+        "resource_id": "dws_customer_profile_daily",
+        "time_range": {
+          "start": "2026-07-13T00:00:00+08:00",
+          "end": "2026-07-13T03:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_resource_exhaustion",
+        "trace_id": "trace_lts_bds_resource_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "status": "failed",
+          "retry_count": 2,
+          "upstream_ready": false,
+          "deadline_exceeded": true
+        },
+        "evidence": [
+          {
+            "source_id": "lts_status_customer_profile_daily",
+            "content": "LTS 日报任务两次重试后失败，截止时间前仍未检测到 BDS 上游产出。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T03:01:00+08:00"
+      }
+    },
+    {
+      "tool_name": "lts.get_task_log",
+      "request": {
+        "resource_id": "dws_customer_profile_daily",
+        "time_range": {
+          "start": "2026-07-13T00:00:00+08:00",
+          "end": "2026-07-13T03:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_resource_exhaustion",
+        "trace_id": "trace_lts_bds_resource_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "log_level": "ERROR",
+          "component_error_code": "LTS_UPSTREAM_TIMEOUT",
+          "waited_seconds": 5400
+        },
+        "evidence": [
+          {
+            "source_id": "lts_log_customer_profile_daily",
+            "content": "调度日志记录等待上游 5400 秒后超时，没有出现 LTS 自身执行异常。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T03:01:10+08:00"
+      }
+    },
+    {
+      "tool_name": "lts.get_dependency_topology",
+      "request": {
+        "resource_id": "dws_customer_profile_daily",
+        "time_range": {
+          "start": "2026-07-13T00:00:00+08:00",
+          "end": "2026-07-13T03:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_resource_exhaustion",
+        "trace_id": "trace_lts_bds_resource_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "upstream_task": "bds_customer_profile_hourly",
+          "dataset": "dws_customer_profile_hourly",
+          "link_state": "blocked"
+        },
+        "evidence": [
+          {
+            "source_id": "lts_topology_customer_profile_daily",
+            "content": "LTS 日报依赖 BDS 客户画像作业产出的 dws_customer_profile_hourly，当前依赖边处于阻塞状态。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T03:01:20+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_task_status",
+      "request": {
+        "resource_id": "bds_customer_profile_hourly",
+        "time_range": {
+          "start": "2026-07-13T00:00:00+08:00",
+          "end": "2026-07-13T03:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_resource_exhaustion",
+        "trace_id": "trace_lts_bds_resource_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "status": "running",
+          "stage": "aggregate",
+          "cpu_percent": 99,
+          "memory_percent": 97,
+          "duration_seconds": 8400
+        },
+        "evidence": [
+          {
+            "source_id": "bds_status_customer_profile_cross",
+            "content": "BDS 作业在聚合阶段运行 8400 秒，CPU 99%、内存 97%，持续时间超过正常窗口。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T03:01:30+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_task_log",
+      "request": {
+        "resource_id": "bds_customer_profile_hourly",
+        "time_range": {
+          "start": "2026-07-13T00:00:00+08:00",
+          "end": "2026-07-13T03:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_resource_exhaustion",
+        "trace_id": "trace_lts_bds_resource_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "spill_count": 63,
+          "skew_ratio": 1.09,
+          "executor_lost": 5,
+          "warning": "RESOURCE_EXHAUSTION"
+        },
+        "evidence": [
+          {
+            "source_id": "bds_log_customer_profile_cross",
+            "content": "BDS 日志显示 63 次磁盘溢写和 5 个执行器丢失，数据倾斜比例仅 1.09。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T03:01:40+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_table_info",
+      "request": {
+        "resource_id": "dwd_customer_event",
+        "time_range": {
+          "start": "2026-07-13T00:00:00+08:00",
+          "end": "2026-07-13T03:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_resource_exhaustion",
+        "trace_id": "trace_lts_bds_resource_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "latest_partition": "2026-07-13-00",
+          "expected_partition": "2026-07-13-00",
+          "row_count": 962000,
+          "baseline_row_count": 950000
+        },
+        "evidence": [
+          {
+            "source_id": "bds_table_customer_event_cross",
+            "content": "BDS 输入分区按时到达，行数接近基线，可排除缺分区和异常数据量。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T03:01:50+08:00"
+      }
+    }
+  ]
+}
