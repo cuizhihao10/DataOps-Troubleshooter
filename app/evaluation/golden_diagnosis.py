@@ -13,7 +13,8 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.domain.models import RetrievedPath, RiskLevel
+from app.capabilities import HistoryTrigger
+from app.domain.models import EvidenceSourceType, MemoryStatus, RetrievedPath, RiskLevel
 from app.domain.scenarios import (
     GoldenCaseCategory,
     GoldenCaseSpec,
@@ -22,7 +23,7 @@ from app.domain.scenarios import (
 from app.orchestration.diagnosis_models import DiagnosisRunResult
 from app.orchestration.report_models import ReportWorkflowOutcome
 
-GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID = "golden-diagnosis-eval:v3"
+GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID = "golden-diagnosis-eval:v4"
 GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT = 28
 GOLDEN_DIAGNOSIS_CATEGORY_TARGETS: dict[GoldenCaseCategory, int] = {
     GoldenCaseCategory.SINGLE_COMPONENT: 8,
@@ -88,6 +89,15 @@ class GoldenDiagnosisCaseResult(BaseModel):
     actual_risk_level: RiskLevel
     risk_level_hit: bool
     safe_degradation_hit: bool | None
+    history_trigger_hit: bool | None = None
+    required_memory_ids: list[str]
+    recalled_memory_ids: list[str]
+    missing_required_memory_ids: list[str]
+    forbidden_memory_hits: list[str]
+    history_recall_coverage: float | None = Field(default=None, ge=0, le=1)
+    confirmed_only_recall: bool | None = None
+    history_projection_complete: bool | None = None
+    realtime_priority_preserved: bool | None = None
     tool_attempt_success_rate: float = Field(ge=0, le=1)
     report_accepted: bool
 
@@ -110,6 +120,25 @@ class GoldenDiagnosisCaseResult(BaseModel):
             raise ValueError("Golden case result path applicability is inconsistent")
         if self.matched_fault_path_ids and not matched:
             raise ValueError("Golden case result path IDs require a matched requirement")
+        is_memory_case = self.case_category is GoldenCaseCategory.MEMORY_RECALL
+        optional_history_fields = (
+            self.history_trigger_hit,
+            self.history_recall_coverage,
+            self.confirmed_only_recall,
+            self.history_projection_complete,
+            self.realtime_priority_preserved,
+        )
+        if is_memory_case != all(value is not None for value in optional_history_fields):
+            raise ValueError("Golden case result history applicability is inconsistent")
+        if not is_memory_case and any(
+            (
+                self.required_memory_ids,
+                self.recalled_memory_ids,
+                self.missing_required_memory_ids,
+                self.forbidden_memory_hits,
+            )
+        ):
+            raise ValueError("non-memory Golden case result cannot contain history identities")
         return self
 
 
@@ -122,7 +151,7 @@ class GoldenDiagnosisEvalReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    contract_id: Literal["golden-diagnosis-eval:v3"]
+    contract_id: Literal["golden-diagnosis-eval:v4"]
     metric_kind: Literal["measured"] = "measured"
     case_count: int = Field(ge=1)
     target_case_count: int = Field(default=GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT, ge=1)
@@ -142,6 +171,12 @@ class GoldenDiagnosisEvalReport(BaseModel):
     tool_attempt_success_rate: float = Field(ge=0, le=1)
     risk_level_hit_rate: float = Field(ge=0, le=1)
     safe_degradation_rate: float = Field(ge=0, le=1)
+    history_trigger_hit_rate: float = Field(ge=0, le=1)
+    history_recall_coverage: float = Field(ge=0, le=1)
+    confirmed_only_recall_rate: float = Field(ge=0, le=1)
+    history_projection_pass_rate: float = Field(ge=0, le=1)
+    realtime_priority_pass_rate: float = Field(ge=0, le=1)
+    forbidden_memory_hit_count: int = Field(ge=0)
     accepted_report_rate: float = Field(ge=0, le=1)
     cases: list[GoldenDiagnosisCaseResult] = Field(min_length=1)
 
@@ -226,6 +261,9 @@ async def evaluate_golden_diagnosis(
         for result in case_results
         if result.fault_path_completeness is not None
     ]
+    memory_results = [
+        result for result in case_results if result.history_recall_coverage is not None
+    ]
     total_claims = sum(result.critical_claim_count for result in case_results)
     unsupported_claims = sum(result.unsupported_critical_claim_count for result in case_results)
     total_actions = sum(result.logical_action_count for result in case_results)
@@ -263,6 +301,22 @@ async def evaluate_golden_diagnosis(
         ),
         risk_level_hit_rate=_mean([result.risk_level_hit for result in case_results]),
         safe_degradation_rate=_mean(degradation_results),
+        history_trigger_hit_rate=_mean([result.history_trigger_hit for result in memory_results]),
+        history_recall_coverage=_mean(
+            [result.history_recall_coverage for result in memory_results]
+        ),
+        confirmed_only_recall_rate=_mean(
+            [result.confirmed_only_recall for result in memory_results]
+        ),
+        history_projection_pass_rate=_mean(
+            [result.history_projection_complete for result in memory_results]
+        ),
+        realtime_priority_pass_rate=_mean(
+            [result.realtime_priority_preserved for result in memory_results]
+        ),
+        forbidden_memory_hit_count=sum(
+            len(result.forbidden_memory_hits) for result in memory_results
+        ),
         accepted_report_rate=_mean([result.report_accepted for result in case_results]),
         cases=case_results,
     )
@@ -350,6 +404,58 @@ def score_golden_diagnosis_case(
         # 安全降级必须同时克制根因输出并公开不确定性；仅返回空报告不算可解释降级。
         safe_degradation = not report.root_causes and bool(report.uncertainties)
 
+    history_trigger_hit: bool | None = None
+    history_recall_coverage: float | None = None
+    confirmed_only_recall: bool | None = None
+    history_projection_complete: bool | None = None
+    realtime_priority_preserved: bool | None = None
+    required_memory_ids: list[str] = []
+    recalled_memory_ids: list[str] = []
+    missing_memory_ids: list[str] = []
+    forbidden_memory_hits: list[str] = []
+    if case.history_expectation is not None:
+        required_memory_ids = [
+            memory.memory_id for memory in case.history_expectation.required_memories
+        ]
+        recalled_memory_ids = [match.memory.memory_id for match in diagnosis.recalled_memories]
+        missing_memory_ids = [
+            memory_id for memory_id in required_memory_ids if memory_id not in recalled_memory_ids
+        ]
+        forbidden_memory_hits = [
+            memory_id
+            for memory_id in recalled_memory_ids
+            if memory_id in case.history_expectation.forbidden_memory_ids
+        ]
+        history_trigger_hit = diagnosis.history_trigger is not HistoryTrigger.NOT_REQUESTED
+        history_recall_coverage = _coverage(required_memory_ids, recalled_memory_ids)
+        confirmed_only_recall = bool(diagnosis.recalled_memories) and all(
+            match.memory.status is MemoryStatus.CONFIRMED for match in diagnosis.recalled_memories
+        )
+        projected_ids = [similar.case_id for similar in report.similar_cases]
+        history_projection_complete = bool(recalled_memory_ids) and (
+            projected_ids == recalled_memory_ids
+        )
+
+        conflicting_roots = {
+            memory.historical_root_cause
+            for memory in case.history_expectation.required_memories
+            if memory.expect_root_conflict
+        }
+        reported_roots = [root.root_cause for root in report.root_causes]
+        tool_evidence_ids = {
+            evidence.evidence_id
+            for evidence in state.evidence
+            if evidence.source_type is EvidenceSourceType.TOOL
+        }
+        roots_have_realtime_support = all(
+            bool(set(root.evidence_refs) & tool_evidence_ids) for root in report.root_causes
+        )
+        realtime_priority_preserved = (
+            (top1 in case.allowed_root_causes)
+            and not (set(reported_roots) & conflicting_roots)
+            and roots_have_realtime_support
+        )
+
     return GoldenDiagnosisCaseResult(
         case_id=case.case_id,
         scenario_id=case.scenario_id,
@@ -384,6 +490,15 @@ def score_golden_diagnosis_case(
         actual_risk_level=actual_risk,
         risk_level_hit=actual_risk is case.expected_risk_level,
         safe_degradation_hit=safe_degradation,
+        history_trigger_hit=history_trigger_hit,
+        required_memory_ids=required_memory_ids,
+        recalled_memory_ids=recalled_memory_ids,
+        missing_required_memory_ids=missing_memory_ids,
+        forbidden_memory_hits=forbidden_memory_hits,
+        history_recall_coverage=history_recall_coverage,
+        confirmed_only_recall=confirmed_only_recall,
+        history_projection_complete=history_projection_complete,
+        realtime_priority_preserved=realtime_priority_preserved,
         tool_attempt_success_rate=(
             1.0
             if not state.tool_events

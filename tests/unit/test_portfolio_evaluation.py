@@ -61,7 +61,7 @@ class RecordingPytestExecutor:
 
 
 def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -> None:
-    """确认 v4 manifest 精确覆盖五层、十六个指标，并拒绝任意 pytest flag/命令目标。
+    """确认 v5 manifest 精确覆盖五层、十八个指标，并拒绝任意 pytest flag/命令目标。
 
     复制 payload 后把第一 target 改为 ``--collect-only``；Pydantic 必须在执行器之前失败，证明 JSON
     不能把受限 test target 字段变成自由命令入口。
@@ -69,9 +69,9 @@ def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -
 
     manifest = load_portfolio_eval_manifest(MANIFEST_PATH)
 
-    assert manifest.contract_id == "portfolio-eval-manifest:v4"
+    assert manifest.contract_id == "portfolio-eval-manifest:v5"
     assert len(manifest.suites) == 5
-    assert sum(len(suite.metrics) for suite in manifest.suites) == 16
+    assert sum(len(suite.metrics) for suite in manifest.suites) == 18
     assert sum(suite.requires_postgres for suite in manifest.suites) == 2
 
     payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
@@ -81,7 +81,7 @@ def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -
 
 
 def test_portfolio_manifest_v1_remains_readable_with_exact_legacy_four_suites() -> None:
-    """验证升级默认 v2 后仍可读取精确四层的历史 v1 manifest。
+    """验证升级默认 v5 后仍可读取精确四层的历史 v1 manifest。
 
     测试从当前 JSON 删除 Golden 层并回写 v1 contract；兼容只允许旧精确集合，不能让任意缺层 v2
     借用 v1 标签通过。该能力用于解释旧结果，不会使默认 CLI 回退到四层。
@@ -102,7 +102,7 @@ def test_portfolio_manifest_v1_remains_readable_with_exact_legacy_four_suites() 
 def test_portfolio_manifest_v2_requires_the_original_golden_v1_source() -> None:
     """验证五层历史 v2 只能绑定不含路径指标的 Golden v1 来源契约。
 
-    测试从当前 v3 JSON 删除链路指标并回写两个旧 contract；若只修改 manifest 版本却保留 Golden v2
+    测试从当前 v5 JSON 删除后续指标并回写两个旧 contract；若只修改版本却保留 Golden v2
     来源，模型必须拒绝，防止旧消费者把新增字段误认为原 v2 语义。
     """
 
@@ -115,7 +115,12 @@ def test_portfolio_manifest_v2_requires_the_original_golden_v1_source() -> None:
     golden_suite["metrics"] = [
         metric
         for metric in golden_suite["metrics"]
-        if metric["metric_id"] != "golden_fault_path_completeness"
+        if metric["metric_id"]
+        not in {
+            "golden_fault_path_completeness",
+            "golden_history_recall_coverage",
+            "golden_realtime_priority_pass",
+        }
     ]
     coverage = next(
         metric
@@ -130,6 +135,12 @@ def test_portfolio_manifest_v2_requires_the_original_golden_v1_source() -> None:
     assert manifest.contract_id == "portfolio-eval-manifest:v2"
 
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v2"
+    golden_suite["metrics"] = [
+        metric
+        for metric in golden_suite["metrics"]
+        if metric["metric_id"]
+        not in {"golden_history_recall_coverage", "golden_realtime_priority_pass"}
+    ]
     with pytest.raises(ValidationError, match="requires Golden source"):
         PortfolioEvalManifest.model_validate(payload)
 
@@ -147,6 +158,12 @@ def test_portfolio_manifest_v3_preserves_five_case_path_scoring_snapshot() -> No
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v2"
+    golden_suite["metrics"] = [
+        metric
+        for metric in golden_suite["metrics"]
+        if metric["metric_id"]
+        not in {"golden_history_recall_coverage", "golden_realtime_priority_pass"}
+    ]
     coverage = next(
         metric
         for metric in golden_suite["metrics"]
@@ -165,11 +182,46 @@ def test_portfolio_manifest_v3_preserves_five_case_path_scoring_snapshot() -> No
         PortfolioEvalManifest.model_validate(payload)
 
 
+def test_portfolio_manifest_v4_preserves_eight_case_category_snapshot() -> None:
+    """验证历史 v4 绑定 Golden v3、8/28 覆盖和不含记忆专用指标的集合。
+
+    v4 已有类别配额但 memory 类别仍为零；测试回写旧来源、覆盖和七指标集合后应通过。保留当前
+    两个记忆指标必须失败，防止旧报告被解释成已经完成长期记忆 Golden Cases。
+    """
+
+    payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    payload["contract_id"] = "portfolio-eval-manifest:v4"
+    golden_suite = next(
+        suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
+    )
+    golden_suite["source_contract_id"] = "golden-diagnosis-eval:v3"
+    coverage = next(
+        metric
+        for metric in golden_suite["metrics"]
+        if metric["metric_id"] == "golden_case_coverage"
+    )
+    coverage["treatment_label"] = "measured_scripted_8_cases"
+    coverage["treatment_value"] = 0.2857
+    coverage["delta"] = -0.7143
+
+    with pytest.raises(ValidationError, match="versioned Golden metric set"):
+        PortfolioEvalManifest.model_validate(payload)
+
+    golden_suite["metrics"] = [
+        metric
+        for metric in golden_suite["metrics"]
+        if metric["metric_id"]
+        not in {"golden_history_recall_coverage", "golden_realtime_priority_pass"}
+    ]
+    manifest = PortfolioEvalManifest.model_validate(payload)
+    assert manifest.contract_id == "portfolio-eval-manifest:v4"
+
+
 def test_complete_portfolio_run_publishes_metrics_only_after_all_suites_pass() -> None:
     """验证完整模式五层通过后报告 complete、run_success 和 all_suites_passed 均为真。
 
-    两个 PostgreSQL 命令必须追加内部 `-m postgres`，两个快速层不得追加；所有 passed suite 才携带
-    manifest 指标，九个指标全量进入本次报告。
+    两个 PostgreSQL 命令必须追加内部 `-m postgres`，三个快速层不得追加；所有 passed suite 才携带
+    manifest 指标，十八个指标全量进入本次报告。
     """
 
     manifest = load_portfolio_eval_manifest(MANIFEST_PATH)
@@ -186,13 +238,13 @@ def test_complete_portfolio_run_publishes_metrics_only_after_all_suites_pass() -
     assert report.complete is True
     assert report.all_suites_passed is True
     assert all(suite.status is SuiteExecutionStatus.PASSED for suite in report.suites)
-    assert sum(len(suite.metrics) for suite in report.suites) == 16
+    assert sum(len(suite.metrics) for suite in report.suites) == 18
     assert sum("postgres" in command for command in executor.commands) == 2
     assert all(command[1:4] == ["-m", "pytest", "-q"] for command in executor.commands)
 
 
 def test_fast_mode_skips_postgres_hides_metrics_and_remains_explicitly_incomplete() -> None:
-    """验证 ``--skip-postgres`` 等价模式只执行两层，跳过层不展示旧实测数字。
+    """验证 ``--skip-postgres`` 等价模式只执行三层，跳过层不展示旧实测数字。
 
     已执行 history/auditor/golden 层通过，因此 run_success=True；但两个 skipped 使 complete 与
     all_suites_passed=False。该组合允许快速反馈，却不能作为完整作品集成绩。

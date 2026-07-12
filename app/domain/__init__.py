@@ -25,6 +25,8 @@ from app.domain.scenarios import (
     GoldenCaseCategory,
     GoldenCaseSpec,
     GoldenFaultPathRequirement,
+    GoldenHistoryExpectation,
+    GoldenMemoryExpectation,
     ScenarioFixture,
 )
 from app.domain.tooling import McpToolRequest, McpToolResponse, ToolName
@@ -43,6 +45,8 @@ __all__ = [
     "GoldenCaseCategory",
     "GoldenCaseSpec",
     "GoldenFaultPathRequirement",
+    "GoldenHistoryExpectation",
+    "GoldenMemoryExpectation",
     "McpToolRequest",
     "McpToolResponse",
     "PlannerDecision",

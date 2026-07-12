@@ -29,9 +29,9 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     golden_cases = load_golden_cases(GOLDEN_CASE_FILE)
 
     assert len(registry) == 5
-    assert len(golden_cases) == 8
+    assert len(golden_cases) == 11
     assert {case.scenario_id for case in golden_cases} == set(registry.scenario_ids)
-    assert {case.contract_id for case in golden_cases} == {"golden-case:v3"}
+    assert {case.contract_id for case in golden_cases} == {"golden-case:v4"}
     category_counts = {
         category: sum(case.case_category is category for case in golden_cases)
         for category in GoldenCaseCategory
@@ -41,7 +41,7 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
         GoldenCaseCategory.CROSS_COMPONENT: 1,
         GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 1,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 2,
-        GoldenCaseCategory.MEMORY_RECALL: 0,
+        GoldenCaseCategory.MEMORY_RECALL: 3,
     }
     cross_chain = next(
         case for case in golden_cases if case.case_id == "golden_cross_chain_pk_conflict"
@@ -148,4 +148,40 @@ def test_golden_case_rejects_duplicate_path_labels(tmp_path: Path) -> None:
     target.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="fault path labels must be unique"):
+        load_golden_cases(target)
+
+
+def test_memory_category_requires_history_expectation(tmp_path: Path) -> None:
+    """验证 memory_recall 类别不能缺少必要/禁止历史案例标注。
+
+    测试删除首条记忆案例的 history_expectation；加载必须失败，避免类别配额看似完成但评测器没有
+    可执行的召回、投影和实时优先验收条件。
+    """
+
+    payload = json.loads(GOLDEN_CASE_FILE.read_text(encoding="utf-8"))
+    memory_case = next(case for case in payload if case["case_category"] == "memory_recall")
+    memory_case.pop("history_expectation")
+    target = tmp_path / "missing_history_expectation.json"
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be present together"):
+        load_golden_cases(target)
+
+
+def test_history_conflict_flag_must_match_current_allowed_roots(tmp_path: Path) -> None:
+    """验证历史根因与本次允许根因冲突时必须显式标记 conflict。
+
+    测试把 BDS 旧数据倾斜案例的冲突标记改为 false；Schema 应拒绝，防止实时优先评测因漏标而
+    把历史覆盖当前 Observation 的风险排除在分母之外。
+    """
+
+    payload = json.loads(GOLDEN_CASE_FILE.read_text(encoding="utf-8"))
+    conflict_case = next(
+        case for case in payload if case["case_id"] == "golden_memory_bds_conflict_guard"
+    )
+    conflict_case["history_expectation"]["required_memories"][0]["expect_root_conflict"] = False
+    target = tmp_path / "invalid_history_conflict.json"
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="conflict flag must match"):
         load_golden_cases(target)

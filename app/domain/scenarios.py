@@ -120,6 +120,52 @@ class GoldenFaultPathRequirement(BaseModel):
         return self
 
 
+class GoldenMemoryExpectation(BaseModel):
+    """描述一条记忆 Golden Case 必须召回的 confirmed 历史案例。
+
+    memory ID、历史根因和固定相似度用于构造可重复强类型上下文；``expect_root_conflict`` 标记旧根因
+    是否与本次允许根因不同，使评测器能单独验证实时 Observation 优先，而不把相似度当作事实。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    memory_id: str = Field(pattern=r"^mem_[a-z0-9][a-z0-9_-]{2,95}$")
+    historical_root_cause: str = Field(min_length=1, max_length=1000)
+    similarity: float = Field(gt=0, le=1)
+    expect_root_conflict: bool = False
+
+
+class GoldenHistoryExpectation(BaseModel):
+    """封装记忆类别案例的必要召回、禁止命中与实时优先要求。
+
+    ``required_memories`` 至少一条且只代表 confirmed 候选；forbidden ID 用于拦截错误召回或状态污染。
+    报告必须按原顺序投影召回案例，冲突案例还必须让本次 TOOL Evidence 支持的根因优先。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    required_memories: list[GoldenMemoryExpectation] = Field(min_length=1, max_length=5)
+    forbidden_memory_ids: list[str] = Field(default_factory=list)
+    require_realtime_priority: bool = True
+
+    @model_validator(mode="after")
+    def validate_memory_identity_sets(self) -> GoldenHistoryExpectation:
+        """拒绝重复或同时 required/forbidden 的 memory ID，保持召回分母无歧义。
+
+        历史根因允许重复，因为多个已确认案例可能属于同一故障；身份集合冲突则会让任何结果同时
+        成功和失败，因此必须在 Fixture 加载阶段阻断。
+        """
+
+        required_ids = [memory.memory_id for memory in self.required_memories]
+        if len(required_ids) != len(set(required_ids)):
+            raise ValueError("Golden history required memory IDs must be unique")
+        if len(self.forbidden_memory_ids) != len(set(self.forbidden_memory_ids)):
+            raise ValueError("Golden history forbidden memory IDs must be unique")
+        if set(required_ids) & set(self.forbidden_memory_ids):
+            raise ValueError("Golden history required and forbidden memory IDs must not overlap")
+        return self
+
+
 class GoldenCaseSpec(BaseModel):
     """定义一个诊断评测案例的输入、必要行动和允许结果边界。
 
@@ -129,7 +175,7 @@ class GoldenCaseSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    contract_id: Literal["golden-case:v3"]
+    contract_id: Literal["golden-case:v4"]
     case_id: str = Field(pattern=r"^golden_[a-z0-9][a-z0-9_-]{2,79}$")
     case_category: GoldenCaseCategory
     user_query: str = Field(min_length=1, max_length=4000)
@@ -137,6 +183,7 @@ class GoldenCaseSpec(BaseModel):
     expected_intent: str = Field(min_length=1, max_length=100)
     required_tools: list[ToolName] = Field(default_factory=list)
     required_fault_paths: list[GoldenFaultPathRequirement] = Field(default_factory=list)
+    history_expectation: GoldenHistoryExpectation | None = None
     allowed_root_causes: list[str] = Field(default_factory=list)
     required_evidence_sources: list[str] = Field(default_factory=list)
     expected_stop_reasons: list[str] = Field(min_length=1)
@@ -162,4 +209,17 @@ class GoldenCaseSpec(BaseModel):
         path_labels = [path.path_label for path in self.required_fault_paths]
         if len(path_labels) != len(set(path_labels)):
             raise ValueError("Golden case fault path labels must be unique")
+        is_memory_case = self.case_category is GoldenCaseCategory.MEMORY_RECALL
+        if is_memory_case != (self.history_expectation is not None):
+            raise ValueError(
+                "Golden memory category and history_expectation must be present together"
+            )
+        if self.history_expectation is not None:
+            allowed_roots = set(self.allowed_root_causes)
+            for memory in self.history_expectation.required_memories:
+                actual_conflict = memory.historical_root_cause not in allowed_roots
+                if memory.expect_root_conflict != actual_conflict:
+                    raise ValueError(
+                        "Golden history conflict flag must match allowed root annotations"
+                    )
         return self

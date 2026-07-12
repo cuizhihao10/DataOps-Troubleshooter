@@ -28,14 +28,14 @@
 - `memory-recall-eval:v1` 使用 3 条合成查询真实比较 vector-only/vector+graph；当前小样本 Macro Recall@K 与 Precision@K 实测从 0.8333 变为 1.0000，禁止案例命中为 0。
 - `history-impact-eval:v1` 使用 3 条合成诊断真实比较 Memory off/on；确定性 LangGraph 小样本中必要 Action 覆盖实测从 0.6667 变为 1.0000，意外 Action 率从 0.3333 降为 0，根因命中、实时引用、历史投影和冲突保护均保持 1.0000。
 - `auditor-impact-eval:v1` 使用 3 条语义缺陷案例比较规则对照与完整 Auditor；预期问题发现率实测从 0 变为 1.0000，危险内容残留率从 1.0000 降为 0，安全处置率从 0 变为 1.0000，其中两例修订后接受、一例持续冲突后降级。
-- `golden-case:v3` 用机器可读类别跟踪 8/10/4/3/3 产品配额；当前复用 5 个脱敏 Fixture 形成 8 条案例，避免为凑数量复制 Mock 响应。
-- `golden-diagnosis-eval:v3` 只有在路径真实进入 `RetrievedPath` 且被最终 `fault_chain` 引用时才计分；当前 8/28 确定性脚本满分不冒充真实 LLM 成绩。
-- `portfolio-eval-run:v4` 通过 `python -m app.evaluation` 一次执行五层、16 个独立指标。
+- `golden-case:v4` 补齐 3/3 长期记忆类别，标注 required/forbidden memory、历史根因冲突和实时优先要求；当前 11 条案例仍复用 5 个脱敏 Fixture。
+- `golden-diagnosis-eval:v4` 检查 confirmed-only 召回、最终报告投影和冲突时 TOOL Evidence 优先；当前 11/28 确定性脚本满分不冒充真实 LLM 成绩。
+- `portfolio-eval-run:v5` 通过 `python -m app.evaluation` 一次执行五层、18 个独立指标。
 - `audited-diagnosis-workflow:v2` 按 history trigger 召回 confirmed 案例，在 ReAct 前后两次确定性比较同批候选，再串联独立 Auditor 和审计后 memory staging。
 - `diagnosis-resources:v2` 提供 session/message/run/event PostgreSQL 资源；最终报告可直接展示相似度、共同点、差异点、参考方案、避坑提示与引用。
 - `session-checkpoint:v1` 在成功 run 的同一事务保存最新公开状态；同 session 追问恢复报告、证据、路径和工具事件，失败 run 不覆盖旧快照，跨 run 同参 Action 仍会被拦截。
 
-当前已完成全部 MCP 工具、GraphRAG 检索闭环、五项固定 runtime capabilities、Planner ReAct、独立 Auditor、长期案例记忆、五层小样本统一评测运行器、顶层诊断工作流、资源 API 和同 session checkpoint 追问恢复。默认模型 Provider 仍为 disabled；Golden 诊断层是 8 条确定性脚本回归基线，自动化测试不宣称已经调用付费模型或取得模型质量成绩。可靠后台 worker、LangGraph 逐节点中断恢复、模型级复杂语义对比和完整 28 条 Golden Case 仍待后续实现。
+当前已完成全部 MCP 工具、GraphRAG 检索闭环、五项固定 runtime capabilities、Planner ReAct、独立 Auditor、长期案例记忆、五层小样本统一评测运行器、顶层诊断工作流、资源 API 和同 session checkpoint 追问恢复。默认模型 Provider 仍为 disabled；Golden 诊断层是 11 条确定性脚本回归基线，自动化测试不宣称已经调用付费模型或取得模型质量成绩。可靠后台 worker、LangGraph 逐节点中断恢复、模型级复杂语义对比和完整 28 条 Golden Case 仍待后续实现。
 
 ## 本地启动
 

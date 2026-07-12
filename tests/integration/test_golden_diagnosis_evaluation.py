@@ -1,4 +1,4 @@
-"""用八条版本化 Golden Cases 验证顶层诊断评分、类别配额与 8/28 发布边界。
+"""用十一条 Golden Cases 验证顶层诊断、长期记忆安全与 11/28 发布边界。
 
 测试运行器从合成 Fixture 构造真实 ``ToolEvent``/``Evidence``，再通过生产 Pydantic 顶层结果契约
 进入评测器。Planner、Auditor 和报告文本是确定性脚本，因此这些数字只证明数据流与评分规则可
@@ -33,6 +33,7 @@ from app.domain.models import (
     RetrievedPath,
     RiskLevel,
     RootCauseConclusion,
+    SimilarCaseReference,
     ToolEvent,
 )
 from app.domain.scenarios import GoldenCaseCategory, GoldenCaseSpec
@@ -40,7 +41,12 @@ from app.evaluation.golden_diagnosis import (
     GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID,
     evaluate_golden_diagnosis,
 )
-from app.memory.models import MemoryStageResult, MemoryStageStatus
+from app.memory.models import (
+    CaseMemoryMatch,
+    MemoryRetrievalChannel,
+    MemoryStageResult,
+    MemoryStageStatus,
+)
 from app.orchestration.diagnosis_models import (
     DIAGNOSIS_WORKFLOW_CONTRACT_ID,
     DiagnosisRunResult,
@@ -139,12 +145,12 @@ class FixtureBackedGoldenRunner:
 
 
 @pytest.mark.asyncio
-async def test_eight_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
-    """验证八条合成案例命中客观契约，同时保持 8/28 与分类配额未完成标记。
+async def test_eleven_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
+    """验证十一条案例命中诊断与历史安全契约，同时保持 11/28 未完成标记。
 
     确定性基线预期意图、必要 Action、允许根因、关键来源、停止原因、引用、风险和安全降级全部
-    命中；三条故意异常/空结果使尝试成功率低于一。覆盖标记必须保持 false，防止 8 条通过被宣传为
-    产品文档要求的 28 条验收已经完成；类别计数还必须与 8/10/4/3/3 目标分别对齐。
+    命中；三条故意异常/空结果使尝试成功率低于一。覆盖标记必须保持 false，防止 11 条通过被宣传为
+    产品文档要求的 28 条验收已经完成；三条记忆案例还必须完整召回、投影并保持实时根因优先。
     """
 
     cases = load_golden_cases(GOLDEN_CASE_FILE)
@@ -154,16 +160,16 @@ async def test_eight_golden_cases_produce_versioned_measured_diagnosis_baseline(
 
     assert report.contract_id == GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID
     assert report.metric_kind == "measured"
-    assert report.case_count == 8
+    assert report.case_count == 11
     assert report.target_case_count == 28
-    assert report.case_coverage_rate == pytest.approx(8 / 28)
+    assert report.case_coverage_rate == pytest.approx(11 / 28)
     assert report.target_coverage_complete is False
     assert report.category_case_counts == {
         GoldenCaseCategory.SINGLE_COMPONENT: 4,
         GoldenCaseCategory.CROSS_COMPONENT: 1,
         GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 1,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 2,
-        GoldenCaseCategory.MEMORY_RECALL: 0,
+        GoldenCaseCategory.MEMORY_RECALL: 3,
     }
     assert report.intent_accuracy == 1
     assert report.root_cause_top1_hit_rate == 1
@@ -174,9 +180,15 @@ async def test_eight_golden_cases_produce_versioned_measured_diagnosis_baseline(
     assert report.citation_completeness == 1
     assert report.unsupported_critical_claim_rate == 0
     assert report.duplicate_action_rate == 0
-    assert report.tool_attempt_success_rate == pytest.approx(16 / 19)
+    assert report.tool_attempt_success_rate == pytest.approx(22 / 25)
     assert report.risk_level_hit_rate == 1
     assert report.safe_degradation_rate == 1
+    assert report.history_trigger_hit_rate == 1
+    assert report.history_recall_coverage == 1
+    assert report.confirmed_only_recall_rate == 1
+    assert report.history_projection_pass_rate == 1
+    assert report.realtime_priority_pass_rate == 1
+    assert report.forbidden_memory_hit_count == 0
     assert report.accepted_report_rate == 1
 
 
@@ -255,6 +267,71 @@ async def test_golden_diagnosis_requires_retrieved_path_to_be_used_by_final_repo
     ]
 
 
+@pytest.mark.asyncio
+async def test_memory_golden_requires_recalled_case_projection_in_final_report() -> None:
+    """确认 raw confirmed memory 已召回但最终报告未展示时，历史投影门禁失败。
+
+    测试保留 DiagnosisRunResult 的 recalled_memories/history_case_matches，只清空报告
+    similar_cases；召回覆盖仍为一，但 projection 必须为 false，防止后端命中历史而报告不可解释。
+    """
+
+    cases = load_golden_cases(GOLDEN_CASE_FILE)
+    target = next(case for case in cases if case.case_id == "golden_memory_lts_action_guidance")
+    baseline = await FixtureBackedGoldenRunner(
+        FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
+    ).run(target)
+    report = baseline.report.state.draft_report
+    assert report is not None
+    hidden_history = report.model_copy(update={"similar_cases": []})
+    hidden_state = baseline.report.state.model_copy(update={"draft_report": hidden_history})
+    diagnosis = baseline.model_copy(
+        update={"report": baseline.report.model_copy(update={"state": hidden_state})}
+    )
+
+    result = (await evaluate_golden_diagnosis([target], _SingleResultRunner(diagnosis))).cases[0]
+
+    assert result.history_recall_coverage == 1
+    assert result.history_projection_complete is False
+
+
+@pytest.mark.asyncio
+async def test_memory_golden_rejects_historical_root_without_realtime_tool_support() -> None:
+    """确认有效 memory ID 不能单独支撑与本次 Observation 冲突的最终根因。
+
+    负向结果把 BDS 当前缺分区根因替换成旧数据倾斜根因，并只引用 confirmed memory ID；结构引用
+    完整率仍可为一，但实时优先指标必须失败，体现历史参考与当前事实的职责分离。
+    """
+
+    cases = load_golden_cases(GOLDEN_CASE_FILE)
+    target = next(case for case in cases if case.case_id == "golden_memory_bds_conflict_guard")
+    baseline = await FixtureBackedGoldenRunner(
+        FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
+    ).run(target)
+    report = baseline.report.state.draft_report
+    assert report is not None
+    memory_id = baseline.recalled_memories[0].memory.memory_id
+    unsafe_report = report.model_copy(
+        update={
+            "root_causes": [
+                RootCauseConclusion(
+                    root_cause="BDS 数据倾斜",
+                    confidence=0.9,
+                    evidence_refs=[memory_id],
+                )
+            ]
+        }
+    )
+    unsafe_state = baseline.report.state.model_copy(update={"draft_report": unsafe_report})
+    diagnosis = baseline.model_copy(
+        update={"report": baseline.report.model_copy(update={"state": unsafe_state})}
+    )
+
+    result = (await evaluate_golden_diagnosis([target], _SingleResultRunner(diagnosis))).cases[0]
+
+    assert result.citation_completeness == 1
+    assert result.realtime_priority_preserved is False
+
+
 class _SingleResultRunner:
     """在负向单测中返回一个预先组装的强类型诊断结果。
 
@@ -299,15 +376,21 @@ def _build_diagnosis_result(
 
     components = _components_from_tools(case)
     intent = DiagnosisIntent(case.expected_intent)
+    history_trigger = (
+        HistoryTrigger.USER_REQUESTED
+        if case.history_expectation is not None
+        else HistoryTrigger.NOT_REQUESTED
+    )
     selection = get_capability_registry().select(
         CapabilitySelectionRequest(
             intent=intent,
             components=components,
-            history_trigger=HistoryTrigger.NOT_REQUESTED,
+            history_trigger=history_trigger,
         )
     )
     evidence_ids = [item.evidence_id for item in evidence]
     retrieved_paths = _build_retrieved_paths(case)
+    recalled_memories, history_explanations = _build_history_context(case, components)
     root_cause = case.allowed_root_causes[0] if case.allowed_root_causes else None
     hypotheses = []
     if root_cause:
@@ -342,6 +425,7 @@ def _build_diagnosis_result(
         root_cause=root_cause,
         evidence_ids=evidence_ids,
         retrieved_paths=retrieved_paths,
+        similar_cases=history_explanations,
     )
     memory = _build_pending_memory(case, components, evidence_ids) if root_cause else None
     final_state = state.model_copy(
@@ -370,7 +454,10 @@ def _build_diagnosis_result(
     )
     return DiagnosisRunResult(
         contract_id=DIAGNOSIS_WORKFLOW_CONTRACT_ID,
-        history_trigger=HistoryTrigger.NOT_REQUESTED,
+        history_trigger=history_trigger,
+        memory_query=case.user_query if case.history_expectation is not None else None,
+        recalled_memories=recalled_memories,
+        history_case_matches=history_explanations,
         react=react,
         report=report_result,
         memory_stage=memory_stage,
@@ -383,6 +470,7 @@ def _build_report(
     root_cause: str | None,
     evidence_ids: list[str],
     retrieved_paths: list[RetrievedPath],
+    similar_cases: tuple[SimilarCaseReference, ...],
 ) -> DiagnosisReport:
     """生成引用完整且风险与 Golden 标注一致的确定性报告。
 
@@ -416,14 +504,85 @@ def _build_report(
                     evidence_refs=evidence_ids,
                 )
             ],
-            evidence_refs=[*evidence_ids, *(path.path_id for path in retrieved_paths)],
+            evidence_refs=[
+                *evidence_ids,
+                *(path.path_id for path in retrieved_paths),
+                *(similar.case_id for similar in similar_cases),
+            ],
             remediation_steps=[remediation],
+            similar_cases=list(similar_cases),
         )
     return DiagnosisReport(
         summary="当前工具结果不足以确认根因，保持安全降级。",
         remediation_steps=[remediation],
         uncertainties=["缺少可支持根因的实时成功 Observation，需补充权限或稍后重试。"],
     )
+
+
+def _build_history_context(
+    case: GoldenCaseSpec,
+    components: tuple[Component, ...],
+) -> tuple[tuple[CaseMemoryMatch, ...], tuple[SimilarCaseReference, ...]]:
+    """把 Golden memory 标注投影为 confirmed raw match 与可解释报告引用。
+
+    非记忆案例返回两个空 tuple；记忆案例按标注顺序构造 confirmed CaseMemoryMatch，并让解释保留
+    同一 ID/相似度。冲突案例明确写入根因差异和禁止直接复用提示，供实时优先门禁审阅。
+    """
+
+    if case.history_expectation is None:
+        return (), ()
+
+    matches: list[CaseMemoryMatch] = []
+    explanations: list[SimilarCaseReference] = []
+    for index, expectation in enumerate(case.history_expectation.required_memories, start=1):
+        memory = CaseMemory(
+            memory_id=expectation.memory_id,
+            symptoms=[f"历史合成症状：{case.user_query}"],
+            root_cause=expectation.historical_root_cause,
+            fault_path=["历史合成故障路径"],
+            solution_steps=["仅在隔离环境人工复核历史方案。"],
+            components=list(components),
+            tags=["golden_memory", case.scenario_id],
+            evidence_refs=[f"ev_{_digest(case.case_id, expectation.memory_id)}"],
+            status=MemoryStatus.CONFIRMED,
+            occurrence_count=2,
+            created_at=NOW - timedelta(days=index + 2),
+            updated_at=NOW - timedelta(days=index),
+        )
+        matches.append(
+            CaseMemoryMatch(
+                memory=memory,
+                similarity=expectation.similarity,
+                retrieval_channels=[MemoryRetrievalChannel.VECTOR],
+                direct_similarity=expectation.similarity,
+            )
+        )
+        differences = (
+            [
+                f"历史根因 {expectation.historical_root_cause} 与本次允许根因不同，"
+                "必须服从实时 Observation。"
+            ]
+            if expectation.expect_root_conflict
+            else ["历史案例时间与本次运行不同，仍需核对实时 Observation。"]
+        )
+        pitfalls = (
+            ["禁止直接复用历史根因或处置方案，先验证本次实时证据。"]
+            if expectation.expect_root_conflict
+            else ["历史方案只作参考，执行前仍需检查当前环境。"]
+        )
+        explanations.append(
+            SimilarCaseReference(
+                case_id=expectation.memory_id,
+                similarity=expectation.similarity,
+                confirmed=True,
+                common_points=["组件和合成症状具有可复核共同点。"],
+                differences=differences,
+                reference_actions=["优先执行本次 Golden 标注的只读工具检查。"],
+                pitfall_warnings=pitfalls,
+                evidence_refs=[expectation.memory_id],
+            )
+        )
+    return tuple(matches), tuple(explanations)
 
 
 def _build_retrieved_paths(case: GoldenCaseSpec) -> list[RetrievedPath]:

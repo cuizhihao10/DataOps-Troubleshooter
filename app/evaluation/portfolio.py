@@ -21,8 +21,8 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-PORTFOLIO_EVAL_MANIFEST_CONTRACT_ID = "portfolio-eval-manifest:v4"
-PORTFOLIO_EVAL_RUN_CONTRACT_ID = "portfolio-eval-run:v4"
+PORTFOLIO_EVAL_MANIFEST_CONTRACT_ID = "portfolio-eval-manifest:v5"
+PORTFOLIO_EVAL_RUN_CONTRACT_ID = "portfolio-eval-run:v5"
 DEFAULT_MANIFEST_PATH = Path("data/evals/portfolio_eval_manifest.json")
 _V1_REQUIRED_SUITE_IDS = {
     "graphrag_ablation",
@@ -36,16 +36,38 @@ _REQUIRED_SUITE_IDS_BY_CONTRACT = {
     "portfolio-eval-manifest:v2": _V2_REQUIRED_SUITE_IDS,
     "portfolio-eval-manifest:v3": _V2_REQUIRED_SUITE_IDS,
     "portfolio-eval-manifest:v4": _V2_REQUIRED_SUITE_IDS,
+    "portfolio-eval-manifest:v5": _V2_REQUIRED_SUITE_IDS,
 }
 _GOLDEN_SOURCE_CONTRACT_BY_MANIFEST = {
     "portfolio-eval-manifest:v2": "golden-diagnosis-eval:v1",
     "portfolio-eval-manifest:v3": "golden-diagnosis-eval:v2",
     "portfolio-eval-manifest:v4": "golden-diagnosis-eval:v3",
+    "portfolio-eval-manifest:v5": "golden-diagnosis-eval:v4",
 }
 _GOLDEN_COVERAGE_VALUE_BY_MANIFEST = {
     "portfolio-eval-manifest:v2": 0.1786,
     "portfolio-eval-manifest:v3": 0.1786,
     "portfolio-eval-manifest:v4": 0.2857,
+    "portfolio-eval-manifest:v5": 0.3929,
+}
+_GOLDEN_V2_METRIC_IDS = {
+    "golden_case_coverage",
+    "golden_intent_accuracy",
+    "golden_root_cause_top1",
+    "golden_necessary_action_coverage",
+    "golden_citation_completeness",
+    "golden_safe_degradation",
+}
+_GOLDEN_REQUIRED_METRIC_IDS_BY_MANIFEST = {
+    "portfolio-eval-manifest:v2": _GOLDEN_V2_METRIC_IDS,
+    "portfolio-eval-manifest:v3": _GOLDEN_V2_METRIC_IDS | {"golden_fault_path_completeness"},
+    "portfolio-eval-manifest:v4": _GOLDEN_V2_METRIC_IDS | {"golden_fault_path_completeness"},
+    "portfolio-eval-manifest:v5": _GOLDEN_V2_METRIC_IDS
+    | {
+        "golden_fault_path_completeness",
+        "golden_history_recall_coverage",
+        "golden_realtime_priority_pass",
+    },
 }
 _TEST_TARGET = re.compile(r"^tests/[a-zA-Z0-9_./-]+\.py(?:::[a-zA-Z0-9_\[\]-]+)?$")
 
@@ -136,7 +158,7 @@ class PortfolioSuiteSpec(BaseModel):
 class PortfolioEvalManifest(BaseModel):
     """封装版本化作品集评测层并保证 suite/metric 全局身份唯一。
 
-    v1 保留原四层；v2 增加 Golden 评分；v3 增加路径完整率；v4 将数据扩展到 8 条并增加类别配额。
+    v1 保留原四层；v2 增加 Golden；v3 增加路径；v4 扩到 8 条；v5 补齐 3 条记忆类别案例。
     版本与精确 suite、Golden 来源和覆盖快照绑定，旧 JSON 不会被静默解释成当前完整运行。
     """
 
@@ -147,6 +169,7 @@ class PortfolioEvalManifest(BaseModel):
         "portfolio-eval-manifest:v2",
         "portfolio-eval-manifest:v3",
         "portfolio-eval-manifest:v4",
+        "portfolio-eval-manifest:v5",
     ]
     suites: list[PortfolioSuiteSpec] = Field(min_length=4)
 
@@ -191,6 +214,10 @@ class PortfolioEvalManifest(BaseModel):
                 raise ValueError(
                     f"{self.contract_id} requires Golden coverage snapshot {expected_coverage}"
                 )
+            expected_metric_ids = _GOLDEN_REQUIRED_METRIC_IDS_BY_MANIFEST[self.contract_id]
+            actual_metric_ids = {metric.metric_id for metric in golden_suite.metrics}
+            if actual_metric_ids != expected_metric_ids:
+                raise ValueError(f"{self.contract_id} requires its versioned Golden metric set")
         metric_ids = [metric.metric_id for suite in self.suites for metric in suite.metrics]
         if len(metric_ids) != len(set(metric_ids)):
             raise ValueError("portfolio eval metric IDs must be globally unique")
@@ -267,12 +294,13 @@ class PortfolioEvalRunReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    contract_id: Literal["portfolio-eval-run:v4"]
+    contract_id: Literal["portfolio-eval-run:v5"]
     manifest_contract_id: Literal[
         "portfolio-eval-manifest:v1",
         "portfolio-eval-manifest:v2",
         "portfolio-eval-manifest:v3",
         "portfolio-eval-manifest:v4",
+        "portfolio-eval-manifest:v5",
     ]
     metric_kind: Literal["measured"] = "measured"
     suites: list[PortfolioSuiteRun] = Field(min_length=4)
