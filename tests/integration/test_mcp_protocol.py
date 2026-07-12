@@ -324,6 +324,62 @@ async def test_lts_to_bds_dependency_chain_crosses_real_mcp_protocol() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bds_to_flashsync_root_cause_chain_crosses_real_mcp_protocol() -> None:
+    """验证 BDS 分区等待可沿真实 MCP Observation 追到 FlashSync 主键冲突。
+
+    测试调用 BDS 三工具与 FlashSync 三工具，先证明 BDS 停在 source_read 且目标分区落后，再证明同步
+    吞吐为零、日志存在脱敏主键冲突且一致性差异与积压相等。所有判断来自结构化响应和稳定 source
+    ID，既不直接读取 Fixture，也不把 GraphRAG 相似度单独当成实时根因事实。
+    """
+
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    calls = (
+        ("bds.get_task_status", "bds_order_aggregate_daily"),
+        ("bds.get_task_log", "bds_order_aggregate_daily"),
+        ("bds.get_table_info", "ods_order_delta"),
+        ("flashsync.get_sync_delay", "ods_order_delta"),
+        ("flashsync.get_sync_log", "ods_order_delta"),
+        ("flashsync.check_consistency", "ods_order_delta"),
+    )
+    observations = {}
+    for tool_name, resource_id in calls:
+        # 同一场景保证事实窗口一致，独立 trace 则让六项跨组件 Action 均可单独审计和定位失败。
+        observations[tool_name] = await executor.execute(
+            _action(
+                "cross_chain_pk_conflict",
+                resource_id,
+                f"trace_bds_flashsync_{tool_name.replace('.', '_')}",
+                tool_name=tool_name,
+            )
+        )
+
+    assert all(observation.response.ok for observation in observations.values())
+    assert observations["bds.get_task_status"].response.data["stage"] == "source_read"
+    table_data = observations["bds.get_table_info"].response.data
+    assert table_data["latest_partition"] != table_data["expected_partition"]
+    delay_data = observations["flashsync.get_sync_delay"].response.data
+    assert delay_data["throughput_per_second"] == 0
+    assert (
+        observations["flashsync.get_sync_log"].response.data["component_error_code"]
+        == "FS_PRIMARY_KEY_CONFLICT"
+    )
+    consistency_data = observations["flashsync.check_consistency"].response.data
+    assert consistency_data["consistent"] is False
+    assert consistency_data["difference_count"] == delay_data["backlog_records"]
+    assert {
+        observation.response.evidence[0].source_id
+        for observation in observations.values()
+    } == {
+        "bds_status_order_aggregate",
+        "bds_log_order_aggregate",
+        "bds_table_ods_order_delta",
+        "flashsync_delay_ods_order_delta",
+        "flashsync_log_ods_order_delta",
+        "flashsync_consistency_ods_order_delta",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "expected_data_key"),
     [

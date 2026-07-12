@@ -29,7 +29,7 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     golden_cases = load_golden_cases(GOLDEN_CASE_FILE)
 
     assert len(registry) == 6
-    assert len(golden_cases) == 13
+    assert len(golden_cases) == 14
     assert {case.scenario_id for case in golden_cases} == set(registry.scenario_ids)
     assert {case.contract_id for case in golden_cases} == {"golden-case:v6"}
     category_counts = {
@@ -38,7 +38,7 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     }
     assert category_counts == {
         GoldenCaseCategory.SINGLE_COMPONENT: 4,
-        GoldenCaseCategory.CROSS_COMPONENT: 2,
+        GoldenCaseCategory.CROSS_COMPONENT: 3,
         GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 1,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
         GoldenCaseCategory.MEMORY_RECALL: 3,
@@ -65,6 +65,16 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     assert [path.path_label for path in lts_bds_case.required_fault_paths] == [
         "lts_task_depends_on_bds_task",
         "bds_task_consumes_delayed_dataset",
+    ]
+    bds_flashsync_case = next(
+        case
+        for case in golden_cases
+        if case.case_id == "golden_cross_bds_blocked_by_flashsync_conflict"
+    )
+    assert [path.path_label for path in bds_flashsync_case.required_fault_paths] == [
+        "bds_task_depends_on_flashsync_task",
+        "flashsync_task_produces_bds_dataset",
+        "flashsync_backlog_conflict_solution_chain",
     ]
 
 

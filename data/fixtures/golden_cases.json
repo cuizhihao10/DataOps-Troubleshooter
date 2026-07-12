@@ -417,5 +417,62 @@
     ],
     "expected_stop_reasons": ["evidence_sufficient"],
     "expected_risk_level": "medium"
+  },
+  {
+    "contract_id": "golden-case:v6",
+    "case_id": "golden_cross_bds_blocked_by_flashsync_conflict",
+    "case_category": "cross_component",
+    "user_query": "BDS 作业 bds_order_aggregate_daily 等待源分区，本次只检查 BDS 到 FlashSync 边界并定位同步侧根因。",
+    "scenario_id": "cross_chain_pk_conflict",
+    "expected_intent": "cross_component_diagnosis",
+    "required_tools": [
+      "bds.get_task_status",
+      "bds.get_task_log",
+      "bds.get_table_info",
+      "flashsync.get_sync_delay",
+      "flashsync.get_sync_log",
+      "flashsync.check_consistency"
+    ],
+    "required_fault_paths": [
+      {
+        "path_label": "bds_task_depends_on_flashsync_task",
+        "required_node_ids": [
+          "task_bds_order_aggregate",
+          "task_flashsync_order_delta"
+        ],
+        "required_relation_types": ["DEPENDS_ON"]
+      },
+      {
+        "path_label": "flashsync_task_produces_bds_dataset",
+        "required_node_ids": [
+          "task_flashsync_order_delta",
+          "dataset_ods_order_delta"
+        ],
+        "required_relation_types": ["PRODUCES"]
+      },
+      {
+        "path_label": "flashsync_backlog_conflict_solution_chain",
+        "required_node_ids": [
+          "symptom_sync_backlog",
+          "root_cause_primary_key_conflict",
+          "solution_resolve_pk_conflict"
+        ],
+        "required_relation_types": ["CAUSED_BY", "RESOLVED_BY"]
+      }
+    ],
+    "allowed_root_causes": [
+      "FlashSync 主键冲突",
+      "同步批次因主键冲突暂停"
+    ],
+    "required_evidence_sources": [
+      "bds_status_order_aggregate",
+      "bds_log_order_aggregate",
+      "bds_table_ods_order_delta",
+      "flashsync_delay_ods_order_delta",
+      "flashsync_log_ods_order_delta",
+      "flashsync_consistency_ods_order_delta"
+    ],
+    "expected_stop_reasons": ["evidence_sufficient"],
+    "expected_risk_level": "medium"
   }
 ]
