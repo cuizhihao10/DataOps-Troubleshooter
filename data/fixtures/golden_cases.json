@@ -554,5 +554,25 @@
       "evidence_insufficient"
     ],
     "expected_risk_level": "low"
+  },
+  {
+    "contract_id": "golden-case:v7",
+    "case_id": "golden_ambiguous_lts_all_observations_unavailable",
+    "case_category": "ambiguous_or_insufficient",
+    "user_query": "lts_inventory_snapshot_daily 在 2026-07-09 00:00 到 01:00 是否失败？请结合状态、日志和依赖关系判断根因。",
+    "scenario_id": "lts_empty_result",
+    "expected_intent": "single_component_diagnosis",
+    "required_tools": [
+      "lts.get_task_status",
+      "lts.get_task_log",
+      "lts.get_dependency_topology"
+    ],
+    "required_fault_paths": [],
+    "allowed_root_causes": [],
+    "required_evidence_sources": [],
+    "expected_stop_reasons": [
+      "evidence_insufficient"
+    ],
+    "expected_risk_level": "low"
   }
 ]

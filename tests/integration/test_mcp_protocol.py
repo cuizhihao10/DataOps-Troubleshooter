@@ -171,6 +171,50 @@ async def test_transient_mcp_failure_retries_once_and_preserves_both_events() ->
 
 
 @pytest.mark.asyncio
+async def test_lts_all_observation_sources_fail_without_creating_evidence() -> None:
+    """验证状态、日志和拓扑均不可用时，真实 MCP 仍保留各自精确失败语义。
+
+    两个 EMPTY_RESULT 是稳定缺数，只生成一次不可重试事件；拓扑 TIMEOUT 是瞬时错误，按统一预算
+    重试一次并保留两个事件。三项 Observation 都必须没有 Evidence，证明上层看到的是“调查已执行但
+    没有事实”，而不是把错误消息包装成根因或把所有失败压缩成不可审计的单一异常。
+    """
+
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    observations = {}
+    # 三项调用复用相同执行器配置，却使用独立 trace，既验证统一重试策略，也避免事件 ID 互相覆盖。
+    for tool_name in (
+        "lts.get_task_status",
+        "lts.get_task_log",
+        "lts.get_dependency_topology",
+    ):
+        observations[tool_name] = await executor.execute(
+            _action(
+                "lts_empty_result",
+                "lts_inventory_snapshot_daily",
+                f"trace_lts_unavailable_{tool_name.replace('.', '_')}",
+                tool_name=tool_name,
+            )
+        )
+
+    # 先区分稳定缺数与瞬时超时，再检查各自事件数量；否则只断言 ok=false 会掩盖错误分类回归。
+    status = observations["lts.get_task_status"]
+    log = observations["lts.get_task_log"]
+    topology = observations["lts.get_dependency_topology"]
+    assert status.response.error_code is ToolErrorCode.EMPTY_RESULT
+    assert log.response.error_code is ToolErrorCode.EMPTY_RESULT
+    assert topology.response.error_code is ToolErrorCode.TIMEOUT
+    assert len(status.tool_events) == 1
+    assert len(log.tool_events) == 1
+    assert [event.attempt for event in topology.tool_events] == [1, 2]
+    assert status.tool_event.retryable is False
+    assert log.tool_event.retryable is False
+    assert all(event.retryable for event in topology.tool_events)
+    # 失败事件可用于审计，但不得成为业务 Evidence；该断言守住“工具错误不等于根因事实”的边界。
+    assert all(not observation.evidence for observation in observations.values())
+    assert all(not observation.observation_refs for observation in observations.values())
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "resource_id", "expected_data_key"),
     [

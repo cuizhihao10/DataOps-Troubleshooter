@@ -12,7 +12,7 @@ import pytest
 
 from app.core.fixture_registry import FixtureRegistry, load_golden_cases
 from app.domain.scenarios import GoldenCaseCategory
-from app.domain.tooling import ToolErrorCode
+from app.domain.tooling import ToolErrorCode, ToolName
 
 FIXTURE_DIRECTORY = Path("data/fixtures/scenarios")
 GOLDEN_CASE_FILE = Path("data/fixtures/golden_cases.json")
@@ -29,7 +29,7 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     golden_cases = load_golden_cases(GOLDEN_CASE_FILE)
 
     assert len(registry) == 8
-    assert len(golden_cases) == 17
+    assert len(golden_cases) == 18
     assert {case.scenario_id for case in golden_cases} == set(registry.scenario_ids)
     assert {case.contract_id for case in golden_cases} == {"golden-case:v7"}
     category_counts = {
@@ -39,7 +39,7 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     assert category_counts == {
         GoldenCaseCategory.SINGLE_COMPONENT: 4,
         GoldenCaseCategory.CROSS_COMPONENT: 4,
-        GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 3,
+        GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 4,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
         GoldenCaseCategory.MEMORY_RECALL: 3,
     }
@@ -98,6 +98,18 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     )
     assert len(missing_log_case.required_tools) == 3
     assert missing_log_case.allowed_root_causes == []
+    unavailable_case = next(
+        case
+        for case in golden_cases
+        if case.case_id == "golden_ambiguous_lts_all_observations_unavailable"
+    )
+    assert unavailable_case.required_tools == [
+        ToolName.LTS_GET_TASK_STATUS,
+        ToolName.LTS_GET_TASK_LOG,
+        ToolName.LTS_GET_DEPENDENCY_TOPOLOGY,
+    ]
+    assert unavailable_case.required_evidence_sources == []
+    assert unavailable_case.allowed_root_causes == []
 
 
 def test_main_scenario_exercises_all_nine_tool_contracts() -> None:

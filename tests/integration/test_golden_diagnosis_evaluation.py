@@ -1,4 +1,4 @@
-"""用十七条 Golden Cases 验证顶层诊断、补参、部分证据、路径、冲突、记忆与 17/28 边界。
+"""用十八条 Golden Cases 验证诊断、补参、全源不可用、路径、冲突、记忆与 18/28 边界。
 
 测试运行器从合成 Fixture 构造真实 ``ToolEvent``/``Evidence``，再通过生产 Pydantic 顶层结果契约
 进入评测器。Planner、Auditor 和报告文本是确定性脚本，因此这些数字只证明数据流与评分规则可
@@ -152,13 +152,13 @@ class FixtureBackedGoldenRunner:
 
 
 @pytest.mark.asyncio
-async def test_seventeen_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
-    """验证十七条案例命中诊断、补参、部分证据、路径与安全契约，并保持 17/28 未完成标记。
+async def test_eighteen_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
+    """验证十八条案例命中诊断、补参、多来源失败、路径与安全契约，并保持 18/28 未完成标记。
 
     确定性基线预期意图、必要 Action、允许根因、关键来源、停止原因、引用、风险和安全降级全部
-    命中；四条故意失败响应使尝试成功率低于一，成功响应冲突案例的三个调用则全部成功。覆盖标记必须
-    保持 false，防止 17 条通过被宣传为 28 条验收完成；零工具案例必须在任何 ToolEvent 前停止，
-    部分证据案例必须保留成功症状 Observation 却不输出根因，记忆案例仍需保持实时事实优先。
+    命中；七个故意失败 Action 使尝试成功率低于一，成功响应冲突案例的三个调用则全部成功。覆盖标记
+    必须保持 false，防止 18 条通过被宣传为 28 条验收完成；全源不可用案例必须执行三类 LTS Action、
+    保持空 Evidence/根因并安全停止，部分证据案例则保留成功症状 Observation。
     """
 
     cases = load_golden_cases(GOLDEN_CASE_FILE)
@@ -168,14 +168,14 @@ async def test_seventeen_golden_cases_produce_versioned_measured_diagnosis_basel
 
     assert report.contract_id == GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID
     assert report.metric_kind == "measured"
-    assert report.case_count == 17
+    assert report.case_count == 18
     assert report.target_case_count == 28
-    assert report.case_coverage_rate == pytest.approx(17 / 28)
+    assert report.case_coverage_rate == pytest.approx(18 / 28)
     assert report.target_coverage_complete is False
     assert report.category_case_counts == {
         GoldenCaseCategory.SINGLE_COMPONENT: 4,
         GoldenCaseCategory.CROSS_COMPONENT: 4,
-        GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 3,
+        GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 4,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
         GoldenCaseCategory.MEMORY_RECALL: 3,
     }
@@ -188,7 +188,7 @@ async def test_seventeen_golden_cases_produce_versioned_measured_diagnosis_basel
     assert report.citation_completeness == 1
     assert report.unsupported_critical_claim_rate == 0
     assert report.duplicate_action_rate == 0
-    assert report.tool_attempt_success_rate == pytest.approx(44 / 48)
+    assert report.tool_attempt_success_rate == pytest.approx(44 / 51)
     assert report.risk_level_hit_rate == 1
     assert report.safe_degradation_rate == 1
     assert report.evidence_conflict_safe_resolution_rate == 1
@@ -276,6 +276,21 @@ async def test_seventeen_golden_cases_produce_versioned_measured_diagnosis_basel
     assert missing_log_result.actual_top1_root_cause is None
     assert missing_log_result.safe_degradation_hit is True
     assert missing_log_result.tool_attempt_success_rate == pytest.approx(2 / 3)
+    unavailable_result = next(
+        result
+        for result in report.cases
+        if result.case_id == "golden_ambiguous_lts_all_observations_unavailable"
+    )
+    assert unavailable_result.executed_tools == [
+        "lts.get_task_status",
+        "lts.get_task_log",
+        "lts.get_dependency_topology",
+    ]
+    assert unavailable_result.observed_evidence_sources == []
+    assert unavailable_result.actual_top1_root_cause is None
+    assert unavailable_result.actual_stop_reason == "evidence_insufficient"
+    assert unavailable_result.tool_attempt_success_rate == 0
+    assert unavailable_result.safe_degradation_hit is True
 
 
 @pytest.mark.asyncio
