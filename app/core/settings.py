@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     auditor_prompt_id: str = "auditor-report:v2"
     auditor_provider_contract_id: str = "openai-compatible-auditor:v1"
     mcp_contract_id: str = "mcp-tools:v1"
-    golden_case_contract_id: str = "golden-case:v6"
+    golden_case_contract_id: str = "golden-case:v7"
     capabilities_contract_id: str = "runtime-capabilities:v1"
     react_loop_contract_id: str = "langgraph-react-loop:v2"
     audited_report_workflow_contract_id: str = "audited-report-workflow:v2"

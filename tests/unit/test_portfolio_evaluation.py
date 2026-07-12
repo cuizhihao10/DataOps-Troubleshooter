@@ -61,7 +61,7 @@ class RecordingPytestExecutor:
 
 
 def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -> None:
-    """确认 v9 manifest 精确覆盖五层、十九个指标，并拒绝任意 pytest flag/命令目标。
+    """确认 v10 manifest 精确覆盖五层、十九个指标，并拒绝任意 pytest flag/命令目标。
 
     复制 payload 后把第一 target 改为 ``--collect-only``；Pydantic 必须在执行器之前失败，证明 JSON
     不能把受限 test target 字段变成自由命令入口。
@@ -69,7 +69,7 @@ def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -
 
     manifest = load_portfolio_eval_manifest(MANIFEST_PATH)
 
-    assert manifest.contract_id == "portfolio-eval-manifest:v9"
+    assert manifest.contract_id == "portfolio-eval-manifest:v10"
     assert len(manifest.suites) == 5
     assert sum(len(suite.metrics) for suite in manifest.suites) == 19
     assert sum(suite.requires_postgres for suite in manifest.suites) == 2
@@ -81,7 +81,7 @@ def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -
 
 
 def test_portfolio_manifest_v1_remains_readable_with_exact_legacy_four_suites() -> None:
-    """验证升级默认 v9 后仍可读取精确四层的历史 v1 manifest。
+    """验证升级默认 v10 后仍可读取精确四层的历史 v1 manifest。
 
     测试从当前 JSON 删除 Golden 层并回写 v1 contract；兼容只允许旧精确集合，不能让任意缺层 v2
     借用 v1 标签通过。该能力用于解释旧结果，不会使默认 CLI 回退到四层。
@@ -102,7 +102,7 @@ def test_portfolio_manifest_v1_remains_readable_with_exact_legacy_four_suites() 
 def test_portfolio_manifest_v2_requires_the_original_golden_v1_source() -> None:
     """验证五层历史 v2 只能绑定不含路径指标的 Golden v1 来源契约。
 
-    测试从当前 v9 JSON 删除后续指标并回写两个旧 contract；若只修改版本却保留 Golden v2
+    测试从当前 v10 JSON 删除后续指标并回写两个旧 contract；若只修改版本却保留 Golden v2
     来源，模型必须拒绝，防止旧消费者把新增字段误认为原 v2 语义。
     """
 
@@ -233,7 +233,7 @@ def test_portfolio_manifest_v4_preserves_eight_case_category_snapshot() -> None:
 def test_portfolio_manifest_v5_preserves_eleven_case_memory_snapshot() -> None:
     """验证历史 v5 仍绑定 Golden v4、11/28 覆盖和不含证据冲突指标的九项集合。
 
-    测试从当前 v9 payload 回写旧来源与覆盖值并删除新增指标，确认可读取；若保留 v6 冲突指标则
+    测试从当前 v10 payload 回写旧来源与覆盖值并删除新增指标，确认可读取；若保留 v6 冲突指标则
     必须失败，防止旧运行报告被重新解释为已经评测成功响应之间的事实冲突。
     """
 
@@ -267,7 +267,7 @@ def test_portfolio_manifest_v5_preserves_eleven_case_memory_snapshot() -> None:
 def test_portfolio_manifest_v6_preserves_twelve_case_conflict_snapshot() -> None:
     """验证历史 v6 绑定 Golden v5、12/28 覆盖和首条成功响应冲突指标。
 
-    v6 与当前 v9 的指标集合相同，但 Golden 来源和覆盖快照不同；测试先回写 12 条版本并确认可读，
+    v6 与当前 v10 的指标集合相同，但 Golden 来源和覆盖快照不同；测试先回写 12 条版本并确认可读，
     再改用 13/28 覆盖值，要求版本门禁失败，防止旧报告被解释成已包含第二条跨组件链路。
     """
 
@@ -298,7 +298,7 @@ def test_portfolio_manifest_v6_preserves_twelve_case_conflict_snapshot() -> None
 def test_portfolio_manifest_v7_preserves_thirteen_case_lts_bds_snapshot() -> None:
     """验证历史 v7 绑定 Golden v6 与 13/28 的 LTS→BDS 跨组件快照。
 
-    v7 与当前 v9 共享指标集合和 Golden Case Schema，但来源评测版本及覆盖率不同；回写 13 条快照
+    v7 与当前 v10 共享指标集合和 Golden Case Schema，但来源评测版本及覆盖率不同；回写 13 条快照
     后应可读取，若使用 14/28 当前覆盖则必须失败，防止旧报告被解释成已包含 BDS→FlashSync 案例。
     """
 
@@ -353,6 +353,37 @@ def test_portfolio_manifest_v8_preserves_fourteen_case_flashsync_snapshot() -> N
 
     coverage["treatment_value"] = 0.5357
     coverage["delta"] = -0.4643
+    with pytest.raises(ValidationError, match="requires Golden coverage snapshot"):
+        PortfolioEvalManifest.model_validate(payload)
+
+
+def test_portfolio_manifest_v9_preserves_fifteen_case_resource_snapshot() -> None:
+    """验证历史 v9 绑定 Golden v8 与 15/28 的独立资源耗尽快照。
+
+    回写来源和覆盖后 v9 应可读取；改用 16/28 当前值必须失败，证明新增零工具补参案例不会被静默
+    归入旧资源耗尽报告，即使两个版本的指标字段集合完全相同。
+    """
+
+    payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    payload["contract_id"] = "portfolio-eval-manifest:v9"
+    golden_suite = next(
+        suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
+    )
+    golden_suite["source_contract_id"] = "golden-diagnosis-eval:v8"
+    coverage = next(
+        metric
+        for metric in golden_suite["metrics"]
+        if metric["metric_id"] == "golden_case_coverage"
+    )
+    coverage["treatment_label"] = "measured_scripted_15_cases"
+    coverage["treatment_value"] = 0.5357
+    coverage["delta"] = -0.4643
+
+    manifest = PortfolioEvalManifest.model_validate(payload)
+    assert manifest.contract_id == "portfolio-eval-manifest:v9"
+
+    coverage["treatment_value"] = 0.5714
+    coverage["delta"] = -0.4286
     with pytest.raises(ValidationError, match="requires Golden coverage snapshot"):
         PortfolioEvalManifest.model_validate(payload)
 

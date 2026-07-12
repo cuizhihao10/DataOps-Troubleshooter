@@ -207,7 +207,7 @@ class GoldenCaseSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    contract_id: Literal["golden-case:v6"]
+    contract_id: Literal["golden-case:v7"]
     case_id: str = Field(pattern=r"^golden_[a-z0-9][a-z0-9_-]{2,79}$")
     case_category: GoldenCaseCategory
     user_query: str = Field(min_length=1, max_length=4000)
@@ -293,5 +293,32 @@ class GoldenCaseSpec(BaseModel):
             if not self.required_fault_paths:
                 raise ValueError(
                     "Golden cross-component case requires at least one fault path"
+                )
+        is_ambiguous_case = (
+            self.case_category is GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT
+        )
+        if not self.required_tools:
+            # 零 Action 代表输入边界不足，只允许用于显式模糊类别，防止普通案例绕过 MCP 覆盖义务。
+            if not is_ambiguous_case:
+                raise ValueError(
+                    "Golden zero-tool case requires ambiguous/insufficient category"
+                )
+            if self.required_fault_paths or self.required_evidence_sources:
+                raise ValueError(
+                    "Golden zero-tool case cannot require paths or evidence sources"
+                )
+        if is_ambiguous_case:
+            if self.allowed_root_causes:
+                raise ValueError(
+                    "Golden ambiguous/insufficient case cannot allow root causes"
+                )
+            safe_stop_reasons = {
+                "evidence_insufficient",
+                "need_user_input",
+                "missing_resource_id",
+            }
+            if not set(self.expected_stop_reasons) & safe_stop_reasons:
+                raise ValueError(
+                    "Golden ambiguous/insufficient case requires a safe stop reason"
                 )
         return self

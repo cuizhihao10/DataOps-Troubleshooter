@@ -1,4 +1,4 @@
-"""用十五条 Golden Cases 验证顶层诊断、跨组件路径、冲突、记忆安全与 15/28 发布边界。
+"""用十六条 Golden Cases 验证顶层诊断、零工具补参、路径、冲突、记忆与 16/28 边界。
 
 测试运行器从合成 Fixture 构造真实 ``ToolEvent``/``Evidence``，再通过生产 Pydantic 顶层结果契约
 进入评测器。Planner、Auditor 和报告文本是确定性脚本，因此这些数字只证明数据流与评分规则可
@@ -94,6 +94,12 @@ class FixtureBackedGoldenRunner:
         """
 
         scenario = self._registry.get(case.scenario_id)
+        # 普通案例由实际工具前缀收敛组件；零工具补参案例只能使用 Scenario 的已校验组件元数据。
+        components = (
+            _components_from_tools(case)
+            if case.required_tools
+            else tuple(scenario.components)
+        )
         run_id = f"run_{_digest(case.case_id)}"
         session_id = f"session_{_digest(case.case_id, 'session')}"
         tool_events: list[ToolEvent] = []
@@ -141,17 +147,18 @@ class FixtureBackedGoldenRunner:
             session_id=session_id,
             tool_events=tool_events,
             evidence=evidence,
+            components=components,
         )
 
 
 @pytest.mark.asyncio
-async def test_fifteen_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
-    """验证十五条案例命中诊断、路径、冲突与历史安全契约，同时保持 15/28 未完成标记。
+async def test_sixteen_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
+    """验证十六条案例命中诊断、补参、路径、冲突与历史安全契约，并保持 16/28 未完成标记。
 
     确定性基线预期意图、必要 Action、允许根因、关键来源、停止原因、引用、风险和安全降级全部
     命中；三条故意失败响应使尝试成功率低于一，新增冲突案例的三个调用则全部成功。覆盖标记必须
-    保持 false，防止 15 条通过被宣传为 28 条验收完成；三条记忆案例仍需保持实时根因优先。新资源
-    耗尽案例必须使用独立 Fixture，并通过表信息反证缺分区/异常输入量，不能只复用主键冲突答案。
+    保持 false，防止 16 条通过被宣传为 28 条验收完成；零工具案例必须在任何 ToolEvent 前停止，
+    三条记忆案例仍需保持实时根因优先，资源耗尽案例继续使用独立 Fixture 和反证来源。
     """
 
     cases = load_golden_cases(GOLDEN_CASE_FILE)
@@ -161,14 +168,14 @@ async def test_fifteen_golden_cases_produce_versioned_measured_diagnosis_baselin
 
     assert report.contract_id == GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID
     assert report.metric_kind == "measured"
-    assert report.case_count == 15
+    assert report.case_count == 16
     assert report.target_case_count == 28
-    assert report.case_coverage_rate == pytest.approx(15 / 28)
+    assert report.case_coverage_rate == pytest.approx(16 / 28)
     assert report.target_coverage_complete is False
     assert report.category_case_counts == {
         GoldenCaseCategory.SINGLE_COMPONENT: 4,
         GoldenCaseCategory.CROSS_COMPONENT: 4,
-        GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 1,
+        GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 2,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
         GoldenCaseCategory.MEMORY_RECALL: 3,
     }
@@ -243,6 +250,15 @@ async def test_fifteen_golden_cases_produce_versioned_measured_diagnosis_baselin
     assert resource_result.matched_fault_path_labels == [
         "lts_component_depends_on_bds_component"
     ]
+    missing_context_result = next(
+        result
+        for result in report.cases
+        if result.case_id == "golden_ambiguous_bds_missing_resource_context"
+    )
+    assert missing_context_result.executed_tools == []
+    assert missing_context_result.logical_action_count == 0
+    assert missing_context_result.actual_stop_reason == "missing_resource_id"
+    assert missing_context_result.safe_degradation_hit is True
 
 
 @pytest.mark.asyncio
@@ -505,14 +521,15 @@ def _build_diagnosis_result(
     session_id: str,
     tool_events: list[ToolEvent],
     evidence: list[Evidence],
+    components: tuple[Component, ...],
 ) -> DiagnosisRunResult:
     """从 Fixture 回放产物构造满足生产跨阶段不变量的诊断终态。
 
     有允许根因时创建受实时证据支持的假设、根因与 pending memory；无允许根因时输出不确定性并
-    安全跳过记忆。能力选择由生产 registry 完成，避免测试手写 capability 名称发生漂移。
+    安全跳过记忆。``components`` 通常来自 required tool，零工具补参案例则来自已校验 Scenario，确保
+    能力选择仍由生产 registry 完成，而不是为通过测试手写 capability 名称。
     """
 
-    components = _components_from_tools(case)
     intent = DiagnosisIntent(case.expected_intent)
     history_trigger = (
         HistoryTrigger.USER_REQUESTED

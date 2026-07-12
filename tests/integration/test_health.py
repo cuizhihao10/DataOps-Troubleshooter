@@ -35,7 +35,7 @@ async def test_health_reports_validated_contract_baseline() -> None:
     payload = response.json()
     assert payload["status"] == "ok"
     assert payload["fixtures_loaded"] == 7
-    assert payload["golden_cases_loaded"] == 15
+    assert payload["golden_cases_loaded"] == 16
     assert payload["mcp_tools_available"] == sorted(tool.value for tool in ToolName)
     assert payload["capabilities_available"] == [name.value for name in CapabilityName]
     assert payload["database_status"] == "disabled"
@@ -48,7 +48,7 @@ async def test_health_reports_validated_contract_baseline() -> None:
         "auditor_prompt": "auditor-report:v2",
         "auditor_provider": "openai-compatible-auditor:v1",
         "mcp": "mcp-tools:v1",
-        "golden_case": "golden-case:v6",
+        "golden_case": "golden-case:v7",
         "runtime_capabilities": "runtime-capabilities:v1",
         "react_loop": "langgraph-react-loop:v2",
         "audited_report_workflow": "audited-report-workflow:v2",

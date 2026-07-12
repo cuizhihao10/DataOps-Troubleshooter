@@ -29,9 +29,9 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     golden_cases = load_golden_cases(GOLDEN_CASE_FILE)
 
     assert len(registry) == 7
-    assert len(golden_cases) == 15
+    assert len(golden_cases) == 16
     assert {case.scenario_id for case in golden_cases} == set(registry.scenario_ids)
-    assert {case.contract_id for case in golden_cases} == {"golden-case:v6"}
+    assert {case.contract_id for case in golden_cases} == {"golden-case:v7"}
     category_counts = {
         category: sum(case.case_category is category for case in golden_cases)
         for category in GoldenCaseCategory
@@ -39,7 +39,7 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     assert category_counts == {
         GoldenCaseCategory.SINGLE_COMPONENT: 4,
         GoldenCaseCategory.CROSS_COMPONENT: 4,
-        GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 1,
+        GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 2,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
         GoldenCaseCategory.MEMORY_RECALL: 3,
     }
@@ -84,6 +84,13 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     assert [path.path_label for path in resource_case.required_fault_paths] == [
         "lts_component_depends_on_bds_component"
     ]
+    missing_context_case = next(
+        case
+        for case in golden_cases
+        if case.case_id == "golden_ambiguous_bds_missing_resource_context"
+    )
+    assert missing_context_case.required_tools == []
+    assert missing_context_case.allowed_root_causes == []
 
 
 def test_main_scenario_exercises_all_nine_tool_contracts() -> None:
@@ -320,3 +327,73 @@ def test_cross_component_category_requires_multiple_tool_components_and_path(
 
     with pytest.raises(ValueError, match="requires at least one fault path"):
         load_golden_cases(missing_path_target)
+
+
+def test_zero_tool_case_requires_ambiguous_category_and_empty_observation_contract(
+    tmp_path: Path,
+) -> None:
+    """验证零 MCP Action 只能表达补参场景，且不能同时要求路径或 Evidence。
+
+    第一份数据把零工具案例改为普通单组件类别；第二份保留模糊类别却注入必要 Evidence source。两者
+    都必须在加载阶段失败，避免用空 Action 绕过普通诊断义务，或声明永远无法由工具产生的证据分母。
+    """
+
+    payload = json.loads(GOLDEN_CASE_FILE.read_text(encoding="utf-8"))
+    target_case = next(
+        case
+        for case in payload
+        if case["case_id"] == "golden_ambiguous_bds_missing_resource_context"
+    )
+    target_case["case_category"] = "single_component"
+    wrong_category = tmp_path / "invalid_zero_tool_category.json"
+    wrong_category.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="requires ambiguous/insufficient category"):
+        load_golden_cases(wrong_category)
+
+    payload = json.loads(GOLDEN_CASE_FILE.read_text(encoding="utf-8"))
+    target_case = next(
+        case
+        for case in payload
+        if case["case_id"] == "golden_ambiguous_bds_missing_resource_context"
+    )
+    target_case["required_evidence_sources"] = ["impossible_without_action"]
+    impossible_evidence = tmp_path / "invalid_zero_tool_evidence.json"
+    impossible_evidence.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="cannot require paths or evidence sources"):
+        load_golden_cases(impossible_evidence)
+
+
+def test_ambiguous_case_rejects_root_causes_and_unsafe_stop_reason(tmp_path: Path) -> None:
+    """验证模糊/证据不足类别不能预先允许根因，也必须声明安全停止语义。
+
+    测试分别注入猜测根因和无关停止原因；Schema 应阻止这两种互相强化的错误标注，确保缺少资源
+    上下文时评测鼓励请求用户补参，而不是为了 Top-1 分数编造结论或伪装为证据充分。
+    """
+
+    payload = json.loads(GOLDEN_CASE_FILE.read_text(encoding="utf-8"))
+    target_case = next(
+        case
+        for case in payload
+        if case["case_id"] == "golden_ambiguous_bds_missing_resource_context"
+    )
+    target_case["allowed_root_causes"] = ["无输入依据的猜测根因"]
+    guessed_root = tmp_path / "invalid_ambiguous_root.json"
+    guessed_root.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="cannot allow root causes"):
+        load_golden_cases(guessed_root)
+
+    payload = json.loads(GOLDEN_CASE_FILE.read_text(encoding="utf-8"))
+    target_case = next(
+        case
+        for case in payload
+        if case["case_id"] == "golden_ambiguous_bds_missing_resource_context"
+    )
+    target_case["expected_stop_reasons"] = ["evidence_sufficient"]
+    unsafe_stop = tmp_path / "invalid_ambiguous_stop.json"
+    unsafe_stop.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="requires a safe stop reason"):
+        load_golden_cases(unsafe_stop)
