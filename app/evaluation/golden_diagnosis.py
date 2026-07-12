@@ -1,0 +1,341 @@
+"""评估版本化 Golden Case 对完整诊断结果的客观契约命中情况。
+
+本模块不调用模型、MCP 或数据库，而是消费 ``DiagnosisRunResult`` 这一顶层强类型结果；运行器可
+替换为确定性测试替身或真实演示配置。评测只读取公开 Action、Observation、停止原因和已审计
+报告，不读取 Prompt、模型原始响应或 Thought。当前数据集只有 5 条案例，因此报告显式保存
+``5/28`` 覆盖边界，不能把小样本实测写成产品目标已经达成。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Literal, Protocol
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.domain.models import RiskLevel
+from app.domain.scenarios import GoldenCaseSpec
+from app.orchestration.diagnosis_models import DiagnosisRunResult
+from app.orchestration.report_models import ReportWorkflowOutcome
+
+GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID = "golden-diagnosis-eval:v1"
+GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT = 28
+
+
+class GoldenDiagnosisRunner(Protocol):
+    """声明逐条运行 Golden Case 所需的最小异步诊断接口。
+
+    评测器依赖协议而非具体模型供应商，使同一套评分逻辑既能验证确定性回归基线，也能验证真实
+    LLM 配置。实现必须返回完整 ``DiagnosisRunResult``；异常应向上传播，不能伪装成零分案例。
+    """
+
+    async def run(self, case: GoldenCaseSpec) -> DiagnosisRunResult:
+        """运行单条合成案例并返回已经完成 ReAct、Auditor 与记忆收尾的结果。
+
+        ``case`` 提供输入和允许答案边界；实现不得读取这些允许答案后直接改写生产报告。I/O、超时
+        和供应商错误保持显式传播，由调用评测命令的测试或 CLI 决定是否中止整套运行。
+        """
+
+        ...
+
+
+class GoldenDiagnosisCaseResult(BaseModel):
+    """保存单条案例的命中明细、分母和安全边界判断。
+
+    集合字段保留实际与缺失项，便于失败时直接定位；比例均在零到一之间。没有允许根因的案例将
+    ``root_cause_top1_hit`` 设为 ``None``，并改由 ``safe_degradation_hit`` 衡量是否克制输出。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    case_id: str
+    scenario_id: str
+    intent_hit: bool
+    executed_tools: list[str]
+    missing_required_tools: list[str]
+    necessary_action_coverage: float = Field(ge=0, le=1)
+    duplicate_action_count: int = Field(ge=0)
+    logical_action_count: int = Field(ge=0)
+    duplicate_action_rate: float = Field(ge=0, le=1)
+    root_cause_top1_hit: bool | None
+    actual_top1_root_cause: str | None = None
+    observed_evidence_sources: list[str]
+    missing_evidence_sources: list[str]
+    evidence_source_coverage: float = Field(ge=0, le=1)
+    stop_reason_hit: bool
+    actual_stop_reason: str
+    citation_completeness: float = Field(ge=0, le=1)
+    unsupported_critical_claim_count: int = Field(ge=0)
+    critical_claim_count: int = Field(ge=0)
+    expected_risk_level: RiskLevel
+    actual_risk_level: RiskLevel
+    risk_level_hit: bool
+    safe_degradation_hit: bool | None
+    tool_attempt_success_rate: float = Field(ge=0, le=1)
+    report_accepted: bool
+
+
+class GoldenDiagnosisEvalReport(BaseModel):
+    """汇总当前 Golden 子集的宏观实测指标和 28 条目标集覆盖资格。
+
+    ``target_coverage_complete`` 只由案例数量决定，不由指标高低决定；这样 5 条确定性脚本即使全部
+    命中，也不能宣称满足产品文档中以 28 条案例为分母的验收目标。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    contract_id: Literal["golden-diagnosis-eval:v1"]
+    metric_kind: Literal["measured"] = "measured"
+    case_count: int = Field(ge=1)
+    target_case_count: int = Field(default=GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT, ge=1)
+    case_coverage_rate: float = Field(ge=0, le=1)
+    target_coverage_complete: bool
+    intent_accuracy: float = Field(ge=0, le=1)
+    root_cause_top1_hit_rate: float = Field(ge=0, le=1)
+    necessary_action_coverage: float = Field(ge=0, le=1)
+    evidence_source_coverage: float = Field(ge=0, le=1)
+    stop_reason_hit_rate: float = Field(ge=0, le=1)
+    citation_completeness: float = Field(ge=0, le=1)
+    unsupported_critical_claim_rate: float = Field(ge=0, le=1)
+    duplicate_action_rate: float = Field(ge=0, le=1)
+    tool_attempt_success_rate: float = Field(ge=0, le=1)
+    risk_level_hit_rate: float = Field(ge=0, le=1)
+    safe_degradation_rate: float = Field(ge=0, le=1)
+    accepted_report_rate: float = Field(ge=0, le=1)
+    cases: list[GoldenDiagnosisCaseResult] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_case_coverage(self) -> GoldenDiagnosisEvalReport:
+        """从案例明细重算数量与覆盖资格，拒绝手工美化 ``5/28`` 边界。
+
+        浮点覆盖率允许 JSON 四舍五入造成的极小误差；案例 ID 必须唯一，否则同一容易案例可能被
+        重复计数。超过目标条数同样拒绝，因为这意味着产品目标或契约版本应先显式升级。
+        """
+
+        if self.case_count != len(self.cases):
+            raise ValueError("golden diagnosis case_count must match case details")
+        case_ids = [case.case_id for case in self.cases]
+        if len(case_ids) != len(set(case_ids)):
+            raise ValueError("golden diagnosis case IDs must be unique")
+        if self.case_count > self.target_case_count:
+            raise ValueError("golden diagnosis case_count cannot exceed the versioned target")
+        expected_rate = self.case_count / self.target_case_count
+        if abs(self.case_coverage_rate - expected_rate) > 1e-6:
+            raise ValueError("golden diagnosis case coverage rate is inconsistent")
+        if self.target_coverage_complete != (self.case_count == self.target_case_count):
+            raise ValueError("golden diagnosis coverage flag is inconsistent")
+        return self
+
+
+async def evaluate_golden_diagnosis(
+    cases: Sequence[GoldenCaseSpec],
+    runner: GoldenDiagnosisRunner,
+) -> GoldenDiagnosisEvalReport:
+    """顺序运行 Golden Cases，并从真实顶层结果计算宏观指标。
+
+    顺序执行让本地演示资源占用和失败定位保持确定；空集合和重复 case ID 在任何外部运行前失败。
+    每条运行异常直接传播，防止缺失案例被当作零分或跳过。宏观比例使用逐案例平均，尝试级成功率
+    和重复 Action 率则使用全局计数，避免工具较多案例被无意降权。
+    """
+
+    if not cases:
+        raise ValueError("golden diagnosis evaluation requires at least one case")
+    case_ids = [case.case_id for case in cases]
+    if len(case_ids) != len(set(case_ids)):
+        raise ValueError("golden diagnosis evaluation case IDs must be unique")
+
+    case_results: list[GoldenDiagnosisCaseResult] = []
+    total_tool_attempts = 0
+    successful_tool_attempts = 0
+    for case in cases:
+        # Runner 是唯一允许发生诊断 I/O 的边界；评分阶段只读取返回的强类型公开结果。
+        diagnosis = await runner.run(case)
+        case_result = score_golden_diagnosis_case(case, diagnosis)
+        case_results.append(case_result)
+        attempts = diagnosis.react.state.tool_events
+        total_tool_attempts += len(attempts)
+        successful_tool_attempts += sum(event.response.ok for event in attempts)
+
+    root_results = [
+        result.root_cause_top1_hit
+        for result in case_results
+        if result.root_cause_top1_hit is not None
+    ]
+    degradation_results = [
+        result.safe_degradation_hit
+        for result in case_results
+        if result.safe_degradation_hit is not None
+    ]
+    total_claims = sum(result.critical_claim_count for result in case_results)
+    unsupported_claims = sum(result.unsupported_critical_claim_count for result in case_results)
+    total_actions = sum(result.logical_action_count for result in case_results)
+    duplicate_actions = sum(result.duplicate_action_count for result in case_results)
+
+    # 空分母仅出现在某类标注暂不存在时；返回 1.0 表示“没有违反项”，而不是声称模型能力完美。
+    return GoldenDiagnosisEvalReport(
+        contract_id=GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID,
+        case_count=len(case_results),
+        target_case_count=GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT,
+        case_coverage_rate=len(case_results) / GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT,
+        target_coverage_complete=len(case_results) == GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT,
+        intent_accuracy=_mean([result.intent_hit for result in case_results]),
+        root_cause_top1_hit_rate=_mean(root_results),
+        necessary_action_coverage=_mean(
+            [result.necessary_action_coverage for result in case_results]
+        ),
+        evidence_source_coverage=_mean(
+            [result.evidence_source_coverage for result in case_results]
+        ),
+        stop_reason_hit_rate=_mean([result.stop_reason_hit for result in case_results]),
+        citation_completeness=(1.0 if total_claims == 0 else 1 - unsupported_claims / total_claims),
+        unsupported_critical_claim_rate=(
+            0.0 if total_claims == 0 else unsupported_claims / total_claims
+        ),
+        duplicate_action_rate=(0.0 if total_actions == 0 else duplicate_actions / total_actions),
+        tool_attempt_success_rate=(
+            1.0 if total_tool_attempts == 0 else successful_tool_attempts / total_tool_attempts
+        ),
+        risk_level_hit_rate=_mean([result.risk_level_hit for result in case_results]),
+        safe_degradation_rate=_mean(degradation_results),
+        accepted_report_rate=_mean([result.report_accepted for result in case_results]),
+        cases=case_results,
+    )
+
+
+def score_golden_diagnosis_case(
+    case: GoldenCaseSpec,
+    diagnosis: DiagnosisRunResult,
+) -> GoldenDiagnosisCaseResult:
+    """把单条顶层诊断结果映射为可解释的 Golden 命中明细。
+
+    评分只信任实际 ``ToolEvent``、``Evidence`` 与最终审计报告。必要 Action 按工具名去重；同参重复
+    只统计 ``attempt=1`` 的逻辑调用，合法瞬时重试不会被误判。引用完整性检查稳定 ID 是否存在，
+    不尝试以字符串相似度替代 Auditor 或人工语义审查。
+    """
+
+    state = diagnosis.react.state
+    report = diagnosis.report.state.draft_report
+    if report is None:
+        raise ValueError("golden diagnosis result requires a final report")
+
+    executed_tools = list(dict.fromkeys(event.tool_name.value for event in state.tool_events))
+    required_tools = [tool.value for tool in case.required_tools]
+    missing_tools = [tool for tool in required_tools if tool not in executed_tools]
+    action_coverage = _coverage(required_tools, executed_tools)
+
+    # attempt=2 表示同一逻辑 Action 的受控瞬时重试；只有新的 attempt=1 才可能构成重复决策。
+    logical_action_keys = [
+        _action_key(event.tool_name.value, event.request.model_dump_json())
+        for event in state.tool_events
+        if event.attempt == 1
+    ]
+    duplicate_count = len(logical_action_keys) - len(set(logical_action_keys))
+
+    top1 = report.root_causes[0].root_cause if report.root_causes else None
+    root_hit = None if not case.allowed_root_causes else top1 in case.allowed_root_causes
+    observed_sources = list(dict.fromkeys(evidence.source_id for evidence in state.evidence))
+    missing_sources = [
+        source for source in case.required_evidence_sources if source not in observed_sources
+    ]
+
+    # Graph path 与 confirmed memory 是合法引用源，但不会混入实时 Evidence source 覆盖率。
+    valid_refs = {evidence.evidence_id for evidence in state.evidence}
+    valid_refs.update(path.path_id for path in state.retrieved_paths)
+    valid_refs.update(match.memory.memory_id for match in diagnosis.recalled_memories)
+    critical_claim_refs = [root.evidence_refs for root in report.root_causes]
+    critical_claim_refs.extend(step.evidence_refs for step in report.fault_chain)
+    critical_claim_refs.extend(
+        step.evidence_refs for step in report.remediation_steps if step.risk_level is RiskLevel.HIGH
+    )
+    unsupported_claims = sum(
+        not refs or any(reference not in valid_refs for reference in refs)
+        for refs in critical_claim_refs
+    )
+    claim_count = len(critical_claim_refs)
+
+    actual_risk = _highest_risk(report.remediation_steps)
+    safe_degradation = None
+    if not case.allowed_root_causes:
+        # 安全降级必须同时克制根因输出并公开不确定性；仅返回空报告不算可解释降级。
+        safe_degradation = not report.root_causes and bool(report.uncertainties)
+
+    return GoldenDiagnosisCaseResult(
+        case_id=case.case_id,
+        scenario_id=case.scenario_id,
+        intent_hit=state.intent == case.expected_intent,
+        executed_tools=executed_tools,
+        missing_required_tools=missing_tools,
+        necessary_action_coverage=action_coverage,
+        duplicate_action_count=duplicate_count,
+        logical_action_count=len(logical_action_keys),
+        duplicate_action_rate=(
+            0.0 if not logical_action_keys else duplicate_count / len(logical_action_keys)
+        ),
+        root_cause_top1_hit=root_hit,
+        actual_top1_root_cause=top1,
+        observed_evidence_sources=observed_sources,
+        missing_evidence_sources=missing_sources,
+        evidence_source_coverage=_coverage(case.required_evidence_sources, observed_sources),
+        stop_reason_hit=state.stop_reason in case.expected_stop_reasons,
+        actual_stop_reason=state.stop_reason or "missing",
+        citation_completeness=(1.0 if claim_count == 0 else 1 - unsupported_claims / claim_count),
+        unsupported_critical_claim_count=unsupported_claims,
+        critical_claim_count=claim_count,
+        expected_risk_level=case.expected_risk_level,
+        actual_risk_level=actual_risk,
+        risk_level_hit=actual_risk is case.expected_risk_level,
+        safe_degradation_hit=safe_degradation,
+        tool_attempt_success_rate=(
+            1.0
+            if not state.tool_events
+            else sum(event.response.ok for event in state.tool_events) / len(state.tool_events)
+        ),
+        report_accepted=diagnosis.report.outcome is ReportWorkflowOutcome.ACCEPTED,
+    )
+
+
+def _coverage(required: Sequence[object], actual: Sequence[object]) -> float:
+    """计算有序标注集合被实际集合覆盖的比例，并处理空标注分母。
+
+    输入顺序只服务失败明细，不影响集合覆盖；空 required 返回 1.0，表示该案例没有此项义务，
+    而不是向宏观结果额外注入一个失败。不可哈希输入会显式抛错，暴露调用方契约漂移。
+    """
+
+    if not required:
+        return 1.0
+    actual_set = set(actual)
+    return sum(item in actual_set for item in required) / len(required)
+
+
+def _mean(values: Sequence[bool | float | None]) -> float:
+    """计算已过滤指标的算术平均，空集合按无违反项返回 1.0。
+
+    调用方应先去除不适用的 ``None``；函数仍防御性过滤，以免可选逐案指标污染分母。该约定会在
+    报告文档解释，不能把空类别的 1.0 当作有样本测得的能力值。
+    """
+
+    measured = [float(value) for value in values if value is not None]
+    return 1.0 if not measured else sum(measured) / len(measured)
+
+
+def _action_key(tool_name: str, request_json: str) -> str:
+    """组合工具名和规范化 Pydantic JSON，形成同参 Action 的稳定比较键。
+
+    不使用 Python 对象哈希，避免进程随机种子影响结果；请求中的 trace ID 保证跨 run 调用不会被
+    误合并，而同一 run 的相同工具与参数会精确命中重复检查。
+    """
+
+    return f"{tool_name}\x1f{request_json}"
+
+
+def _highest_risk(remediation_steps: Sequence[object]) -> RiskLevel:
+    """返回报告建议中的最高风险；无建议时按只读/未处置语义归为低风险。
+
+    该函数只读取具有 ``risk_level`` 属性的领域步骤；固定等级序避免依赖枚举字符串字典序。类型
+    漂移会以 AttributeError 显式暴露，而不是把未知对象静默当成低风险。
+    """
+
+    ranking = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2}
+    if not remediation_steps:
+        return RiskLevel.LOW
+    return max((step.risk_level for step in remediation_steps), key=ranking.__getitem__)

@@ -1,5 +1,5 @@
 {
-  "contract_id": "portfolio-eval-manifest:v1",
+  "contract_id": "portfolio-eval-manifest:v2",
   "suites": [
     {
       "suite_id": "graphrag_ablation",
@@ -145,6 +145,84 @@
           "delta": 1.0,
           "direction": "higher_is_better",
           "note": "两例修订后接受，一例持续冲突后安全降级；降级不等于接受。"
+        }
+      ]
+    },
+    {
+      "suite_id": "golden_diagnosis_baseline",
+      "layer": "Golden Case 顶层诊断确定性回归基线",
+      "source_contract_id": "golden-diagnosis-eval:v1",
+      "result_document": "docs/golden-diagnosis-eval-results.md",
+      "requires_postgres": false,
+      "test_targets": [
+        "tests/integration/test_golden_diagnosis_evaluation.py::test_five_golden_cases_produce_versioned_measured_diagnosis_baseline"
+      ],
+      "metrics": [
+        {
+          "metric_id": "golden_case_coverage",
+          "label": "Golden Case 目标集覆盖率",
+          "control_label": "product_target_28_cases",
+          "treatment_label": "measured_scripted_5_cases",
+          "control_value": 1.0,
+          "treatment_value": 0.1786,
+          "delta": -0.8214,
+          "direction": "higher_is_better",
+          "note": "当前只运行 5/28 条合成案例；该缺口使本层不具备产品目标验收资格。"
+        },
+        {
+          "metric_id": "golden_intent_accuracy",
+          "label": "当前子集意图命中率",
+          "control_label": "product_target_minimum",
+          "treatment_label": "measured_scripted_5_cases",
+          "control_value": 0.9,
+          "treatment_value": 1.0,
+          "delta": 0.1,
+          "direction": "higher_is_better",
+          "note": "确定性脚本基线，不代表自然语言意图分类器或真实 LLM 的准确率。"
+        },
+        {
+          "metric_id": "golden_root_cause_top1",
+          "label": "当前有根因子集 Top-1 命中率",
+          "control_label": "product_target_minimum",
+          "treatment_label": "measured_scripted_2_root_cases",
+          "control_value": 0.8,
+          "treatment_value": 1.0,
+          "delta": 0.2,
+          "direction": "higher_is_better",
+          "note": "仅两条有根因案例；三条无根因案例另以安全降级衡量。"
+        },
+        {
+          "metric_id": "golden_necessary_action_coverage",
+          "label": "当前子集必要 Action 覆盖率",
+          "control_label": "product_target_minimum",
+          "treatment_label": "measured_scripted_5_cases",
+          "control_value": 0.9,
+          "treatment_value": 1.0,
+          "delta": 0.1,
+          "direction": "higher_is_better",
+          "note": "Action 来自强类型 ToolEvent；runner 按 Golden 标注确定性回放 Fixture。"
+        },
+        {
+          "metric_id": "golden_citation_completeness",
+          "label": "当前子集关键结论引用完整率",
+          "control_label": "product_target",
+          "treatment_label": "measured_scripted_5_cases",
+          "control_value": 1.0,
+          "treatment_value": 1.0,
+          "delta": 0.0,
+          "direction": "higher_is_better",
+          "note": "只验证引用 ID 存在；证据语义支持度仍由 Auditor 与人工抽查负责。"
+        },
+        {
+          "metric_id": "golden_safe_degradation",
+          "label": "当前无根因子集安全降级率",
+          "control_label": "safety_expectation",
+          "treatment_label": "measured_scripted_3_cases",
+          "control_value": 1.0,
+          "treatment_value": 1.0,
+          "delta": 0.0,
+          "direction": "higher_is_better",
+          "note": "三条空结果、超时或权限失败案例均未输出猜测根因，并公开不确定性。"
         }
       ]
     }

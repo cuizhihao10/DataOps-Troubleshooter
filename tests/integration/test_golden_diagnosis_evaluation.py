@@ -1,0 +1,478 @@
+"""用五条版本化 Golden Cases 验证顶层诊断评分与 5/28 发布边界。
+
+测试运行器从合成 Fixture 构造真实 ``ToolEvent``/``Evidence``，再通过生产 Pydantic 顶层结果契约
+进入评测器。Planner、Auditor 和报告文本是确定性脚本，因此这些数字只证明数据流与评分规则可
+重复，不代表真实 LLM 准确率；真实 MCP 协议和 LangGraph 控制流由各自集成测试独立覆盖。
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+from pathlib import Path
+
+import pytest
+
+from app.capabilities import CapabilitySelectionRequest, DiagnosisIntent, HistoryTrigger
+from app.capabilities.registry import get_capability_registry
+from app.core.fixture_registry import FixtureRegistry, load_golden_cases
+from app.domain.models import (
+    AgentState,
+    AuditResult,
+    AuditStatus,
+    CaseMemory,
+    Component,
+    DiagnosisReport,
+    Evidence,
+    EvidenceSourceType,
+    FaultChainStep,
+    FaultHypothesis,
+    HypothesisStatus,
+    MemoryStatus,
+    RemediationStep,
+    RiskLevel,
+    RootCauseConclusion,
+    ToolEvent,
+)
+from app.domain.scenarios import GoldenCaseSpec
+from app.evaluation.golden_diagnosis import (
+    GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID,
+    evaluate_golden_diagnosis,
+)
+from app.memory.models import MemoryStageResult, MemoryStageStatus
+from app.orchestration.diagnosis_models import (
+    DIAGNOSIS_WORKFLOW_CONTRACT_ID,
+    DiagnosisRunResult,
+)
+from app.orchestration.models import (
+    REACT_LOOP_CONTRACT_ID,
+    ReactEventType,
+    ReactPublicEvent,
+    ReactRunResult,
+)
+from app.orchestration.report_models import (
+    AUDITED_REPORT_WORKFLOW_CONTRACT_ID,
+    ReportEventType,
+    ReportPublicEvent,
+    ReportRunResult,
+    ReportWorkflowOutcome,
+)
+
+FIXTURE_DIRECTORY = Path("data/fixtures/scenarios")
+GOLDEN_CASE_FILE = Path("data/fixtures/golden_cases.json")
+NOW = datetime(2026, 7, 22, 10, 0, tzinfo=UTC)
+
+
+class FixtureBackedGoldenRunner:
+    """把 Golden 标注映射为确定性、强类型的完整诊断回归基线。
+
+    该 runner 只用于验证评测管线：Action 响应来自已校验 Fixture，允许根因用于构造预期通过的
+    报告。它不冒充 Planner 模型，也不绕过评测器读取最终分数；每条结果仍需通过所有生产模型。
+    """
+
+    def __init__(self, registry: FixtureRegistry) -> None:
+        """保存只读 Fixture 注册表，不预先执行案例或缓存结果。
+
+        注册表已经在加载时完成 scenario/schema 唯一性校验；构造器不访问网络、MCP 或数据库，
+        因而测试结果只依赖版本控制内的合成数据。
+        """
+
+        self._registry = registry
+
+    async def run(self, case: GoldenCaseSpec) -> DiagnosisRunResult:
+        """按必要工具回放合成响应，并组装已审计的顶层诊断结果。
+
+        每个必要工具只选择场景中第一个同名结果；当前 Golden 标注保证该映射唯一且能覆盖所需
+        evidence source。找不到工具会显式失败，避免把 Fixture/标注漂移变成较低覆盖率。
+        """
+
+        scenario = self._registry.get(case.scenario_id)
+        run_id = f"run_{_digest(case.case_id)}"
+        session_id = f"session_{_digest(case.case_id, 'session')}"
+        tool_events: list[ToolEvent] = []
+        evidence: list[Evidence] = []
+
+        for index, required_tool in enumerate(case.required_tools, start=1):
+            matches = [item for item in scenario.tool_results if item.tool_name is required_tool]
+            if not matches:
+                raise AssertionError(
+                    f"Golden case {case.case_id} references missing tool {required_tool.value}"
+                )
+            fixture_result = matches[0]
+            request = fixture_result.request.model_copy(update={"trace_id": run_id})
+            started_at = NOW + timedelta(milliseconds=index * 20)
+            tool_events.append(
+                ToolEvent(
+                    event_id=f"evt_{_digest(case.case_id, required_tool.value)}",
+                    trace_id=run_id,
+                    tool_name=required_tool,
+                    request=request,
+                    response=fixture_result.response,
+                    attempt=1,
+                    retryable=False,
+                    started_at=started_at,
+                    completed_at=started_at + timedelta(milliseconds=10),
+                )
+            )
+            # Fixture 的 ToolEvidencePayload 是 MCP 公开证据；测试用稳定 ID 投影为领域 Evidence。
+            for payload in fixture_result.response.evidence:
+                evidence.append(
+                    Evidence(
+                        evidence_id=f"ev_{_digest(case.case_id, payload.source_id)}",
+                        source_type=EvidenceSourceType.TOOL,
+                        source_id=payload.source_id,
+                        content=payload.content,
+                        observed_at=fixture_result.response.observed_at,
+                        reliability=0.95,
+                        metadata=payload.metadata,
+                    )
+                )
+
+        return _build_diagnosis_result(
+            case,
+            run_id=run_id,
+            session_id=session_id,
+            tool_events=tool_events,
+            evidence=evidence,
+        )
+
+
+@pytest.mark.asyncio
+async def test_five_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
+    """验证五条合成案例命中客观契约，同时保持 5/28 未完成标记。
+
+    确定性基线预期意图、必要 Action、允许根因、关键来源、停止原因、引用、风险和安全降级全部
+    命中；三条故意异常/空结果使尝试成功率低于一。覆盖标记必须保持 false，防止 5 条通过被宣传为
+    产品文档要求的 28 条验收已经完成。
+    """
+
+    cases = load_golden_cases(GOLDEN_CASE_FILE)
+    runner = FixtureBackedGoldenRunner(FixtureRegistry.from_directory(FIXTURE_DIRECTORY))
+
+    report = await evaluate_golden_diagnosis(cases, runner)
+
+    assert report.contract_id == GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID
+    assert report.metric_kind == "measured"
+    assert report.case_count == 5
+    assert report.target_case_count == 28
+    assert report.case_coverage_rate == pytest.approx(5 / 28)
+    assert report.target_coverage_complete is False
+    assert report.intent_accuracy == 1
+    assert report.root_cause_top1_hit_rate == 1
+    assert report.necessary_action_coverage == 1
+    assert report.evidence_source_coverage == 1
+    assert report.stop_reason_hit_rate == 1
+    assert report.citation_completeness == 1
+    assert report.unsupported_critical_claim_rate == 0
+    assert report.duplicate_action_rate == 0
+    assert report.tool_attempt_success_rate == pytest.approx(0.7)
+    assert report.risk_level_hit_rate == 1
+    assert report.safe_degradation_rate == 1
+    assert report.accepted_report_rate == 1
+
+
+@pytest.mark.asyncio
+async def test_golden_diagnosis_evaluator_exposes_missing_action_and_unsafe_root() -> None:
+    """确认评分器不会被 accept 标签掩盖缺失 Action 或证据不足案例的猜测根因。
+
+    runner 先生成强类型通过结果，再只对空日志案例注入一个无效引用根因并删除唯一 ToolEvent；
+    顶层结构仍合法，但评测必须把 Action 覆盖、安全降级和引用完整性分别降为零。
+    """
+
+    cases = load_golden_cases(GOLDEN_CASE_FILE)
+    target = next(case for case in cases if case.case_id == "golden_lts_empty_result")
+    baseline = await FixtureBackedGoldenRunner(
+        FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
+    ).run(target)
+    report = baseline.report.state.draft_report
+    assert report is not None
+    unsafe_report = report.model_copy(
+        update={
+            "root_causes": [
+                RootCauseConclusion(
+                    root_cause="无实时依据的猜测根因",
+                    confidence=0.9,
+                    evidence_refs=["ev_missing"],
+                )
+            ]
+        }
+    )
+    unsafe_react_state = baseline.react.state.model_copy(update={"tool_events": []})
+    unsafe_report_state = baseline.report.state.model_copy(update={"draft_report": unsafe_report})
+    unsafe = baseline.model_copy(
+        update={
+            "react": baseline.react.model_copy(update={"state": unsafe_react_state}),
+            "report": baseline.report.model_copy(update={"state": unsafe_report_state}),
+        }
+    )
+
+    result = (await evaluate_golden_diagnosis([target], _SingleResultRunner(unsafe))).cases[0]
+
+    assert result.necessary_action_coverage == 0
+    assert result.missing_required_tools == ["lts.get_task_log"]
+    assert result.safe_degradation_hit is False
+    assert result.citation_completeness == 0
+    assert result.unsupported_critical_claim_count == 1
+
+
+class _SingleResultRunner:
+    """在负向单测中返回一个预先组装的强类型诊断结果。
+
+    类只隔离异步 runner 协议，不修改输入案例或结果；如果被意外用于不同 scenario，会显式失败，
+    防止负向测试结果泄漏到其他案例。
+    """
+
+    def __init__(self, result: DiagnosisRunResult) -> None:
+        """保存不可变测试结果引用，不执行任何 I/O 或模型校验之外的转换。
+
+        ``DiagnosisRunResult`` 已在调用前构造并通过 Pydantic；构造器没有失败降级或默认返回值。
+        """
+
+        self._result = result
+
+    async def run(self, case: GoldenCaseSpec) -> DiagnosisRunResult:
+        """校验 scenario 一致后返回预置结果，满足评测器异步协议。
+
+        不匹配时抛出 AssertionError，说明测试编排错误；正常返回不复制对象，因为模型在评分期间
+        只读，且本 runner 仅允许调用一次。
+        """
+
+        actual_scenario = self._result.react.state.tool_events
+        if actual_scenario and actual_scenario[0].request.scenario_id != case.scenario_id:
+            raise AssertionError("single-result runner received a different Golden scenario")
+        return self._result
+
+
+def _build_diagnosis_result(
+    case: GoldenCaseSpec,
+    *,
+    run_id: str,
+    session_id: str,
+    tool_events: list[ToolEvent],
+    evidence: list[Evidence],
+) -> DiagnosisRunResult:
+    """从 Fixture 回放产物构造满足生产跨阶段不变量的诊断终态。
+
+    有允许根因时创建受实时证据支持的假设、根因与 pending memory；无允许根因时输出不确定性并
+    安全跳过记忆。能力选择由生产 registry 完成，避免测试手写 capability 名称发生漂移。
+    """
+
+    components = _components_from_tools(case)
+    intent = DiagnosisIntent(case.expected_intent)
+    selection = get_capability_registry().select(
+        CapabilitySelectionRequest(
+            intent=intent,
+            components=components,
+            history_trigger=HistoryTrigger.NOT_REQUESTED,
+        )
+    )
+    evidence_ids = [item.evidence_id for item in evidence]
+    root_cause = case.allowed_root_causes[0] if case.allowed_root_causes else None
+    hypotheses = []
+    if root_cause:
+        hypotheses.append(
+            FaultHypothesis(
+                hypothesis_id=f"hyp_{_digest(case.case_id)}",
+                symptom="版本化合成 Golden Case 故障现象",
+                candidate_root_cause=root_cause,
+                components=list(components),
+                supporting_evidence=evidence_ids,
+                status=HypothesisStatus.SUPPORTED,
+                confidence=0.9,
+            )
+        )
+
+    state = AgentState(
+        run_id=run_id,
+        session_id=session_id,
+        user_query=case.user_query,
+        intent=selection.intent.value,
+        active_capabilities=[item.value for item in selection.active_capabilities],
+        hypotheses=hypotheses,
+        evidence=evidence,
+        tool_events=tool_events,
+        react_step=len(tool_events),
+        observation_refs=evidence_ids,
+        stop_reason=case.expected_stop_reasons[0],
+    )
+    report = _build_report(case, root_cause=root_cause, evidence_ids=evidence_ids)
+    memory = _build_pending_memory(case, components, evidence_ids) if root_cause else None
+    final_state = state.model_copy(
+        update={
+            "draft_report": report,
+            "audit_result": AuditResult(status=AuditStatus.ACCEPT),
+            "memory_candidate": memory,
+        }
+    )
+    react = ReactRunResult(
+        contract_id=REACT_LOOP_CONTRACT_ID,
+        state=state,
+        capabilities=selection,
+        events=_react_events(case, stop_reason=state.stop_reason or "missing"),
+    )
+    report_result = ReportRunResult(
+        contract_id=AUDITED_REPORT_WORKFLOW_CONTRACT_ID,
+        state=final_state,
+        outcome=ReportWorkflowOutcome.ACCEPTED,
+        events=_report_events(case),
+    )
+    memory_stage = (
+        MemoryStageResult(status=MemoryStageStatus.STAGED, memory=memory)
+        if memory is not None
+        else MemoryStageResult(status=MemoryStageStatus.SKIPPED_NO_ROOT_CAUSE)
+    )
+    return DiagnosisRunResult(
+        contract_id=DIAGNOSIS_WORKFLOW_CONTRACT_ID,
+        history_trigger=HistoryTrigger.NOT_REQUESTED,
+        react=react,
+        report=report_result,
+        memory_stage=memory_stage,
+    )
+
+
+def _build_report(
+    case: GoldenCaseSpec,
+    *,
+    root_cause: str | None,
+    evidence_ids: list[str],
+) -> DiagnosisReport:
+    """生成引用完整且风险与 Golden 标注一致的确定性报告。
+
+    根因案例引用全部本次 TOOL Evidence 并形成一段可审计链路；异常/空结果案例不猜根因，只给
+    出低风险人工核验建议和明确不确定性。所有建议仅是说明，不执行生产写操作。
+    """
+
+    remediation = RemediationStep(
+        order=1,
+        action="由人工在隔离演示环境复核证据后再决定处置。",
+        risk_level=case.expected_risk_level,
+        evidence_refs=evidence_ids if case.expected_risk_level is RiskLevel.HIGH else [],
+        prerequisites=["确认当前仅使用合成或 Mock 数据"],
+        rollback="本步骤不执行写操作，无需生产回滚。",
+        verification="复核报告引用和工具事件与 Golden 标注一致。",
+    )
+    if root_cause:
+        return DiagnosisReport(
+            summary="确定性 Golden 基线已形成有证据的候选根因。",
+            fault_chain=[
+                FaultChainStep(
+                    description="合成 Observation 支持当前故障传播结论。",
+                    evidence_refs=evidence_ids,
+                )
+            ],
+            root_causes=[
+                RootCauseConclusion(
+                    root_cause=root_cause,
+                    confidence=0.9,
+                    evidence_refs=evidence_ids,
+                )
+            ],
+            evidence_refs=evidence_ids,
+            remediation_steps=[remediation],
+        )
+    return DiagnosisReport(
+        summary="当前工具结果不足以确认根因，保持安全降级。",
+        remediation_steps=[remediation],
+        uncertainties=["缺少可支持根因的实时成功 Observation，需补充权限或稍后重试。"],
+    )
+
+
+def _build_pending_memory(
+    case: GoldenCaseSpec,
+    components: tuple[Component, ...],
+    evidence_ids: list[str],
+) -> CaseMemory:
+    """为有根因且审计接受的脚本报告生成 pending 记忆候选。
+
+    候选只引用本次 Evidence，保持默认 pending，不自动确认；时间固定使测试可重复。调用方保证
+    allowed root 和 Evidence 非空，否则领域模型会显式拒绝无依据候选。
+    """
+
+    return CaseMemory(
+        memory_id=f"mem_{_digest(case.case_id)}",
+        symptoms=[case.user_query],
+        root_cause=case.allowed_root_causes[0],
+        fault_path=["合成 Golden 诊断路径"],
+        solution_steps=["人工复核后处置"],
+        components=list(components),
+        tags=["golden", case.scenario_id],
+        evidence_refs=evidence_ids,
+        status=MemoryStatus.PENDING,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _components_from_tools(case: GoldenCaseSpec) -> tuple[Component, ...]:
+    """按必要工具首次出现顺序推导案例涉及的受支持组件。
+
+    工具名是受控枚举并以组件前缀命名，因此转换不会解析用户自由文本；重复组件去重但保持顺序。
+    空工具案例会显式失败，因为当前能力 registry 至少需要一个组件。
+    """
+
+    components = tuple(
+        dict.fromkeys(Component(tool.value.split(".", 1)[0]) for tool in case.required_tools)
+    )
+    if not components:
+        raise ValueError("Golden diagnosis fixture runner requires at least one required tool")
+    return components
+
+
+def _react_events(case: GoldenCaseSpec, *, stop_reason: str) -> list[ReactPublicEvent]:
+    """构造最小公开 ReAct 起止时间线，不包含 Planner Thought 或工具响应正文。
+
+    两个稳定事件满足生产终态模型；工具细节已经由 ``ToolEvent`` 保存，评测本身不依赖此脚本
+    时间线计分。停止事件显式携带 Golden 允许原因。
+    """
+
+    return [
+        ReactPublicEvent(
+            event_id=f"react_evt_{_digest(case.case_id, 'selected')}",
+            sequence=1,
+            event_type=ReactEventType.CAPABILITIES_SELECTED,
+            summary="已选择确定性 Golden 能力边界。",
+        ),
+        ReactPublicEvent(
+            event_id=f"react_evt_{_digest(case.case_id, 'stopped')}",
+            sequence=2,
+            event_type=ReactEventType.LOOP_STOPPED,
+            summary="Golden 脚本已完成必要只读 Action。",
+            stop_reason=stop_reason,
+        ),
+    ]
+
+
+def _report_events(case: GoldenCaseSpec) -> list[ReportPublicEvent]:
+    """构造报告草稿与独立 Auditor 接受两个公开事件。
+
+    事件不携带报告全文或隐藏推理，只证明顶层结果经历了报告终态；确定性脚本的 accept 不能被
+    解释为真实 LLM Auditor 准确率。
+    """
+
+    return [
+        ReportPublicEvent(
+            event_id=f"report_evt_{_digest(case.case_id, 'draft')}",
+            sequence=1,
+            event_type=ReportEventType.DRAFT_CREATED,
+            summary="已生成结构化 Golden 报告草稿。",
+            revision_number=0,
+        ),
+        ReportPublicEvent(
+            event_id=f"report_evt_{_digest(case.case_id, 'audit')}",
+            sequence=2,
+            event_type=ReportEventType.AUDIT_COMPLETED,
+            summary="确定性 Auditor 脚本接受报告。",
+            audit_status=AuditStatus.ACCEPT,
+            revision_number=0,
+        ),
+    ]
+
+
+def _digest(*parts: str) -> str:
+    """把合成标识片段转换为事件模型要求的 16 位稳定十六进制后缀。
+
+    SHA-256 这里只用于可重复 ID，不承担安全认证；分隔符防止不同片段拼接产生歧义。函数不读取
+    凭据、时间或随机源，因此跨机器运行会得到相同结果。
+    """
+
+    return sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]

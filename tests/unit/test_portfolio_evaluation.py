@@ -1,6 +1,6 @@
 """验证统一作品集评测 manifest、执行状态、指标发布门禁和数据库快速模式。
 
-单元测试使用记录型 pytest 执行器，不创建子进程；它锁定四层覆盖、安全 target、delta、一层失败
+单元测试使用记录型 pytest 执行器，不创建子进程；它锁定五层覆盖、安全 target、delta、一层失败
 隐藏指标、缺数据库 blocked，以及显式跳过 PostgreSQL 后报告不完整但已执行层仍可成功的语义。
 """
 
@@ -60,8 +60,8 @@ class RecordingPytestExecutor:
         )
 
 
-def test_portfolio_manifest_loads_four_layers_and_rejects_unsafe_test_target() -> None:
-    """确认 manifest 精确覆盖四层、九个指标，并拒绝任意 pytest flag/命令目标。
+def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -> None:
+    """确认 v2 manifest 精确覆盖五层、十五个指标，并拒绝任意 pytest flag/命令目标。
 
     复制 payload 后把第一 target 改为 ``--collect-only``；Pydantic 必须在执行器之前失败，证明 JSON
     不能把受限 test target 字段变成自由命令入口。
@@ -69,9 +69,9 @@ def test_portfolio_manifest_loads_four_layers_and_rejects_unsafe_test_target() -
 
     manifest = load_portfolio_eval_manifest(MANIFEST_PATH)
 
-    assert manifest.contract_id == "portfolio-eval-manifest:v1"
-    assert len(manifest.suites) == 4
-    assert sum(len(suite.metrics) for suite in manifest.suites) == 9
+    assert manifest.contract_id == "portfolio-eval-manifest:v2"
+    assert len(manifest.suites) == 5
+    assert sum(len(suite.metrics) for suite in manifest.suites) == 15
     assert sum(suite.requires_postgres for suite in manifest.suites) == 2
 
     payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
@@ -80,15 +80,34 @@ def test_portfolio_manifest_loads_four_layers_and_rejects_unsafe_test_target() -
         PortfolioEvalManifest.model_validate(payload)
 
 
+def test_portfolio_manifest_v1_remains_readable_with_exact_legacy_four_suites() -> None:
+    """验证升级默认 v2 后仍可读取精确四层的历史 v1 manifest。
+
+    测试从当前 JSON 删除 Golden 层并回写 v1 contract；兼容只允许旧精确集合，不能让任意缺层 v2
+    借用 v1 标签通过。该能力用于解释旧结果，不会使默认 CLI 回退到四层。
+    """
+
+    payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    payload["contract_id"] = "portfolio-eval-manifest:v1"
+    payload["suites"] = [
+        suite for suite in payload["suites"] if suite["suite_id"] != "golden_diagnosis_baseline"
+    ]
+
+    manifest = PortfolioEvalManifest.model_validate(payload)
+
+    assert manifest.contract_id == "portfolio-eval-manifest:v1"
+    assert len(manifest.suites) == 4
+
+
 def test_complete_portfolio_run_publishes_metrics_only_after_all_suites_pass() -> None:
-    """验证完整模式四层通过后报告 complete、run_success 和 all_suites_passed 均为真。
+    """验证完整模式五层通过后报告 complete、run_success 和 all_suites_passed 均为真。
 
     两个 PostgreSQL 命令必须追加内部 `-m postgres`，两个快速层不得追加；所有 passed suite 才携带
     manifest 指标，九个指标全量进入本次报告。
     """
 
     manifest = load_portfolio_eval_manifest(MANIFEST_PATH)
-    executor = RecordingPytestExecutor([0, 0, 0, 0])
+    executor = RecordingPytestExecutor([0, 0, 0, 0, 0])
 
     report = run_portfolio_evaluation(
         manifest,
@@ -101,7 +120,7 @@ def test_complete_portfolio_run_publishes_metrics_only_after_all_suites_pass() -
     assert report.complete is True
     assert report.all_suites_passed is True
     assert all(suite.status is SuiteExecutionStatus.PASSED for suite in report.suites)
-    assert sum(len(suite.metrics) for suite in report.suites) == 9
+    assert sum(len(suite.metrics) for suite in report.suites) == 15
     assert sum("postgres" in command for command in executor.commands) == 2
     assert all(command[1:4] == ["-m", "pytest", "-q"] for command in executor.commands)
 
@@ -109,12 +128,12 @@ def test_complete_portfolio_run_publishes_metrics_only_after_all_suites_pass() -
 def test_fast_mode_skips_postgres_hides_metrics_and_remains_explicitly_incomplete() -> None:
     """验证 ``--skip-postgres`` 等价模式只执行两层，跳过层不展示旧实测数字。
 
-    已执行 history/auditor 层通过，因此 run_success=True；但两个 skipped 使 complete 与
+    已执行 history/auditor/golden 层通过，因此 run_success=True；但两个 skipped 使 complete 与
     all_suites_passed=False。该组合允许快速反馈，却不能作为完整作品集成绩。
     """
 
     manifest = load_portfolio_eval_manifest(MANIFEST_PATH)
-    executor = RecordingPytestExecutor([0, 0])
+    executor = RecordingPytestExecutor([0, 0, 0])
 
     report = run_portfolio_evaluation(
         manifest,
@@ -126,7 +145,7 @@ def test_fast_mode_skips_postgres_hides_metrics_and_remains_explicitly_incomplet
     assert report.run_success is True
     assert report.complete is False
     assert report.all_suites_passed is False
-    assert len(executor.commands) == 2
+    assert len(executor.commands) == 3
     skipped = [suite for suite in report.suites if suite.status is SuiteExecutionStatus.SKIPPED]
     assert len(skipped) == 2
     assert all(not suite.metrics for suite in skipped)
@@ -141,7 +160,7 @@ def test_complete_mode_without_database_marks_postgres_suites_blocked() -> None:
     """
 
     manifest = load_portfolio_eval_manifest(MANIFEST_PATH)
-    executor = RecordingPytestExecutor([0, 0])
+    executor = RecordingPytestExecutor([0, 0, 0])
 
     report = run_portfolio_evaluation(
         manifest,
@@ -157,7 +176,7 @@ def test_complete_mode_without_database_marks_postgres_suites_blocked() -> None:
     assert len(blocked) == 2
     assert all(not suite.metrics for suite in blocked)
     assert all("DATAOPS_TEST_DATABASE_URL" in (suite.failure_summary or "") for suite in blocked)
-    assert len(executor.commands) == 2
+    assert len(executor.commands) == 3
 
 
 def test_failed_suite_hides_snapshot_metrics_and_makes_complete_run_unsuccessful() -> None:
@@ -168,7 +187,7 @@ def test_failed_suite_hides_snapshot_metrics_and_makes_complete_run_unsuccessful
     """
 
     manifest = load_portfolio_eval_manifest(MANIFEST_PATH)
-    executor = RecordingPytestExecutor([0, 1, 0, 0])
+    executor = RecordingPytestExecutor([0, 1, 0, 0, 0])
 
     report = run_portfolio_evaluation(
         manifest,

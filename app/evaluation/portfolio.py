@@ -1,4 +1,4 @@
-"""用单条命令执行并汇总四层版本化作品集评测。
+"""用单条命令执行并汇总五层版本化作品集评测。
 
 manifest 固定每层测试入口、数据库前置、结果文档和已审核实测快照；执行器以无 shell 的参数列表
 运行 pytest。只有本次测试通过的层才携带指标，失败、跳过或前置阻塞不会展示旧数字冒充本次成绩。
@@ -21,14 +21,18 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-PORTFOLIO_EVAL_MANIFEST_CONTRACT_ID = "portfolio-eval-manifest:v1"
-PORTFOLIO_EVAL_RUN_CONTRACT_ID = "portfolio-eval-run:v1"
+PORTFOLIO_EVAL_MANIFEST_CONTRACT_ID = "portfolio-eval-manifest:v2"
+PORTFOLIO_EVAL_RUN_CONTRACT_ID = "portfolio-eval-run:v2"
 DEFAULT_MANIFEST_PATH = Path("data/evals/portfolio_eval_manifest.json")
-_REQUIRED_SUITE_IDS = {
+_V1_REQUIRED_SUITE_IDS = {
     "graphrag_ablation",
     "memory_recall_ablation",
     "history_impact_ablation",
     "auditor_impact_ablation",
+}
+_REQUIRED_SUITE_IDS_BY_CONTRACT = {
+    "portfolio-eval-manifest:v1": _V1_REQUIRED_SUITE_IDS,
+    "portfolio-eval-manifest:v2": _V1_REQUIRED_SUITE_IDS | {"golden_diagnosis_baseline"},
 }
 _TEST_TARGET = re.compile(r"^tests/[a-zA-Z0-9_./-]+\.py(?:::[a-zA-Z0-9_\[\]-]+)?$")
 
@@ -117,30 +121,33 @@ class PortfolioSuiteSpec(BaseModel):
 
 
 class PortfolioEvalManifest(BaseModel):
-    """封装首版四层作品集评测并保证 suite/metric 全局身份唯一。
+    """封装版本化作品集评测层并保证 suite/metric 全局身份唯一。
 
-    首版要求 GraphRAG、记忆召回、历史端到端影响和 Auditor 增量影响四层完整出现；新增层需要提升
-    manifest 契约和文档，而不能静默改变“一条命令”的含义。
+    v1 保留原四层消融兼容读取；v2 在此基础上增加 Golden 诊断基线。版本与精确 suite 集合绑定，
+    因而旧 JSON 不会被新代码静默解释成五层完整运行。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    contract_id: Literal["portfolio-eval-manifest:v1"]
+    contract_id: Literal["portfolio-eval-manifest:v1", "portfolio-eval-manifest:v2"]
     suites: list[PortfolioSuiteSpec] = Field(min_length=4)
 
     @model_validator(mode="after")
     def validate_suite_coverage(self) -> PortfolioEvalManifest:
-        """检查四层 suite ID 完整且所有 metric ID 在整份报告中唯一。
+        """按 manifest 版本检查精确 suite 集合与全局 metric ID 唯一性。
 
-        精确集合锁定 v1 的执行范围；全局 metric 唯一让 JSON 消费方无需同时使用 suite 作为复合键。
-        任一冲突都会阻止执行测试，避免后跑 suite 覆盖先前结果。
+        精确集合防止 v1/v2 语义混用；全局 metric 唯一让 JSON 消费方无需同时使用 suite 作为复合
+        键。任一冲突都会阻止执行，避免漏层报告仍被标为 complete。
         """
 
         suite_ids = [suite.suite_id for suite in self.suites]
         if len(suite_ids) != len(set(suite_ids)):
             raise ValueError("portfolio eval suite IDs must be unique")
-        if set(suite_ids) != _REQUIRED_SUITE_IDS:
-            raise ValueError("portfolio eval v1 must contain exactly the four approved suites")
+        required_suite_ids = _REQUIRED_SUITE_IDS_BY_CONTRACT[self.contract_id]
+        if set(suite_ids) != required_suite_ids:
+            raise ValueError(
+                f"{self.contract_id} must contain exactly its approved evaluation suites"
+            )
         metric_ids = [metric.metric_id for suite in self.suites for metric in suite.metrics]
         if len(metric_ids) != len(set(metric_ids)):
             raise ValueError("portfolio eval metric IDs must be globally unique")
@@ -209,16 +216,16 @@ class PortfolioSuiteRun(BaseModel):
 
 
 class PortfolioEvalRunReport(BaseModel):
-    """汇总一次统一执行的四层状态、指标发布资格和完整性。
+    """汇总一次统一执行的版本化 suite 状态、指标发布资格和完整性。
 
     ``run_success`` 表示没有 failed/blocked，允许快速模式以零退出码反馈；``complete`` 表示无
-    skipped/blocked；``all_suites_passed`` 只有四层全部通过才为真，适合作品集发布门禁。
+    skipped/blocked；``all_suites_passed`` 只有 manifest 声明的全部层通过才为真。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    contract_id: Literal["portfolio-eval-run:v1"]
-    manifest_contract_id: Literal["portfolio-eval-manifest:v1"]
+    contract_id: Literal["portfolio-eval-run:v2"]
+    manifest_contract_id: Literal["portfolio-eval-manifest:v1", "portfolio-eval-manifest:v2"]
     metric_kind: Literal["measured"] = "measured"
     suites: list[PortfolioSuiteRun] = Field(min_length=4)
     run_success: bool
@@ -350,7 +357,7 @@ def run_portfolio_evaluation(
     include_postgres: bool,
     postgres_available: bool,
 ) -> PortfolioEvalRunReport:
-    """顺序执行四层测试，并仅为本次 passed suite 发布 manifest 指标。
+    """顺序执行 manifest 声明的测试层，并仅为本次 passed suite 发布指标。
 
     PostgreSQL 层在显式快速模式中 skipped；完整模式缺 URL 时 blocked。其余 suite 继续运行以提供
     最大诊断信息。报告状态完全由执行结果推导，不因某层失败而复用旧数字。
