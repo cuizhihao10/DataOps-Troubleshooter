@@ -232,6 +232,47 @@ async def test_bds_permission_denied_is_not_retried_or_turned_into_evidence() ->
 
 
 @pytest.mark.asyncio
+async def test_successful_bds_responses_preserve_conflicting_partition_facts_over_mcp() -> None:
+    """验证三个成功 BDS 响应经真实 MCP 后仍保留互相矛盾的业务事实。
+
+    测试逐一执行状态、日志和表信息工具，要求三者均 ``ok=true`` 且保留稳定 source ID；随后用结构化
+    字段证明状态声称源未就绪，而日志和表元数据声称同一分区已读取且可查询。该用例刻意不让协议
+    层“调和”冲突，因为事实裁决属于 Planner/Auditor，MCP 边界只负责忠实传输 Observation。
+    """
+
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    calls = (
+        ("bds.get_task_status", "bds_inventory_snapshot_hourly"),
+        ("bds.get_task_log", "bds_inventory_snapshot_hourly"),
+        ("bds.get_table_info", "dwd_inventory_snapshot"),
+    )
+    observations = {}
+    for tool_name, resource_id in calls:
+        # 每个调用使用独立 trace，便于协议失败时精确定位，同时不改变三者共享的场景事实窗口。
+        observations[tool_name] = await executor.execute(
+            _action(
+                "bds_conflicting_partition_evidence",
+                resource_id,
+                f"trace_conflict_{tool_name.replace('.', '_')}",
+                tool_name=tool_name,
+            )
+        )
+
+    assert all(observation.response.ok for observation in observations.values())
+    assert {
+        observation.response.evidence[0].source_id
+        for observation in observations.values()
+    } == {
+        "bds_conflict_status_inventory",
+        "bds_conflict_log_inventory",
+        "bds_conflict_table_inventory",
+    }
+    assert observations["bds.get_task_status"].response.data["source_ready"] is False
+    assert observations["bds.get_task_log"].response.data["event"] == "SOURCE_READ_COMPLETED"
+    assert observations["bds.get_table_info"].response.data["partition_queryable"] is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "expected_data_key"),
     [

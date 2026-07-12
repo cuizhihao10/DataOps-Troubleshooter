@@ -166,6 +166,38 @@ class GoldenHistoryExpectation(BaseModel):
         return self
 
 
+class GoldenEvidenceConflictExpectation(BaseModel):
+    """描述“工具调用成功但业务事实互相矛盾”案例的安全输出边界。
+
+    ``conflicting_evidence_sources`` 明确哪些实时来源共同构成冲突，评分器必须先确认这些来源确实
+    被本次运行观察到；``forbidden_root_causes`` 列出任何一侧证据被武断采信时可能生成的结论。
+    两个布尔开关把“不得下根因”和“必须公开不确定性”写成机器可读义务，避免只靠报告文本约定。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    conflicting_evidence_sources: list[str] = Field(min_length=2, max_length=10)
+    forbidden_root_causes: list[str] = Field(min_length=1, max_length=10)
+    require_no_root_cause: bool = True
+    require_uncertainty_disclosure: bool = True
+
+    @model_validator(mode="after")
+    def validate_unique_conflict_annotations(self) -> GoldenEvidenceConflictExpectation:
+        """拒绝重复来源或禁止根因，保证冲突覆盖率和违规计数的分母稳定。
+
+        冲突至少需要两个不同事实来源才能成立；重复项会让单一 Observation 冒充多方冲突。禁止
+        根因同样必须唯一，否则一次错误结论会被重复计数。空字符串由字段长度约束在加载时拒绝。
+        """
+
+        if len(self.conflicting_evidence_sources) != len(
+            set(self.conflicting_evidence_sources)
+        ):
+            raise ValueError("Golden conflict evidence sources must be unique")
+        if len(self.forbidden_root_causes) != len(set(self.forbidden_root_causes)):
+            raise ValueError("Golden conflict forbidden root causes must be unique")
+        return self
+
+
 class GoldenCaseSpec(BaseModel):
     """定义一个诊断评测案例的输入、必要行动和允许结果边界。
 
@@ -175,7 +207,7 @@ class GoldenCaseSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    contract_id: Literal["golden-case:v4"]
+    contract_id: Literal["golden-case:v5"]
     case_id: str = Field(pattern=r"^golden_[a-z0-9][a-z0-9_-]{2,79}$")
     case_category: GoldenCaseCategory
     user_query: str = Field(min_length=1, max_length=4000)
@@ -184,6 +216,7 @@ class GoldenCaseSpec(BaseModel):
     required_tools: list[ToolName] = Field(default_factory=list)
     required_fault_paths: list[GoldenFaultPathRequirement] = Field(default_factory=list)
     history_expectation: GoldenHistoryExpectation | None = None
+    evidence_conflict_expectation: GoldenEvidenceConflictExpectation | None = None
     allowed_root_causes: list[str] = Field(default_factory=list)
     required_evidence_sources: list[str] = Field(default_factory=list)
     expected_stop_reasons: list[str] = Field(min_length=1)
@@ -222,4 +255,29 @@ class GoldenCaseSpec(BaseModel):
                     raise ValueError(
                         "Golden history conflict flag must match allowed root annotations"
                     )
+        if self.evidence_conflict_expectation is not None:
+            # 冲突义务只属于工具异常/证据冲突配额；其他类别携带该字段会污染类别指标语义。
+            if self.case_category is not GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT:
+                raise ValueError(
+                    "Golden evidence conflict expectation requires tool anomaly/conflict category"
+                )
+            conflict_sources = set(
+                self.evidence_conflict_expectation.conflicting_evidence_sources
+            )
+            if not conflict_sources.issubset(self.required_evidence_sources):
+                raise ValueError(
+                    "Golden conflict evidence sources must be required evidence sources"
+                )
+            forbidden_roots = set(self.evidence_conflict_expectation.forbidden_root_causes)
+            if forbidden_roots & set(self.allowed_root_causes):
+                raise ValueError(
+                    "Golden conflict forbidden and allowed root causes must not overlap"
+                )
+            if (
+                self.evidence_conflict_expectation.require_no_root_cause
+                and self.allowed_root_causes
+            ):
+                raise ValueError(
+                    "Golden no-root conflict expectation requires empty allowed root causes"
+                )
         return self

@@ -23,7 +23,7 @@ from app.domain.scenarios import (
 from app.orchestration.diagnosis_models import DiagnosisRunResult
 from app.orchestration.report_models import ReportWorkflowOutcome
 
-GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID = "golden-diagnosis-eval:v4"
+GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID = "golden-diagnosis-eval:v5"
 GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT = 28
 GOLDEN_DIAGNOSIS_CATEGORY_TARGETS: dict[GoldenCaseCategory, int] = {
     GoldenCaseCategory.SINGLE_COMPONENT: 8,
@@ -55,7 +55,8 @@ class GoldenDiagnosisCaseResult(BaseModel):
     """保存单条案例的命中明细、分母和安全边界判断。
 
     集合字段保留实际与缺失项，便于失败时直接定位；比例均在零到一之间。没有允许根因的案例将
-    ``root_cause_top1_hit`` 设为 ``None``，并改由 ``safe_degradation_hit`` 衡量是否克制输出。
+    ``root_cause_top1_hit`` 设为 ``None``，并改由 ``safe_degradation_hit`` 衡量是否克制输出。证据
+    冲突案例另外保存来源精确分区、禁止根因命中和 uncertainty 义务，不能被普通引用完整率替代。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -89,6 +90,12 @@ class GoldenDiagnosisCaseResult(BaseModel):
     actual_risk_level: RiskLevel
     risk_level_hit: bool
     safe_degradation_hit: bool | None
+    required_conflicting_evidence_sources: list[str]
+    observed_conflicting_evidence_sources: list[str]
+    missing_conflicting_evidence_sources: list[str]
+    forbidden_conflict_root_hits: list[str]
+    conflict_uncertainty_disclosed: bool | None = None
+    evidence_conflict_safe_resolution: bool | None = None
     history_trigger_hit: bool | None = None
     required_memory_ids: list[str]
     recalled_memory_ids: list[str]
@@ -103,10 +110,11 @@ class GoldenDiagnosisCaseResult(BaseModel):
 
     @model_validator(mode="after")
     def validate_fault_path_partition(self) -> GoldenDiagnosisCaseResult:
-        """校验必要路径被 matched/missing 精确分区，并绑定适用性与 completeness。
+        """校验路径、历史与冲突字段的精确分区和适用性。
 
         分区约束阻止同一路径同时成功和失败，或从明细中消失；无路径要求时 completeness 必须为
-        ``None``，有要求时必须是数值。匹配 path ID 只允许在至少一项要求完整命中时出现。
+        ``None``，有要求时必须是数值。历史字段只用于 memory 类别；冲突来源也必须被 observed/missing
+        完整划分，非冲突案例不能携带残留明细，防止聚合分母被可选字段静默污染。
         """
 
         required = self.required_fault_path_labels
@@ -139,6 +147,39 @@ class GoldenDiagnosisCaseResult(BaseModel):
             )
         ):
             raise ValueError("non-memory Golden case result cannot contain history identities")
+        conflict_applicable = bool(self.required_conflicting_evidence_sources)
+        optional_conflict_fields = (
+            self.conflict_uncertainty_disclosed,
+            self.evidence_conflict_safe_resolution,
+        )
+        if conflict_applicable != all(value is not None for value in optional_conflict_fields):
+            raise ValueError("Golden case result conflict applicability is inconsistent")
+        if conflict_applicable:
+            if self.case_category is not GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT:
+                raise ValueError("Golden conflict result requires tool anomaly/conflict category")
+            for field_name in (
+                "required_conflicting_evidence_sources",
+                "observed_conflicting_evidence_sources",
+                "missing_conflicting_evidence_sources",
+            ):
+                values = getattr(self, field_name)
+                if len(values) != len(set(values)):
+                    raise ValueError(f"Golden conflict result {field_name} must be unique")
+            required_conflict = set(self.required_conflicting_evidence_sources)
+            observed_conflict = set(self.observed_conflicting_evidence_sources)
+            missing_conflict = set(self.missing_conflicting_evidence_sources)
+            if observed_conflict & missing_conflict:
+                raise ValueError("Golden conflict evidence cannot be observed and missing")
+            if observed_conflict | missing_conflict != required_conflict:
+                raise ValueError("Golden conflict evidence must form an exact partition")
+        elif any(
+            (
+                self.observed_conflicting_evidence_sources,
+                self.missing_conflicting_evidence_sources,
+                self.forbidden_conflict_root_hits,
+            )
+        ):
+            raise ValueError("non-conflict Golden case result cannot contain conflict details")
         return self
 
 
@@ -146,12 +187,13 @@ class GoldenDiagnosisEvalReport(BaseModel):
     """汇总当前 Golden 子集的宏观实测指标和 28 条目标集覆盖资格。
 
     ``target_coverage_complete`` 只由案例数量决定，不由指标高低决定；当前子集即使全部命中，也
-    不能宣称满足产品文档中以 28 条案例为分母的验收目标。
+    不能宣称满足产品文档中以 28 条案例为分母的验收目标。冲突安全率和禁止根因计数只聚合显式
+    标注案例，避免把普通超时或权限失败误算为成功响应事实冲突。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    contract_id: Literal["golden-diagnosis-eval:v4"]
+    contract_id: Literal["golden-diagnosis-eval:v5"]
     metric_kind: Literal["measured"] = "measured"
     case_count: int = Field(ge=1)
     target_case_count: int = Field(default=GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT, ge=1)
@@ -171,6 +213,8 @@ class GoldenDiagnosisEvalReport(BaseModel):
     tool_attempt_success_rate: float = Field(ge=0, le=1)
     risk_level_hit_rate: float = Field(ge=0, le=1)
     safe_degradation_rate: float = Field(ge=0, le=1)
+    evidence_conflict_safe_resolution_rate: float = Field(ge=0, le=1)
+    forbidden_conflict_root_hit_count: int = Field(ge=0)
     history_trigger_hit_rate: float = Field(ge=0, le=1)
     history_recall_coverage: float = Field(ge=0, le=1)
     confirmed_only_recall_rate: float = Field(ge=0, le=1)
@@ -264,6 +308,11 @@ async def evaluate_golden_diagnosis(
     memory_results = [
         result for result in case_results if result.history_recall_coverage is not None
     ]
+    conflict_results = [
+        result
+        for result in case_results
+        if result.evidence_conflict_safe_resolution is not None
+    ]
     total_claims = sum(result.critical_claim_count for result in case_results)
     unsupported_claims = sum(result.unsupported_critical_claim_count for result in case_results)
     total_actions = sum(result.logical_action_count for result in case_results)
@@ -301,6 +350,12 @@ async def evaluate_golden_diagnosis(
         ),
         risk_level_hit_rate=_mean([result.risk_level_hit for result in case_results]),
         safe_degradation_rate=_mean(degradation_results),
+        evidence_conflict_safe_resolution_rate=_mean(
+            [result.evidence_conflict_safe_resolution for result in conflict_results]
+        ),
+        forbidden_conflict_root_hit_count=sum(
+            len(result.forbidden_conflict_root_hits) for result in conflict_results
+        ),
         history_trigger_hit_rate=_mean([result.history_trigger_hit for result in memory_results]),
         history_recall_coverage=_mean(
             [result.history_recall_coverage for result in memory_results]
@@ -330,7 +385,8 @@ def score_golden_diagnosis_case(
 
     评分只信任实际 ``ToolEvent``、``Evidence`` 与最终审计报告。必要 Action 按工具名去重；同参重复
     只统计 ``attempt=1`` 的逻辑调用，合法瞬时重试不会被误判。引用完整性检查稳定 ID 是否存在，
-    不尝试以字符串相似度替代 Auditor 或人工语义审查。
+    不尝试以字符串相似度替代 Auditor 或人工语义审查。冲突评分只使用版本化 source/root 精确标注，
+    先验证 Observation 完整，再检查报告克制与 uncertainty，确保“调用成功”不会自动等价于“事实可信”。
     """
 
     state = diagnosis.react.state
@@ -403,6 +459,46 @@ def score_golden_diagnosis_case(
     if not case.allowed_root_causes:
         # 安全降级必须同时克制根因输出并公开不确定性；仅返回空报告不算可解释降级。
         safe_degradation = not report.root_causes and bool(report.uncertainties)
+
+    required_conflict_sources: list[str] = []
+    observed_conflict_sources: list[str] = []
+    missing_conflict_sources: list[str] = []
+    forbidden_conflict_root_hits: list[str] = []
+    conflict_uncertainty_disclosed: bool | None = None
+    evidence_conflict_safe_resolution: bool | None = None
+    if case.evidence_conflict_expectation is not None:
+        expectation = case.evidence_conflict_expectation
+        required_conflict_sources = list(expectation.conflicting_evidence_sources)
+        observed_source_set = set(observed_sources)
+        observed_conflict_sources = [
+            source for source in required_conflict_sources if source in observed_source_set
+        ]
+        missing_conflict_sources = [
+            source for source in required_conflict_sources if source not in observed_source_set
+        ]
+        reported_roots = [root.root_cause for root in report.root_causes]
+        forbidden_conflict_root_hits = [
+            root
+            for root in reported_roots
+            if root in expectation.forbidden_root_causes
+        ]
+        conflict_uncertainty_disclosed = bool(report.uncertainties)
+
+        # “成功响应”本身不代表事实一致；安全通过必须先完整观察冲突双方，再克制结论并公开边界。
+        no_root_requirement_met = (
+            not report.root_causes if expectation.require_no_root_cause else True
+        )
+        uncertainty_requirement_met = (
+            conflict_uncertainty_disclosed
+            if expectation.require_uncertainty_disclosure
+            else True
+        )
+        evidence_conflict_safe_resolution = (
+            not missing_conflict_sources
+            and not forbidden_conflict_root_hits
+            and no_root_requirement_met
+            and uncertainty_requirement_met
+        )
 
     history_trigger_hit: bool | None = None
     history_recall_coverage: float | None = None
@@ -490,6 +586,12 @@ def score_golden_diagnosis_case(
         actual_risk_level=actual_risk,
         risk_level_hit=actual_risk is case.expected_risk_level,
         safe_degradation_hit=safe_degradation,
+        required_conflicting_evidence_sources=required_conflict_sources,
+        observed_conflicting_evidence_sources=observed_conflict_sources,
+        missing_conflicting_evidence_sources=missing_conflict_sources,
+        forbidden_conflict_root_hits=forbidden_conflict_root_hits,
+        conflict_uncertainty_disclosed=conflict_uncertainty_disclosed,
+        evidence_conflict_safe_resolution=evidence_conflict_safe_resolution,
         history_trigger_hit=history_trigger_hit,
         required_memory_ids=required_memory_ids,
         recalled_memory_ids=recalled_memory_ids,

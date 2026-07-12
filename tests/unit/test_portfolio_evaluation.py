@@ -61,7 +61,7 @@ class RecordingPytestExecutor:
 
 
 def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -> None:
-    """确认 v5 manifest 精确覆盖五层、十八个指标，并拒绝任意 pytest flag/命令目标。
+    """确认 v6 manifest 精确覆盖五层、十九个指标，并拒绝任意 pytest flag/命令目标。
 
     复制 payload 后把第一 target 改为 ``--collect-only``；Pydantic 必须在执行器之前失败，证明 JSON
     不能把受限 test target 字段变成自由命令入口。
@@ -69,9 +69,9 @@ def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -
 
     manifest = load_portfolio_eval_manifest(MANIFEST_PATH)
 
-    assert manifest.contract_id == "portfolio-eval-manifest:v5"
+    assert manifest.contract_id == "portfolio-eval-manifest:v6"
     assert len(manifest.suites) == 5
-    assert sum(len(suite.metrics) for suite in manifest.suites) == 18
+    assert sum(len(suite.metrics) for suite in manifest.suites) == 19
     assert sum(suite.requires_postgres for suite in manifest.suites) == 2
 
     payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
@@ -102,7 +102,7 @@ def test_portfolio_manifest_v1_remains_readable_with_exact_legacy_four_suites() 
 def test_portfolio_manifest_v2_requires_the_original_golden_v1_source() -> None:
     """验证五层历史 v2 只能绑定不含路径指标的 Golden v1 来源契约。
 
-    测试从当前 v5 JSON 删除后续指标并回写两个旧 contract；若只修改版本却保留 Golden v2
+    测试从当前 v6 JSON 删除后续指标并回写两个旧 contract；若只修改版本却保留 Golden v2
     来源，模型必须拒绝，防止旧消费者把新增字段误认为原 v2 语义。
     """
 
@@ -120,6 +120,7 @@ def test_portfolio_manifest_v2_requires_the_original_golden_v1_source() -> None:
             "golden_fault_path_completeness",
             "golden_history_recall_coverage",
             "golden_realtime_priority_pass",
+            "golden_evidence_conflict_safe_resolution",
         }
     ]
     coverage = next(
@@ -139,7 +140,11 @@ def test_portfolio_manifest_v2_requires_the_original_golden_v1_source() -> None:
         metric
         for metric in golden_suite["metrics"]
         if metric["metric_id"]
-        not in {"golden_history_recall_coverage", "golden_realtime_priority_pass"}
+        not in {
+            "golden_history_recall_coverage",
+            "golden_realtime_priority_pass",
+            "golden_evidence_conflict_safe_resolution",
+        }
     ]
     with pytest.raises(ValidationError, match="requires Golden source"):
         PortfolioEvalManifest.model_validate(payload)
@@ -162,7 +167,11 @@ def test_portfolio_manifest_v3_preserves_five_case_path_scoring_snapshot() -> No
         metric
         for metric in golden_suite["metrics"]
         if metric["metric_id"]
-        not in {"golden_history_recall_coverage", "golden_realtime_priority_pass"}
+        not in {
+            "golden_history_recall_coverage",
+            "golden_realtime_priority_pass",
+            "golden_evidence_conflict_safe_resolution",
+        }
     ]
     coverage = next(
         metric
@@ -211,17 +220,55 @@ def test_portfolio_manifest_v4_preserves_eight_case_category_snapshot() -> None:
         metric
         for metric in golden_suite["metrics"]
         if metric["metric_id"]
-        not in {"golden_history_recall_coverage", "golden_realtime_priority_pass"}
+        not in {
+            "golden_history_recall_coverage",
+            "golden_realtime_priority_pass",
+            "golden_evidence_conflict_safe_resolution",
+        }
     ]
     manifest = PortfolioEvalManifest.model_validate(payload)
     assert manifest.contract_id == "portfolio-eval-manifest:v4"
+
+
+def test_portfolio_manifest_v5_preserves_eleven_case_memory_snapshot() -> None:
+    """验证历史 v5 仍绑定 Golden v4、11/28 覆盖和不含证据冲突指标的九项集合。
+
+    测试从当前 v6 payload 回写旧来源与覆盖值并删除新增指标，确认可读取；若保留 v6 冲突指标则
+    必须失败，防止旧运行报告被重新解释为已经评测成功响应之间的事实冲突。
+    """
+
+    payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    payload["contract_id"] = "portfolio-eval-manifest:v5"
+    golden_suite = next(
+        suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
+    )
+    golden_suite["source_contract_id"] = "golden-diagnosis-eval:v4"
+    coverage = next(
+        metric
+        for metric in golden_suite["metrics"]
+        if metric["metric_id"] == "golden_case_coverage"
+    )
+    coverage["treatment_label"] = "measured_scripted_11_cases"
+    coverage["treatment_value"] = 0.3929
+    coverage["delta"] = -0.6071
+
+    with pytest.raises(ValidationError, match="versioned Golden metric set"):
+        PortfolioEvalManifest.model_validate(payload)
+
+    golden_suite["metrics"] = [
+        metric
+        for metric in golden_suite["metrics"]
+        if metric["metric_id"] != "golden_evidence_conflict_safe_resolution"
+    ]
+    manifest = PortfolioEvalManifest.model_validate(payload)
+    assert manifest.contract_id == "portfolio-eval-manifest:v5"
 
 
 def test_complete_portfolio_run_publishes_metrics_only_after_all_suites_pass() -> None:
     """验证完整模式五层通过后报告 complete、run_success 和 all_suites_passed 均为真。
 
     两个 PostgreSQL 命令必须追加内部 `-m postgres`，三个快速层不得追加；所有 passed suite 才携带
-    manifest 指标，十八个指标全量进入本次报告。
+    manifest 指标，十九个指标全量进入本次报告。
     """
 
     manifest = load_portfolio_eval_manifest(MANIFEST_PATH)
@@ -238,7 +285,7 @@ def test_complete_portfolio_run_publishes_metrics_only_after_all_suites_pass() -
     assert report.complete is True
     assert report.all_suites_passed is True
     assert all(suite.status is SuiteExecutionStatus.PASSED for suite in report.suites)
-    assert sum(len(suite.metrics) for suite in report.suites) == 18
+    assert sum(len(suite.metrics) for suite in report.suites) == 19
     assert sum("postgres" in command for command in executor.commands) == 2
     assert all(command[1:4] == ["-m", "pytest", "-q"] for command in executor.commands)
 

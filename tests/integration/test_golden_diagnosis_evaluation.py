@@ -1,4 +1,4 @@
-"""用十一条 Golden Cases 验证顶层诊断、长期记忆安全与 11/28 发布边界。
+"""用十二条 Golden Cases 验证顶层诊断、证据冲突、长期记忆安全与 12/28 发布边界。
 
 测试运行器从合成 Fixture 构造真实 ``ToolEvent``/``Evidence``，再通过生产 Pydantic 顶层结果契约
 进入评测器。Planner、Auditor 和报告文本是确定性脚本，因此这些数字只证明数据流与评分规则可
@@ -145,12 +145,12 @@ class FixtureBackedGoldenRunner:
 
 
 @pytest.mark.asyncio
-async def test_eleven_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
-    """验证十一条案例命中诊断与历史安全契约，同时保持 11/28 未完成标记。
+async def test_twelve_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
+    """验证十二条案例命中诊断、冲突与历史安全契约，同时保持 12/28 未完成标记。
 
     确定性基线预期意图、必要 Action、允许根因、关键来源、停止原因、引用、风险和安全降级全部
-    命中；三条故意异常/空结果使尝试成功率低于一。覆盖标记必须保持 false，防止 11 条通过被宣传为
-    产品文档要求的 28 条验收已经完成；三条记忆案例还必须完整召回、投影并保持实时根因优先。
+    命中；三条故意失败响应使尝试成功率低于一，新增冲突案例的三个调用则全部成功。覆盖标记必须
+    保持 false，防止 12 条通过被宣传为 28 条验收完成；三条记忆案例仍需保持实时根因优先。
     """
 
     cases = load_golden_cases(GOLDEN_CASE_FILE)
@@ -160,15 +160,15 @@ async def test_eleven_golden_cases_produce_versioned_measured_diagnosis_baseline
 
     assert report.contract_id == GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID
     assert report.metric_kind == "measured"
-    assert report.case_count == 11
+    assert report.case_count == 12
     assert report.target_case_count == 28
-    assert report.case_coverage_rate == pytest.approx(11 / 28)
+    assert report.case_coverage_rate == pytest.approx(12 / 28)
     assert report.target_coverage_complete is False
     assert report.category_case_counts == {
         GoldenCaseCategory.SINGLE_COMPONENT: 4,
         GoldenCaseCategory.CROSS_COMPONENT: 1,
         GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 1,
-        GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 2,
+        GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
         GoldenCaseCategory.MEMORY_RECALL: 3,
     }
     assert report.intent_accuracy == 1
@@ -180,9 +180,11 @@ async def test_eleven_golden_cases_produce_versioned_measured_diagnosis_baseline
     assert report.citation_completeness == 1
     assert report.unsupported_critical_claim_rate == 0
     assert report.duplicate_action_rate == 0
-    assert report.tool_attempt_success_rate == pytest.approx(22 / 25)
+    assert report.tool_attempt_success_rate == pytest.approx(25 / 28)
     assert report.risk_level_hit_rate == 1
     assert report.safe_degradation_rate == 1
+    assert report.evidence_conflict_safe_resolution_rate == 1
+    assert report.forbidden_conflict_root_hit_count == 0
     assert report.history_trigger_hit_rate == 1
     assert report.history_recall_coverage == 1
     assert report.confirmed_only_recall_rate == 1
@@ -190,6 +192,91 @@ async def test_eleven_golden_cases_produce_versioned_measured_diagnosis_baseline
     assert report.realtime_priority_pass_rate == 1
     assert report.forbidden_memory_hit_count == 0
     assert report.accepted_report_rate == 1
+
+
+@pytest.mark.asyncio
+async def test_evidence_conflict_rejects_cited_root_and_hidden_uncertainty() -> None:
+    """确认有效引用不能掩盖证据冲突案例中的武断根因和不确定性缺失。
+
+    负向结果保留三个成功 ToolEvent/Evidence，却注入 Golden 明确禁止的单侧根因，并清空
+    uncertainties。根因引用使用真实 Evidence ID，所以结构引用完整率仍为一；专用冲突安全指标
+    必须失败并分别暴露禁止根因命中和未公开不确定性，证明它不是 citation 指标的重复包装。
+    """
+
+    cases = load_golden_cases(GOLDEN_CASE_FILE)
+    target = next(
+        case
+        for case in cases
+        if case.case_id == "golden_bds_conflicting_partition_evidence"
+    )
+    baseline = await FixtureBackedGoldenRunner(
+        FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
+    ).run(target)
+    report = baseline.report.state.draft_report
+    assert report is not None
+    evidence_id = baseline.react.state.evidence[0].evidence_id
+    unsafe_report = report.model_copy(
+        update={
+            "root_causes": [
+                RootCauseConclusion(
+                    root_cause="BDS 上游分区缺失",
+                    confidence=0.9,
+                    evidence_refs=[evidence_id],
+                )
+            ],
+            "uncertainties": [],
+        }
+    )
+    unsafe_state = baseline.report.state.model_copy(update={"draft_report": unsafe_report})
+    diagnosis = baseline.model_copy(
+        update={"report": baseline.report.model_copy(update={"state": unsafe_state})}
+    )
+
+    result = (await evaluate_golden_diagnosis([target], _SingleResultRunner(diagnosis))).cases[0]
+
+    assert result.citation_completeness == 1
+    assert result.missing_conflicting_evidence_sources == []
+    assert result.forbidden_conflict_root_hits == ["BDS 上游分区缺失"]
+    assert result.conflict_uncertainty_disclosed is False
+    assert result.evidence_conflict_safe_resolution is False
+
+
+@pytest.mark.asyncio
+async def test_evidence_conflict_requires_every_annotated_source_to_be_observed() -> None:
+    """确认报告即使保持空根因并公开 uncertainty，也不能掩盖冲突来源缺失。
+
+    测试从通过基线删除表元数据 Evidence，但保留其成功 ToolEvent 和安全报告。评分器必须把稳定
+    source ID 列入 missing，并让冲突安全处置失败；这证明指标先验证事实输入完整性，再评价报告是否
+    克制，而不是看到空根因就自动给满分。
+    """
+
+    cases = load_golden_cases(GOLDEN_CASE_FILE)
+    target = next(
+        case
+        for case in cases
+        if case.case_id == "golden_bds_conflicting_partition_evidence"
+    )
+    baseline = await FixtureBackedGoldenRunner(
+        FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
+    ).run(target)
+    retained_evidence = [
+        evidence
+        for evidence in baseline.react.state.evidence
+        if evidence.source_id != "bds_conflict_table_inventory"
+    ]
+    retained_ids = [evidence.evidence_id for evidence in retained_evidence]
+    incomplete_state = baseline.react.state.model_copy(
+        update={"evidence": retained_evidence, "observation_refs": retained_ids}
+    )
+    diagnosis = baseline.model_copy(
+        update={"react": baseline.react.model_copy(update={"state": incomplete_state})}
+    )
+
+    result = (await evaluate_golden_diagnosis([target], _SingleResultRunner(diagnosis))).cases[0]
+
+    assert result.conflict_uncertainty_disclosed is True
+    assert result.missing_conflicting_evidence_sources == ["bds_conflict_table_inventory"]
+    assert result.evidence_conflict_safe_resolution is False
 
 
 @pytest.mark.asyncio

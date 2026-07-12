@@ -24,6 +24,7 @@ from app.domain.planner import PlannerDecision
 from app.domain.scenarios import (
     GoldenCaseCategory,
     GoldenCaseSpec,
+    GoldenEvidenceConflictExpectation,
     GoldenFaultPathRequirement,
     GoldenHistoryExpectation,
     GoldenMemoryExpectation,
@@ -44,6 +45,7 @@ __all__ = [
     "FaultHypothesis",
     "GoldenCaseCategory",
     "GoldenCaseSpec",
+    "GoldenEvidenceConflictExpectation",
     "GoldenFaultPathRequirement",
     "GoldenHistoryExpectation",
     "GoldenMemoryExpectation",

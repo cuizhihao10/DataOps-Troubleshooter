@@ -1,0 +1,98 @@
+{
+  "scenario_id": "bds_conflicting_partition_evidence",
+  "title": "BDS 成功响应中的分区事实冲突",
+  "description": "三个只读 BDS 工具均成功返回，但对同一目标分区是否存在、是否已读取给出互相矛盾的合成事实。",
+  "components": ["bds"],
+  "expected_behavior": "系统应完整保留三条成功 Observation，公开证据冲突并请求人工复核，不得从任一单侧事实推导确定根因。",
+  "tool_results": [
+    {
+      "tool_name": "bds.get_task_status",
+      "request": {
+        "resource_id": "bds_inventory_snapshot_hourly",
+        "time_range": {
+          "start": "2026-07-12T08:00:00+08:00",
+          "end": "2026-07-12T09:00:00+08:00"
+        },
+        "scenario_id": "bds_conflicting_partition_evidence",
+        "trace_id": "trace_bds_conflict_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "status": "running",
+          "stage": "source_read",
+          "source_ready": false,
+          "waiting_partition": "2026-07-12-08"
+        },
+        "evidence": [
+          {
+            "source_id": "bds_conflict_status_inventory",
+            "content": "任务状态声称仍在等待 2026-07-12-08 目标分区，源数据尚未就绪。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-12T09:01:00+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_task_log",
+      "request": {
+        "resource_id": "bds_inventory_snapshot_hourly",
+        "time_range": {
+          "start": "2026-07-12T08:00:00+08:00",
+          "end": "2026-07-12T09:00:00+08:00"
+        },
+        "scenario_id": "bds_conflicting_partition_evidence",
+        "trace_id": "trace_bds_conflict_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "event": "SOURCE_READ_COMPLETED",
+          "partition": "2026-07-12-08",
+          "records_read": 48210
+        },
+        "evidence": [
+          {
+            "source_id": "bds_conflict_log_inventory",
+            "content": "任务日志声称已成功读取 2026-07-12-08 分区，共读取 48210 条合成记录。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-12T09:01:10+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_table_info",
+      "request": {
+        "resource_id": "dwd_inventory_snapshot",
+        "time_range": {
+          "start": "2026-07-12T08:00:00+08:00",
+          "end": "2026-07-12T09:00:00+08:00"
+        },
+        "scenario_id": "bds_conflicting_partition_evidence",
+        "trace_id": "trace_bds_conflict_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "latest_partition": "2026-07-12-08",
+          "expected_partition": "2026-07-12-08",
+          "partition_queryable": true,
+          "row_count": 48210
+        },
+        "evidence": [
+          {
+            "source_id": "bds_conflict_table_inventory",
+            "content": "表元数据声称 2026-07-12-08 分区存在、可查询，且包含 48210 条合成记录。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-12T09:01:20+08:00"
+      }
+    }
+  ]
+}

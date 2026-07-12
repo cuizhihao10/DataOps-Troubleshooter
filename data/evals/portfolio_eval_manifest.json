@@ -1,5 +1,5 @@
 {
-  "contract_id": "portfolio-eval-manifest:v5",
+  "contract_id": "portfolio-eval-manifest:v6",
   "suites": [
     {
       "suite_id": "graphrag_ablation",
@@ -151,29 +151,29 @@
     {
       "suite_id": "golden_diagnosis_baseline",
       "layer": "Golden Case 顶层诊断确定性回归基线",
-      "source_contract_id": "golden-diagnosis-eval:v4",
+      "source_contract_id": "golden-diagnosis-eval:v5",
       "result_document": "docs/golden-diagnosis-eval-results.md",
       "requires_postgres": false,
       "test_targets": [
-        "tests/integration/test_golden_diagnosis_evaluation.py::test_eleven_golden_cases_produce_versioned_measured_diagnosis_baseline"
+        "tests/integration/test_golden_diagnosis_evaluation.py::test_twelve_golden_cases_produce_versioned_measured_diagnosis_baseline"
       ],
       "metrics": [
         {
           "metric_id": "golden_case_coverage",
           "label": "Golden Case 目标集覆盖率",
           "control_label": "product_target_28_cases",
-          "treatment_label": "measured_scripted_11_cases",
+          "treatment_label": "measured_scripted_12_cases",
           "control_value": 1.0,
-          "treatment_value": 0.3929,
-          "delta": -0.6071,
+          "treatment_value": 0.4286,
+          "delta": -0.5714,
           "direction": "higher_is_better",
-          "note": "当前运行 11/28 条合成案例，类别配额为 4/1/1/2/3；仍不具备产品目标验收资格。"
+          "note": "当前运行 12/28 条合成案例，类别配额为 4/1/1/3/3；仍不具备产品目标验收资格。"
         },
         {
           "metric_id": "golden_intent_accuracy",
           "label": "当前子集意图命中率",
           "control_label": "product_target_minimum",
-          "treatment_label": "measured_scripted_11_cases",
+          "treatment_label": "measured_scripted_12_cases",
           "control_value": 0.9,
           "treatment_value": 1.0,
           "delta": 0.1,
@@ -189,13 +189,13 @@
           "treatment_value": 1.0,
           "delta": 0.2,
           "direction": "higher_is_better",
-          "note": "八条有根因案例进入 Top-1 分母；三条无根因案例另以安全降级衡量。"
+          "note": "八条有根因案例进入 Top-1 分母；四条无根因案例另以安全降级衡量。"
         },
         {
           "metric_id": "golden_necessary_action_coverage",
           "label": "当前子集必要 Action 覆盖率",
           "control_label": "product_target_minimum",
-          "treatment_label": "measured_scripted_11_cases",
+          "treatment_label": "measured_scripted_12_cases",
           "control_value": 0.9,
           "treatment_value": 1.0,
           "delta": 0.1,
@@ -217,7 +217,7 @@
           "metric_id": "golden_citation_completeness",
           "label": "当前子集关键结论引用完整率",
           "control_label": "product_target",
-          "treatment_label": "measured_scripted_11_cases",
+          "treatment_label": "measured_scripted_12_cases",
           "control_value": 1.0,
           "treatment_value": 1.0,
           "delta": 0.0,
@@ -228,12 +228,12 @@
           "metric_id": "golden_safe_degradation",
           "label": "当前无根因子集安全降级率",
           "control_label": "safety_expectation",
-          "treatment_label": "measured_scripted_3_cases",
+          "treatment_label": "measured_scripted_4_cases",
           "control_value": 1.0,
           "treatment_value": 1.0,
           "delta": 0.0,
           "direction": "higher_is_better",
-          "note": "三条空结果、超时或权限失败案例均未输出猜测根因，并公开不确定性。"
+          "note": "四条空结果、超时、权限失败或成功响应冲突案例均未输出猜测根因，并公开不确定性。"
         },
         {
           "metric_id": "golden_history_recall_coverage",
@@ -256,6 +256,17 @@
           "delta": 0.0,
           "direction": "higher_is_better",
           "note": "冲突历史根因未进入最终报告，所有当前根因至少引用一条本次 TOOL Evidence。"
+        },
+        {
+          "metric_id": "golden_evidence_conflict_safe_resolution",
+          "label": "成功响应证据冲突安全处置率",
+          "control_label": "safety_expectation",
+          "treatment_label": "measured_scripted_1_conflict_case",
+          "control_value": 1.0,
+          "treatment_value": 1.0,
+          "delta": 0.0,
+          "direction": "higher_is_better",
+          "note": "三个成功 BDS Observation 全部保留；报告未选择任一禁止根因，并公开人工复核不确定性。"
         }
       ]
     }

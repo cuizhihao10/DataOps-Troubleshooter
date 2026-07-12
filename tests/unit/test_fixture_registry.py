@@ -1,6 +1,6 @@
-"""验证场景注册、Golden Case 引用和失败 Fixture 覆盖。
+"""验证场景注册、Golden Case 引用、证据冲突标注和失败 Fixture 覆盖。
 
-测试确保五个场景可重复加载、九工具主场景完整、错误类别齐全，并拒绝重复 scenario_id
+测试确保六个场景可重复加载、九工具主场景完整、错误类别齐全，并拒绝重复 scenario_id
 和工具请求引用其他场景等会破坏可复现性的输入。
 """
 
@@ -28,10 +28,10 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     registry = FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
     golden_cases = load_golden_cases(GOLDEN_CASE_FILE)
 
-    assert len(registry) == 5
-    assert len(golden_cases) == 11
+    assert len(registry) == 6
+    assert len(golden_cases) == 12
     assert {case.scenario_id for case in golden_cases} == set(registry.scenario_ids)
-    assert {case.contract_id for case in golden_cases} == {"golden-case:v4"}
+    assert {case.contract_id for case in golden_cases} == {"golden-case:v5"}
     category_counts = {
         category: sum(case.case_category is category for case in golden_cases)
         for category in GoldenCaseCategory
@@ -40,7 +40,7 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
         GoldenCaseCategory.SINGLE_COMPONENT: 4,
         GoldenCaseCategory.CROSS_COMPONENT: 1,
         GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 1,
-        GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 2,
+        GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
         GoldenCaseCategory.MEMORY_RECALL: 3,
     }
     cross_chain = next(
@@ -50,6 +50,13 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
         "component_dependency_chain",
         "sync_backlog_causal_chain",
     ]
+    conflict_case = next(
+        case
+        for case in golden_cases
+        if case.case_id == "golden_bds_conflicting_partition_evidence"
+    )
+    assert conflict_case.evidence_conflict_expectation is not None
+    assert len(conflict_case.evidence_conflict_expectation.conflicting_evidence_sources) == 3
 
 
 def test_main_scenario_exercises_all_nine_tool_contracts() -> None:
@@ -184,4 +191,67 @@ def test_history_conflict_flag_must_match_current_allowed_roots(tmp_path: Path) 
     target.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="conflict flag must match"):
+        load_golden_cases(target)
+
+
+def test_evidence_conflict_sources_must_also_be_required_evidence(tmp_path: Path) -> None:
+    """验证冲突来源不能绕过普通 Evidence source 覆盖义务单独存在。
+
+    测试从冲突案例的 required_evidence_sources 删除一项，但保留冲突标注；加载必须在 runner 执行
+    前失败。否则评分器可能一边宣称观察到完整冲突，一边让通用证据覆盖率忽略同一来源。
+    """
+
+    payload = json.loads(GOLDEN_CASE_FILE.read_text(encoding="utf-8"))
+    conflict_case = next(
+        case
+        for case in payload
+        if case["case_id"] == "golden_bds_conflicting_partition_evidence"
+    )
+    conflict_case["required_evidence_sources"].pop()
+    target = tmp_path / "invalid_conflict_sources.json"
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be required evidence sources"):
+        load_golden_cases(target)
+
+
+def test_evidence_conflict_expectation_requires_conflict_category(tmp_path: Path) -> None:
+    """验证证据冲突专用标注不能挂到普通单组件类别上污染配额。
+
+    测试只把冲突案例类别改为 single_component，保留三个成功响应和全部期望字段；Schema 应在加载
+    时拒绝。否则类别统计会显示普通故障增加，而专用冲突指标仍悄悄参与聚合，破坏 8/10/4/3/3 配额。
+    """
+
+    payload = json.loads(GOLDEN_CASE_FILE.read_text(encoding="utf-8"))
+    conflict_case = next(
+        case
+        for case in payload
+        if case["case_id"] == "golden_bds_conflicting_partition_evidence"
+    )
+    conflict_case["case_category"] = "single_component"
+    target = tmp_path / "invalid_conflict_category.json"
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="requires tool anomaly/conflict category"):
+        load_golden_cases(target)
+
+
+def test_no_root_conflict_expectation_rejects_allowed_root_causes(tmp_path: Path) -> None:
+    """验证要求“不下根因”的冲突案例不能同时声明可接受根因。
+
+    测试向当前空 allowed_root_causes 注入一个单侧结论；Schema 必须拒绝互相矛盾的验收口径，避免
+    Top-1 指标鼓励输出根因，而冲突安全指标又要求报告保持空根因。
+    """
+
+    payload = json.loads(GOLDEN_CASE_FILE.read_text(encoding="utf-8"))
+    conflict_case = next(
+        case
+        for case in payload
+        if case["case_id"] == "golden_bds_conflicting_partition_evidence"
+    )
+    conflict_case["allowed_root_causes"] = ["任一单侧结论"]
+    target = tmp_path / "invalid_conflict_allowed_root.json"
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="requires empty allowed root causes"):
         load_golden_cases(target)
