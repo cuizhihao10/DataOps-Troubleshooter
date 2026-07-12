@@ -1,0 +1,152 @@
+{
+  "contract_id": "portfolio-eval-manifest:v1",
+  "suites": [
+    {
+      "suite_id": "graphrag_ablation",
+      "layer": "GraphRAG vector-only / vector+graph",
+      "source_contract_id": "graphrag-retrieval:v2",
+      "result_document": "docs/graphrag-ablation-results.md",
+      "requires_postgres": true,
+      "test_targets": [
+        "tests/integration/test_graph_postgres.py::test_postgres_graph_seed_search_expansion_and_key_edge_ablation"
+      ],
+      "metrics": [
+        {
+          "metric_id": "graph_root_cause_hit",
+          "label": "根因节点命中",
+          "control_label": "vector_only",
+          "treatment_label": "vector_graph",
+          "control_value": 1.0,
+          "treatment_value": 1.0,
+          "delta": 0.0,
+          "direction": "higher_is_better",
+          "note": "根因在向量基线已可见，图扩展没有虚报额外根因收益。"
+        },
+        {
+          "metric_id": "graph_chain_completeness",
+          "label": "必要有序链路完整率",
+          "control_label": "vector_only",
+          "treatment_label": "vector_graph",
+          "control_value": 0.0,
+          "treatment_value": 1.0,
+          "delta": 1.0,
+          "direction": "higher_is_better",
+          "note": "真实 PostgreSQL 图路径补齐了预先标注的必要因果链。"
+        }
+      ]
+    },
+    {
+      "suite_id": "memory_recall_ablation",
+      "layer": "长期记忆 pgvector / pgvector+SIMILAR_TO",
+      "source_contract_id": "memory-recall-eval:v1",
+      "result_document": "docs/memory-recall-eval-results.md",
+      "requires_postgres": true,
+      "test_targets": [
+        "tests/integration/test_memory_recall_evaluation_postgres.py::test_postgres_memory_recall_ablation_matches_versioned_measured_report"
+      ],
+      "metrics": [
+        {
+          "metric_id": "memory_macro_recall_at_k",
+          "label": "Macro Recall@K",
+          "control_label": "vector_only",
+          "treatment_label": "vector_graph",
+          "control_value": 0.8333,
+          "treatment_value": 1.0,
+          "delta": 0.1667,
+          "direction": "higher_is_better",
+          "note": "三条确定性角度查询的小样本实测，不能外推到通用语义模型。"
+        },
+        {
+          "metric_id": "memory_macro_precision_at_k",
+          "label": "Macro Precision@K",
+          "control_label": "vector_only",
+          "treatment_label": "vector_graph",
+          "control_value": 0.8333,
+          "treatment_value": 1.0,
+          "delta": 0.1667,
+          "direction": "higher_is_better",
+          "note": "rejected 案例禁止命中保持为零，增益只来自固定图救回案例。"
+        }
+      ]
+    },
+    {
+      "suite_id": "history_impact_ablation",
+      "layer": "历史案例 Memory off/on 端到端影响",
+      "source_contract_id": "history-impact-eval:v1",
+      "result_document": "docs/history-impact-eval-results.md",
+      "requires_postgres": false,
+      "test_targets": [
+        "tests/integration/test_history_impact_langgraph.py::test_real_langgraph_history_impact_ablation_matches_measured_contract"
+      ],
+      "metrics": [
+        {
+          "metric_id": "history_necessary_action_coverage",
+          "label": "必要 Action Macro 覆盖率",
+          "control_label": "memory_off",
+          "treatment_label": "memory_on",
+          "control_value": 0.6667,
+          "treatment_value": 1.0,
+          "delta": 0.3333,
+          "direction": "higher_is_better",
+          "note": "确定性 Planner 三案例实测，只证明历史上下文进入真实 LangGraph。"
+        },
+        {
+          "metric_id": "history_unexpected_action_rate",
+          "label": "意外 Action Macro 率",
+          "control_label": "memory_off",
+          "treatment_label": "memory_on",
+          "control_value": 0.3333,
+          "treatment_value": 0.0,
+          "delta": -0.3333,
+          "direction": "lower_is_better",
+          "note": "根因命中和 TOOL 引用两组均为 1.0，未宣称额外准确率提升。"
+        }
+      ]
+    },
+    {
+      "suite_id": "auditor_impact_ablation",
+      "layer": "确定性规则 / 完整独立 Auditor",
+      "source_contract_id": "auditor-impact-eval:v1",
+      "result_document": "docs/auditor-impact-eval-results.md",
+      "requires_postgres": false,
+      "test_targets": [
+        "tests/integration/test_auditor_impact_langgraph.py::test_real_report_langgraph_measures_incremental_auditor_safety_gain"
+      ],
+      "metrics": [
+        {
+          "metric_id": "auditor_expected_issue_detection",
+          "label": "预期问题 Macro 发现率",
+          "control_label": "auditor_off",
+          "treatment_label": "auditor_on",
+          "control_value": 0.0,
+          "treatment_value": 1.0,
+          "delta": 1.0,
+          "direction": "higher_is_better",
+          "note": "off 是 control_unreviewed 评测对照，不是生产开关或 accepted。"
+        },
+        {
+          "metric_id": "auditor_unsafe_item_rate",
+          "label": "危险内容 Macro 残留率",
+          "control_label": "auditor_off",
+          "treatment_label": "auditor_on",
+          "control_value": 1.0,
+          "treatment_value": 0.0,
+          "delta": -1.0,
+          "direction": "lower_is_better",
+          "note": "三条确定性语义缺陷脚本只验证修订与降级控制流。"
+        },
+        {
+          "metric_id": "auditor_safe_resolution_rate",
+          "label": "安全处置率",
+          "control_label": "auditor_off",
+          "treatment_label": "auditor_on",
+          "control_value": 0.0,
+          "treatment_value": 1.0,
+          "delta": 1.0,
+          "direction": "higher_is_better",
+          "note": "两例修订后接受，一例持续冲突后安全降级；降级不等于接受。"
+        }
+      ]
+    }
+  ]
+}

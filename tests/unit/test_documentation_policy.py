@@ -28,6 +28,7 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/orchestration/diagnosis_runtime.py"),
     Path("app/orchestration/auditor_evaluation.py"),
     Path("app/orchestration/history_evaluation.py"),
+    Path("app/evaluation/portfolio.py"),
     Path("app/reporting/draft.py"),
     Path("app/reporting/policy.py"),
     Path("app/reporting/revision.py"),
@@ -167,6 +168,8 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
     assert "history-impact-eval:v1" in guide
     assert "独立 Auditor 增量影响消融评测" in guide
     assert "auditor-impact-eval:v1" in guide
+    assert "统一作品集评测 manifest 与单命令运行器" in guide
+    assert "portfolio-eval-run:v1" in guide
     assert "尚未完成" in guide
     assert "代码注释的强制粒度" in guide
     assert "callable 级 docstring" in guide
@@ -228,6 +231,28 @@ def test_auditor_impact_report_separates_rules_control_and_model_quality_claims(
     assert "安全处置率 | 0.0000 | 1.0000 | +1.0000" in report
     assert "持续问题后安全降级 | 1" in report
     assert "不能据此宣称真实 LLM" in report
+
+
+def test_portfolio_eval_report_documents_publish_gate_and_incomplete_golden_scope() -> None:
+    """确认统一报告锁定 passed 才发布指标、快速模式不完整和 5/28 条边界。
+
+    该门禁防止 CLI 失败后仍宣传 manifest 快照，也防止把四层消融或现有 5 条场景基线相加后冒充
+    28 条诊断 Golden Case 成绩；完整命令、快速命令和九个指标范围都必须可见。
+    """
+
+    report = Path("docs/portfolio-eval-results.md").read_text(encoding="utf-8")
+
+    assert "portfolio-eval-manifest:v1" in report
+    assert "portfolio-eval-run:v1" in report
+    assert "只有" in report and "status=`passed`" in report
+    assert "failed、skipped、blocked" in report
+    assert "python -m app.evaluation" in report
+    assert "--skip-postgres" in report
+    assert '"complete": true' in report
+    assert "共发布 9 个指标" in report
+    assert "只有 5 条场景基线" in report
+    assert "产品目标是 28 条" in report
+    assert "不能外推为真实 LLM" in report
 
 
 def test_prompt_contract_versions_budgeted_retrieval_inputs() -> None:
@@ -395,6 +420,11 @@ def test_diagnosis_resource_contract_documents_persistence_events_and_failure_se
     assert "synchronous" in prompt_contract
     assert "running | completed | failed" in prompt_contract
     assert "不保存 Thought" in prompt_contract
+    assert "portfolio-eval-manifest:v1" in prompt_contract
+    assert "portfolio-eval-run:v1" in prompt_contract
+    assert "subprocess.run(shell=False)" in prompt_contract
+    assert "failed、skipped 或 blocked 必须隐藏 metrics" in prompt_contract
+    assert "不等于产品目标的 28 条诊断 Golden Cases" in prompt_contract
 
 
 def test_ablation_report_labels_measured_values_and_honest_zero_gain() -> None:
