@@ -273,6 +273,57 @@ async def test_successful_bds_responses_preserve_conflicting_partition_facts_ove
 
 
 @pytest.mark.asyncio
+async def test_lts_to_bds_dependency_chain_crosses_real_mcp_protocol() -> None:
+    """验证 LTS 失败现象可沿真实 MCP 工具结果追到 BDS 分区读取阻塞。
+
+    五个调用覆盖 LTS 状态/拓扑和 BDS 状态/日志/表信息；断言使用结构化业务字段与稳定 source ID
+    拼接“LTS 上游未就绪 → 依赖 BDS → BDS 等待缺失分区”。测试不直接读取 Fixture，也不让模型
+    猜测组件关系，因此能发现协议注册、资源匹配或 Observation 标准化破坏跨组件证据链的问题。
+    """
+
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    calls = (
+        ("lts.get_task_status", "dws_order_report_daily"),
+        ("lts.get_dependency_topology", "dws_order_report_daily"),
+        ("bds.get_task_status", "bds_order_aggregate_daily"),
+        ("bds.get_task_log", "bds_order_aggregate_daily"),
+        ("bds.get_table_info", "ods_order_delta"),
+    )
+    observations = {}
+    for tool_name, resource_id in calls:
+        # 独立 trace 保留每项只读 Action 的审计身份，场景 ID 则让五次调用读取同一合成事实快照。
+        observations[tool_name] = await executor.execute(
+            _action(
+                "cross_chain_pk_conflict",
+                resource_id,
+                f"trace_lts_bds_{tool_name.replace('.', '_')}",
+                tool_name=tool_name,
+            )
+        )
+
+    assert all(observation.response.ok for observation in observations.values())
+    assert observations["lts.get_task_status"].response.data["upstream_ready"] is False
+    assert (
+        observations["lts.get_dependency_topology"].response.data["upstream_task"]
+        == "bds_order_aggregate_daily"
+    )
+    assert observations["bds.get_task_status"].response.data["stage"] == "source_read"
+    assert observations["bds.get_task_log"].response.data["warning"] == "SOURCE_PARTITION_LAG"
+    table_data = observations["bds.get_table_info"].response.data
+    assert table_data["latest_partition"] != table_data["expected_partition"]
+    assert {
+        observation.response.evidence[0].source_id
+        for observation in observations.values()
+    } == {
+        "lts_status_dws_order_report_daily",
+        "lts_topology_dws_order_report_daily",
+        "bds_status_order_aggregate",
+        "bds_log_order_aggregate",
+        "bds_table_ods_order_delta",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "expected_data_key"),
     [

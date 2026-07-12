@@ -29,16 +29,16 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     golden_cases = load_golden_cases(GOLDEN_CASE_FILE)
 
     assert len(registry) == 6
-    assert len(golden_cases) == 12
+    assert len(golden_cases) == 13
     assert {case.scenario_id for case in golden_cases} == set(registry.scenario_ids)
-    assert {case.contract_id for case in golden_cases} == {"golden-case:v5"}
+    assert {case.contract_id for case in golden_cases} == {"golden-case:v6"}
     category_counts = {
         category: sum(case.case_category is category for case in golden_cases)
         for category in GoldenCaseCategory
     }
     assert category_counts == {
         GoldenCaseCategory.SINGLE_COMPONENT: 4,
-        GoldenCaseCategory.CROSS_COMPONENT: 1,
+        GoldenCaseCategory.CROSS_COMPONENT: 2,
         GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 1,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
         GoldenCaseCategory.MEMORY_RECALL: 3,
@@ -57,6 +57,15 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     )
     assert conflict_case.evidence_conflict_expectation is not None
     assert len(conflict_case.evidence_conflict_expectation.conflicting_evidence_sources) == 3
+    lts_bds_case = next(
+        case
+        for case in golden_cases
+        if case.case_id == "golden_cross_lts_blocked_by_bds_partition"
+    )
+    assert [path.path_label for path in lts_bds_case.required_fault_paths] == [
+        "lts_task_depends_on_bds_task",
+        "bds_task_consumes_delayed_dataset",
+    ]
 
 
 def test_main_scenario_exercises_all_nine_tool_contracts() -> None:
@@ -255,3 +264,41 @@ def test_no_root_conflict_expectation_rejects_allowed_root_causes(tmp_path: Path
 
     with pytest.raises(ValueError, match="requires empty allowed root causes"):
         load_golden_cases(target)
+
+
+def test_cross_component_category_requires_multiple_tool_components_and_path(
+    tmp_path: Path,
+) -> None:
+    """验证跨组件配额必须同时由多组件 Action 和显式故障路径支撑。
+
+    第一份负向数据删除所有 BDS 工具，只保留 LTS Action；第二份保留多组件工具但清空路径。两者均
+    必须在加载阶段失败，防止仅修改 category 标签或堆叠互不相连的工具调用来虚增 10 条跨组件配额。
+    """
+
+    payload = json.loads(GOLDEN_CASE_FILE.read_text(encoding="utf-8"))
+    cross_case = next(
+        case
+        for case in payload
+        if case["case_id"] == "golden_cross_lts_blocked_by_bds_partition"
+    )
+    cross_case["required_tools"] = [
+        tool for tool in cross_case["required_tools"] if tool.startswith("lts.")
+    ]
+    single_component_target = tmp_path / "invalid_cross_single_component.json"
+    single_component_target.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="tools from at least two components"):
+        load_golden_cases(single_component_target)
+
+    payload = json.loads(GOLDEN_CASE_FILE.read_text(encoding="utf-8"))
+    cross_case = next(
+        case
+        for case in payload
+        if case["case_id"] == "golden_cross_lts_blocked_by_bds_partition"
+    )
+    cross_case["required_fault_paths"] = []
+    missing_path_target = tmp_path / "invalid_cross_missing_path.json"
+    missing_path_target.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="requires at least one fault path"):
+        load_golden_cases(missing_path_target)

@@ -207,7 +207,7 @@ class GoldenCaseSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    contract_id: Literal["golden-case:v5"]
+    contract_id: Literal["golden-case:v6"]
     case_id: str = Field(pattern=r"^golden_[a-z0-9][a-z0-9_-]{2,79}$")
     case_category: GoldenCaseCategory
     user_query: str = Field(min_length=1, max_length=4000)
@@ -224,10 +224,11 @@ class GoldenCaseSpec(BaseModel):
 
     @model_validator(mode="after")
     def validate_unique_requirements(self) -> GoldenCaseSpec:
-        """拒绝重复工具、路径标签、证据来源和允许答案，保持每项评测分母唯一。
+        """拒绝重复/矛盾标注，并保证记忆、冲突和跨组件类别具有可执行验收义务。
 
         列表顺序用于失败明细和宏观重放，但同一要求出现两次会人为降低或提高覆盖率，因此在加载
-        阶段直接失败。空路径/根因集合仍合法，用于工具异常和证据不足的安全降级案例。
+        阶段直接失败。记忆与冲突字段必须匹配所属类别；跨组件案例必须调用至少两个组件并提供图
+        路径。空路径/根因集合仅继续用于允许安全降级的非跨组件异常或证据不足案例。
         """
 
         for field_name in (
@@ -279,5 +280,18 @@ class GoldenCaseSpec(BaseModel):
             ):
                 raise ValueError(
                     "Golden no-root conflict expectation requires empty allowed root causes"
+                )
+        if self.case_category is GoldenCaseCategory.CROSS_COMPONENT:
+            # 类别配额必须由真实跨组件 Action 支撑，不能只给单组件案例换一个 category 标签。
+            tool_components = {
+                tool.value.split(".", 1)[0] for tool in self.required_tools
+            }
+            if len(tool_components) < 2:
+                raise ValueError(
+                    "Golden cross-component case requires tools from at least two components"
+                )
+            if not self.required_fault_paths:
+                raise ValueError(
+                    "Golden cross-component case requires at least one fault path"
                 )
         return self
