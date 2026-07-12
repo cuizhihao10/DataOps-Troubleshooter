@@ -70,14 +70,14 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
             await session.commit()
 
             node_count, edge_count = await repository.count_graph()
-            assert node_count == 11
-            assert edge_count == 13
+            assert node_count == 14
+            assert edge_count == 15
             assert (
                 await repository.count_embedded_nodes(
                     provider_id=embedding_provider.provider_id,
                     dimensions=embedding_provider.dimensions,
                 )
-                == 11
+                == 14
             )
 
             # 直接绕过 Pydantic 篡改维度，确认数据库 CheckConstraint 仍能拒绝不兼容向量元数据。
@@ -137,6 +137,29 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
             assert component_path.path_id.startswith("path_")
             assert component_path.hybrid_score > component_path.score * result.score_weights.path
             assert component_path.seed_node_id == "component_lts"
+
+            # 精确症状查询应从新增 v2 节点出发，沿真实递归 CTE 得到两跳根因和解决方案，而不是
+            # 仅因三个关键词分别出现在种子结果中就被误判为 GraphRAG 路径。
+            parameter_result = await service.retrieve(
+                "LTS 参数校验失败 partition_date",
+                seed_limit=5,
+                max_hops=2,
+            )
+            parameter_path = next(
+                path
+                for path in parameter_result.paths
+                if [node.node_id for node in path.nodes]
+                == [
+                    "symptom_lts_parameter_validation_failure",
+                    "root_cause_lts_invalid_partition_parameter",
+                    "solution_validate_lts_runtime_parameters",
+                ]
+            )
+            assert [edge.relation_type.value for edge in parameter_path.edges] == [
+                "CAUSED_BY",
+                "RESOLVED_BY",
+            ]
+            assert parameter_path.depth == 2
 
             # 使用同一查询和预算运行 vector-only/vector+graph，结构化记录图扩展的实测增益。
             ablation_case = load_graph_ablation_cases(

@@ -1,6 +1,6 @@
 {
-  "seed_version": "graph-seed:v1",
-  "source_id": "synthetic_cross_chain_knowledge_v1",
+  "seed_version": "graph-seed:v2",
+  "source_id": "synthetic_cross_chain_knowledge_v2",
   "nodes": [
     {
       "node_id": "component_lts",
@@ -122,6 +122,39 @@
       "source_span": "确认冲突范围、备份差异记录、按变更流程处理重复键并验证同步位点。",
       "reliability": 1.0,
       "embedding": null
+    },
+    {
+      "node_id": "symptom_lts_parameter_validation_failure",
+      "node_type": "symptom",
+      "name": "LTS 参数校验失败",
+      "content": "LTS 任务在启动阶段因运行参数未通过格式校验而重复失败。",
+      "aliases": ["parameter validation failure", "configuration validation"],
+      "source_id": "synthetic_cross_chain_knowledge_v2",
+      "source_span": "LTS 启动参数格式不合法时，任务会在业务逻辑执行前失败。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "root_cause_lts_invalid_partition_parameter",
+      "node_type": "root_cause",
+      "name": "LTS 分区日期参数格式错误",
+      "content": "partition_date 未使用任务声明的 yyyy-MM-dd 格式，导致启动校验拒绝执行。",
+      "aliases": ["invalid partition_date", "INVALID_PARTITION_DATE"],
+      "source_id": "synthetic_cross_chain_knowledge_v2",
+      "source_span": "运行参数 partition_date 格式错误会直接触发 LTS 配置校验失败。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "solution_validate_lts_runtime_parameters",
+      "node_type": "solution",
+      "name": "校验并修正 LTS 运行参数",
+      "content": "对照任务参数 Schema 修正 partition_date，预览渲染结果后再按变更流程重跑。",
+      "aliases": ["validate runtime parameters", "fix partition date format"],
+      "source_id": "synthetic_cross_chain_knowledge_v2",
+      "source_span": "修正前先核对参数 Schema 和渲染结果，避免直接重跑放大配置错误。",
+      "reliability": 1.0,
+      "embedding": null
     }
   ],
   "edges": [
@@ -241,6 +274,24 @@
       "weight": 0.95,
       "source_id": "synthetic_cross_chain_knowledge_v1",
       "source_span": "LTS 任务失败表现为上游数据未就绪。"
+    },
+    {
+      "edge_id": "edge_lts_parameter_failure_caused_by_invalid_format",
+      "from_node_id": "symptom_lts_parameter_validation_failure",
+      "to_node_id": "root_cause_lts_invalid_partition_parameter",
+      "relation_type": "CAUSED_BY",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v2",
+      "source_span": "LTS 参数校验失败由 partition_date 格式不符合任务 Schema 导致。"
+    },
+    {
+      "edge_id": "edge_lts_invalid_parameter_resolved_by_validation",
+      "from_node_id": "root_cause_lts_invalid_partition_parameter",
+      "to_node_id": "solution_validate_lts_runtime_parameters",
+      "relation_type": "RESOLVED_BY",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v2",
+      "source_span": "格式错误应通过核对 Schema、修正参数和预览渲染结果处理。"
     }
   ]
 }

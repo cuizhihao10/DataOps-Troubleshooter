@@ -574,5 +574,45 @@
       "evidence_insufficient"
     ],
     "expected_risk_level": "low"
+  },
+  {
+    "contract_id": "golden-case:v7",
+    "case_id": "golden_lts_invalid_partition_parameter_single",
+    "case_category": "single_component",
+    "user_query": "LTS 任务 lts_finance_reconciliation_daily 重试三次后失败，请判断是否是上游依赖问题。",
+    "scenario_id": "lts_parameter_validation_failure",
+    "expected_intent": "single_component_diagnosis",
+    "required_tools": [
+      "lts.get_task_status",
+      "lts.get_task_log",
+      "lts.get_dependency_topology"
+    ],
+    "required_fault_paths": [
+      {
+        "path_label": "lts_parameter_validation_solution_chain",
+        "required_node_ids": [
+          "symptom_lts_parameter_validation_failure",
+          "root_cause_lts_invalid_partition_parameter",
+          "solution_validate_lts_runtime_parameters"
+        ],
+        "required_relation_types": [
+          "CAUSED_BY",
+          "RESOLVED_BY"
+        ]
+      }
+    ],
+    "allowed_root_causes": [
+      "LTS 分区日期参数格式错误",
+      "运行参数 partition_date 格式不合法"
+    ],
+    "required_evidence_sources": [
+      "lts_status_finance_reconciliation_parameter",
+      "lts_log_finance_reconciliation_parameter",
+      "lts_topology_finance_reconciliation_ready"
+    ],
+    "expected_stop_reasons": [
+      "evidence_sufficient"
+    ],
+    "expected_risk_level": "medium"
   }
 ]

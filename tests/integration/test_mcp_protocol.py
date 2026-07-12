@@ -215,6 +215,52 @@ async def test_lts_all_observation_sources_fail_without_creating_evidence() -> N
 
 
 @pytest.mark.asyncio
+async def test_lts_parameter_failure_uses_dependency_readiness_as_counterevidence() -> None:
+    """验证 LTS 参数错误的三项成功 Observation 能区分根因证据与依赖反证。
+
+    状态只证明配置阶段重试耗尽，日志才给出 INVALID_PARTITION_DATE，拓扑则证明上游已就绪；三者
+    必须通过真实 MCP 各产生稳定 Evidence。测试不在协议层直接输出根因，而是验证上层诊断所需的
+    支持证据和反证同时存在，避免把任意 LTS 失败都归因于上游依赖。
+    """
+
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    observations = {}
+    # 独立 trace 保持每项工具事件可寻址；相同 scenario/resource 则证明三项事实来自同一诊断窗口。
+    for tool_name in (
+        "lts.get_task_status",
+        "lts.get_task_log",
+        "lts.get_dependency_topology",
+    ):
+        observations[tool_name] = await executor.execute(
+            _action(
+                "lts_parameter_validation_failure",
+                "lts_finance_reconciliation_daily",
+                f"trace_lts_parameter_{tool_name.replace('.', '_')}",
+                tool_name=tool_name,
+            )
+        )
+
+    status = observations["lts.get_task_status"]
+    log = observations["lts.get_task_log"]
+    topology = observations["lts.get_dependency_topology"]
+    assert all(observation.response.ok for observation in observations.values())
+    assert status.response.data["state"] == "FAILED"
+    assert status.response.data["attempt"] == status.response.data["max_attempts"] == 3
+    assert log.response.data["component_error_code"] == "INVALID_PARTITION_DATE"
+    assert log.response.data["parameter_name"] == "partition_date"
+    assert topology.response.data["upstream_ready"] is True
+    assert topology.response.data["blocked_dependencies"] == []
+    # source_id 集合锁定公开引用面，同时确认成功反证不会因“不支持候选根因”而被过滤掉。
+    assert {
+        observation.response.evidence[0].source_id for observation in observations.values()
+    } == {
+        "lts_status_finance_reconciliation_parameter",
+        "lts_log_finance_reconciliation_parameter",
+        "lts_topology_finance_reconciliation_ready",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "resource_id", "expected_data_key"),
     [

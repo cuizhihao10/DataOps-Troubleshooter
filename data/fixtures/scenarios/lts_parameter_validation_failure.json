@@ -1,0 +1,99 @@
+{
+  "scenario_id": "lts_parameter_validation_failure",
+  "title": "LTS 运行参数格式错误导致重试耗尽",
+  "description": "LTS 任务因合成 partition_date 参数格式不合法而在三次调度尝试后失败，上游依赖均已就绪。",
+  "components": ["lts"],
+  "expected_behavior": "系统应结合状态、错误日志和依赖反证定位参数校验失败，不得把已就绪的上游误报为根因。",
+  "tool_results": [
+    {
+      "tool_name": "lts.get_task_status",
+      "request": {
+        "resource_id": "lts_finance_reconciliation_daily",
+        "time_range": {
+          "start": "2026-07-13T01:00:00+08:00",
+          "end": "2026-07-13T02:00:00+08:00"
+        },
+        "scenario_id": "lts_parameter_validation_failure",
+        "trace_id": "trace_lts_parameter_validation_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "state": "FAILED",
+          "attempt": 3,
+          "max_attempts": 3,
+          "failure_category": "CONFIGURATION"
+        },
+        "evidence": [
+          {
+            "source_id": "lts_status_finance_reconciliation_parameter",
+            "content": "任务连续三次在启动阶段失败并耗尽重试，失败分类为 CONFIGURATION。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T02:01:00+08:00"
+      }
+    },
+    {
+      "tool_name": "lts.get_task_log",
+      "request": {
+        "resource_id": "lts_finance_reconciliation_daily",
+        "time_range": {
+          "start": "2026-07-13T01:00:00+08:00",
+          "end": "2026-07-13T02:00:00+08:00"
+        },
+        "scenario_id": "lts_parameter_validation_failure",
+        "trace_id": "trace_lts_parameter_validation_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "level": "ERROR",
+          "component_error_code": "INVALID_PARTITION_DATE",
+          "parameter_name": "partition_date",
+          "expected_format": "yyyy-MM-dd",
+          "received_value": "20260713"
+        },
+        "evidence": [
+          {
+            "source_id": "lts_log_finance_reconciliation_parameter",
+            "content": "启动校验拒绝 partition_date=20260713；该合成任务要求 yyyy-MM-dd 格式。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T02:01:05+08:00"
+      }
+    },
+    {
+      "tool_name": "lts.get_dependency_topology",
+      "request": {
+        "resource_id": "lts_finance_reconciliation_daily",
+        "time_range": {
+          "start": "2026-07-13T01:00:00+08:00",
+          "end": "2026-07-13T02:00:00+08:00"
+        },
+        "scenario_id": "lts_parameter_validation_failure",
+        "trace_id": "trace_lts_parameter_validation_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "upstream_ready": true,
+          "blocked_dependencies": [],
+          "ready_dependency_count": 2
+        },
+        "evidence": [
+          {
+            "source_id": "lts_topology_finance_reconciliation_ready",
+            "content": "两个合成上游依赖均已就绪，当前没有阻塞依赖。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T02:01:10+08:00"
+      }
+    }
+  ]
+}

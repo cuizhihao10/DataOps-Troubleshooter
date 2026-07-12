@@ -1,4 +1,4 @@
-"""用十八条 Golden Cases 验证诊断、补参、全源不可用、路径、冲突、记忆与 18/28 边界。
+"""用十九条 Golden Cases 验证诊断、参数反证、降级、路径、冲突、记忆与 19/28 边界。
 
 测试运行器从合成 Fixture 构造真实 ``ToolEvent``/``Evidence``，再通过生产 Pydantic 顶层结果契约
 进入评测器。Planner、Auditor 和报告文本是确定性脚本，因此这些数字只证明数据流与评分规则可
@@ -152,13 +152,13 @@ class FixtureBackedGoldenRunner:
 
 
 @pytest.mark.asyncio
-async def test_eighteen_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
-    """验证十八条案例命中诊断、补参、多来源失败、路径与安全契约，并保持 18/28 未完成标记。
+async def test_nineteen_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
+    """验证十九条案例命中诊断、LTS 参数反证、路径与安全契约，并保持 19/28 未完成标记。
 
     确定性基线预期意图、必要 Action、允许根因、关键来源、停止原因、引用、风险和安全降级全部
     命中；七个故意失败 Action 使尝试成功率低于一，成功响应冲突案例的三个调用则全部成功。覆盖标记
-    必须保持 false，防止 18 条通过被宣传为 28 条验收完成；全源不可用案例必须执行三类 LTS Action、
-    保持空 Evidence/根因并安全停止，部分证据案例则保留成功症状 Observation。
+    必须保持 false，防止 19 条通过被宣传为 28 条验收完成；参数案例必须同时引用错误日志与上游
+    已就绪反证，并使用 v2 因果路径；全源不可用案例仍须保持空 Evidence/根因并安全停止。
     """
 
     cases = load_golden_cases(GOLDEN_CASE_FILE)
@@ -168,12 +168,12 @@ async def test_eighteen_golden_cases_produce_versioned_measured_diagnosis_baseli
 
     assert report.contract_id == GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID
     assert report.metric_kind == "measured"
-    assert report.case_count == 18
+    assert report.case_count == 19
     assert report.target_case_count == 28
-    assert report.case_coverage_rate == pytest.approx(18 / 28)
+    assert report.case_coverage_rate == pytest.approx(19 / 28)
     assert report.target_coverage_complete is False
     assert report.category_case_counts == {
-        GoldenCaseCategory.SINGLE_COMPONENT: 4,
+        GoldenCaseCategory.SINGLE_COMPONENT: 5,
         GoldenCaseCategory.CROSS_COMPONENT: 4,
         GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 4,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
@@ -188,7 +188,7 @@ async def test_eighteen_golden_cases_produce_versioned_measured_diagnosis_baseli
     assert report.citation_completeness == 1
     assert report.unsupported_critical_claim_rate == 0
     assert report.duplicate_action_rate == 0
-    assert report.tool_attempt_success_rate == pytest.approx(44 / 51)
+    assert report.tool_attempt_success_rate == pytest.approx(47 / 54)
     assert report.risk_level_hit_rate == 1
     assert report.safe_degradation_rate == 1
     assert report.evidence_conflict_safe_resolution_rate == 1
@@ -291,6 +291,26 @@ async def test_eighteen_golden_cases_produce_versioned_measured_diagnosis_baseli
     assert unavailable_result.actual_stop_reason == "evidence_insufficient"
     assert unavailable_result.tool_attempt_success_rate == 0
     assert unavailable_result.safe_degradation_hit is True
+    parameter_result = next(
+        result
+        for result in report.cases
+        if result.case_id == "golden_lts_invalid_partition_parameter_single"
+    )
+    assert parameter_result.executed_tools == [
+        "lts.get_task_status",
+        "lts.get_task_log",
+        "lts.get_dependency_topology",
+    ]
+    assert parameter_result.observed_evidence_sources == [
+        "lts_status_finance_reconciliation_parameter",
+        "lts_log_finance_reconciliation_parameter",
+        "lts_topology_finance_reconciliation_ready",
+    ]
+    assert parameter_result.actual_top1_root_cause == "LTS 分区日期参数格式错误"
+    assert parameter_result.matched_fault_path_labels == [
+        "lts_parameter_validation_solution_chain"
+    ]
+    assert parameter_result.safe_degradation_hit is None
 
 
 @pytest.mark.asyncio
@@ -785,7 +805,12 @@ def _build_retrieved_paths(case: GoldenCaseSpec) -> list[RetrievedPath]:
             node_ids=requirement.required_node_ids,
             relation_types=list(requirement.required_relation_types),
             score=0.9,
-            source_ids=["synthetic_cross_chain_knowledge_v1"],
+            # 新增参数因果链来自 graph-seed:v2；旧路径保留 v1 来源，避免评测替身抹平知识演进。
+            source_ids=[
+                "synthetic_cross_chain_knowledge_v2"
+                if requirement.path_label == "lts_parameter_validation_solution_chain"
+                else "synthetic_cross_chain_knowledge_v1"
+            ],
         )
         for requirement in case.required_fault_paths
     ]

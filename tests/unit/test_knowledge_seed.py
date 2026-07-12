@@ -23,15 +23,15 @@ SEED_FILE = Path("data/knowledge/cross_chain_graph.json")
 def test_curated_seed_uses_approved_node_and_relation_contracts() -> None:
     """验证人工知识种子的版本、规模、类型白名单、来源跨度和向量阶段边界。
 
-    节点/边数量保护已评审图结构，枚举子集与 source_span 断言保证每项可追溯；所有 embedding
-    仍为空的断言刻意防止当前 lexical 切片被误称为已经完成 pgvector 语义召回。
+    节点/边数量保护已评审图结构，枚举子集与 source_span 断言保证每项可追溯；JSON 中 embedding
+    保持为空，要求启动流程通过可替换 Provider 生成向量，避免把某个向量空间硬编码进人工知识。
     """
 
     bundle = load_knowledge_seed(SEED_FILE)
 
-    assert bundle.seed_version == "graph-seed:v1"
-    assert len(bundle.nodes) == 11
-    assert len(bundle.edges) == 13
+    assert bundle.seed_version == "graph-seed:v2"
+    assert len(bundle.nodes) == 14
+    assert len(bundle.edges) == 15
     assert {node.node_type for node in bundle.nodes} <= set(KnowledgeNodeType)
     assert {edge.relation_type for edge in bundle.edges} <= set(KnowledgeRelationType)
     assert all(node.source_span for node in bundle.nodes)
@@ -54,6 +54,31 @@ def test_cross_component_seed_contains_a_two_hop_three_component_path() -> None:
     assert first.from_node_id == "component_lts"
     assert first.to_node_id == second.from_node_id == "component_bds"
     assert second.to_node_id == "component_flashsync"
+
+
+def test_single_component_seed_contains_lts_parameter_cause_and_solution_path() -> None:
+    """验证 v2 种子新增的 LTS 参数故障路径具有正确方向和独立来源。
+
+    症状必须先以 CAUSED_BY 指向参数根因，再由根因以 RESOLVED_BY 指向校验方案；两条新增边使用
+    v2 source，避免修改旧跨组件知识的出处后丢失演进记录。该静态门禁在 PostgreSQL 递归查询前
+    捕获倒边、错关系或复制旧 source_id 的数据错误。
+    """
+
+    bundle = load_knowledge_seed(SEED_FILE)
+    edges = {edge.edge_id: edge for edge in bundle.edges}
+
+    cause = edges["edge_lts_parameter_failure_caused_by_invalid_format"]
+    solution = edges["edge_lts_invalid_parameter_resolved_by_validation"]
+    assert cause.from_node_id == "symptom_lts_parameter_validation_failure"
+    assert (
+        cause.to_node_id
+        == solution.from_node_id
+        == "root_cause_lts_invalid_partition_parameter"
+    )
+    assert solution.to_node_id == "solution_validate_lts_runtime_parameters"
+    assert cause.relation_type is KnowledgeRelationType.CAUSED_BY
+    assert solution.relation_type is KnowledgeRelationType.RESOLVED_BY
+    assert {cause.source_id, solution.source_id} == {"synthetic_cross_chain_knowledge_v2"}
 
 
 def test_seed_rejects_dangling_edge_reference() -> None:
