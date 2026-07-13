@@ -805,6 +805,76 @@ async def test_customer_profile_schema_failure_propagates_across_real_mcp_protoc
 
 
 @pytest.mark.asyncio
+async def test_checkpoint_regression_propagates_to_bds_across_real_mcp_protocol() -> None:
+    """验证 1200 位点回退经真实 MCP 映射为 BDS 同量输入缺失和高风险同步根因。
+
+    六项调用必须证明 BDS 分区存在、资源正常且倾斜不显著，但输入和物化位点各缺 1200；FlashSync
+    的当前/提交位点差、积压、旧检查点日志和目标缺失也必须同为 1200 且零重复。这个多源闭环防止
+    仅凭 BDS 缺数猜测缺分区，或仅凭同步延迟就宣称检查点回退。
+    """
+
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    calls = (
+        ("bds.get_task_status", "bds_customer_status_snapshot_hourly"),
+        ("bds.get_task_log", "bds_customer_status_snapshot_hourly"),
+        ("bds.get_table_info", "ods_customer_status_delta"),
+        ("flashsync.get_sync_delay", "ods_customer_status_delta"),
+        ("flashsync.get_sync_log", "ods_customer_status_delta"),
+        ("flashsync.check_consistency", "ods_customer_status_delta"),
+    )
+    observations = {}
+    for tool_name, resource_id in calls:
+        # 同一合成窗口使用独立 trace，使每个跨组件 Observation 可单独审计且不会被视为重复 Action。
+        observations[tool_name] = await executor.execute(
+            _action(
+                "cross_bds_flashsync_checkpoint_regression",
+                resource_id,
+                f"trace_checkpoint_cross_{tool_name.replace('.', '_')}",
+                tool_name=tool_name,
+            )
+        )
+
+    assert all(observation.response.ok for observation in observations.values())
+    bds_status = observations["bds.get_task_status"].response.data
+    bds_log = observations["bds.get_task_log"].response.data
+    table = observations["bds.get_table_info"].response.data
+    delay = observations["flashsync.get_sync_delay"].response.data
+    sync_log = observations["flashsync.get_sync_log"].response.data
+    consistency = observations["flashsync.check_consistency"].response.data
+    assert bds_status["cpu_percent"] < 50
+    assert bds_status["memory_percent"] < 50
+    assert bds_log["skew_ratio"] < 1.2
+    assert table["latest_partition"] == table["expected_partition"]
+    assert sync_log["component_error_code"] == "CHECKPOINT_REGRESSION"
+    assert sync_log["automatic_replay_blocked"] is True
+    assert consistency["duplicate_target_records"] == 0
+    assert (
+        bds_status["missing_records"]
+        == bds_log["offset_gap"]
+        == table["missing_records"]
+        == table["expected_offset"] - table["materialized_offset"]
+        == delay["offset_gap"]
+        == delay["last_committed_offset"] - delay["current_offset"]
+        == delay["backlog_records"]
+        == sync_log["previous_committed_offset"] - sync_log["restored_snapshot_offset"]
+        == consistency["missing_target_records"]
+        == consistency["source_offset"] - consistency["target_offset"]
+        == 1200
+    )
+    assert {
+        observation.response.evidence[0].source_id
+        for observation in observations.values()
+    } == {
+        "bds_status_customer_status_checkpoint_cross",
+        "bds_log_customer_status_checkpoint_cross",
+        "bds_table_customer_status_checkpoint_cross",
+        "flashsync_delay_customer_status_checkpoint_cross",
+        "flashsync_log_customer_status_checkpoint_cross",
+        "flashsync_consistency_customer_status_checkpoint_cross",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "expected_data_key"),
     [

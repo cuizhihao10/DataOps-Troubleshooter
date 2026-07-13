@@ -1,4 +1,4 @@
-"""用二十三条 Golden Cases 验证诊断、Schema 传播、降级、路径、冲突、记忆与 23/28 边界。
+"""用二十四条 Golden Cases 验证诊断、检查点传播、降级、路径、冲突、记忆与 24/28 边界。
 
 测试运行器从合成 Fixture 构造真实 ``ToolEvent``/``Evidence``，再通过生产 Pydantic 顶层结果契约
 进入评测器。Planner、Auditor 和报告文本是确定性脚本，因此这些数字只证明数据流与评分规则可
@@ -152,13 +152,13 @@ class FixtureBackedGoldenRunner:
 
 
 @pytest.mark.asyncio
-async def test_twenty_three_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
-    """验证二十三条案例命中诊断、三组件 Schema 传播与路径契约，并保持 23/28 未完成标记。
+async def test_twenty_four_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
+    """验证二十四条案例命中诊断、BDS→FlashSync 检查点传播与路径契约，并保持 24/28 标记。
 
     确定性基线预期意图、必要 Action、允许根因、关键来源、停止原因、引用、风险和安全降级全部
     命中；七个故意失败 Action 使尝试成功率低于一，成功响应冲突案例的三个调用则全部成功。覆盖标记
-    必须保持 false，防止 23 条通过被宣传为 28 条验收完成；新跨组件案例必须在六项 Action 中对齐
-    600 条缺口并使用 v6 任务依赖路径，单组件 Schema 案例继续使用 v5 因果知识。
+    必须保持 false，防止 24 条通过被宣传为 28 条验收完成；新案例必须在六项 Action 中对齐 1200
+    位点/记录缺口、排除 BDS 资源与分区问题，并引用 v7 交付路径和 v4 高风险恢复知识。
     """
 
     cases = load_golden_cases(GOLDEN_CASE_FILE)
@@ -168,13 +168,13 @@ async def test_twenty_three_golden_cases_produce_versioned_measured_diagnosis_ba
 
     assert report.contract_id == GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID
     assert report.metric_kind == "measured"
-    assert report.case_count == 23
+    assert report.case_count == 24
     assert report.target_case_count == 28
-    assert report.case_coverage_rate == pytest.approx(23 / 28)
+    assert report.case_coverage_rate == pytest.approx(24 / 28)
     assert report.target_coverage_complete is False
     assert report.category_case_counts == {
         GoldenCaseCategory.SINGLE_COMPONENT: 8,
-        GoldenCaseCategory.CROSS_COMPONENT: 5,
+        GoldenCaseCategory.CROSS_COMPONENT: 6,
         GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 4,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
         GoldenCaseCategory.MEMORY_RECALL: 3,
@@ -188,7 +188,7 @@ async def test_twenty_three_golden_cases_produce_versioned_measured_diagnosis_ba
     assert report.citation_completeness == 1
     assert report.unsupported_critical_claim_rate == 0
     assert report.duplicate_action_rate == 0
-    assert report.tool_attempt_success_rate == pytest.approx(62 / 69)
+    assert report.tool_attempt_success_rate == pytest.approx(68 / 75)
     assert report.risk_level_hit_rate == 1
     assert report.safe_degradation_rate == 1
     assert report.evidence_conflict_safe_resolution_rate == 1
@@ -397,6 +397,34 @@ async def test_twenty_three_golden_cases_produce_versioned_measured_diagnosis_ba
         "flashsync_schema_mapping_solution_chain",
     ]
     assert schema_cross_result.actual_risk_level is RiskLevel.MEDIUM
+    checkpoint_cross_result = next(
+        result
+        for result in report.cases
+        if result.case_id == "golden_cross_bds_blocked_by_flashsync_checkpoint_regression"
+    )
+    assert checkpoint_cross_result.executed_tools == [
+        "bds.get_task_status",
+        "bds.get_task_log",
+        "bds.get_table_info",
+        "flashsync.get_sync_delay",
+        "flashsync.get_sync_log",
+        "flashsync.check_consistency",
+    ]
+    assert checkpoint_cross_result.observed_evidence_sources == [
+        "bds_status_customer_status_checkpoint_cross",
+        "bds_log_customer_status_checkpoint_cross",
+        "bds_table_customer_status_checkpoint_cross",
+        "flashsync_delay_customer_status_checkpoint_cross",
+        "flashsync_log_customer_status_checkpoint_cross",
+        "flashsync_consistency_customer_status_checkpoint_cross",
+    ]
+    assert checkpoint_cross_result.actual_top1_root_cause == "FlashSync 检查点位点回退"
+    assert checkpoint_cross_result.matched_fault_path_labels == [
+        "customer_status_checkpoint_delivery_chain",
+        "customer_status_checkpoint_manifest_chain",
+        "flashsync_checkpoint_regression_solution_chain",
+    ]
+    assert checkpoint_cross_result.actual_risk_level is RiskLevel.HIGH
 
 
 @pytest.mark.asyncio
@@ -909,6 +937,12 @@ def _build_retrieved_paths(case: GoldenCaseSpec) -> list[RetrievedPath]:
                     ),
                     "customer_profile_schema_manifest_chain": (
                         "synthetic_cross_chain_knowledge_v6"
+                    ),
+                    "customer_status_checkpoint_delivery_chain": (
+                        "synthetic_cross_chain_knowledge_v7"
+                    ),
+                    "customer_status_checkpoint_manifest_chain": (
+                        "synthetic_cross_chain_knowledge_v7"
                     ),
                 }.get(requirement.path_label, "synthetic_cross_chain_knowledge_v1")
             ],

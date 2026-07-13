@@ -34,8 +34,8 @@ async def test_health_reports_validated_contract_baseline() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ok"
-    assert payload["fixtures_loaded"] == 13
-    assert payload["golden_cases_loaded"] == 23
+    assert payload["fixtures_loaded"] == 14
+    assert payload["golden_cases_loaded"] == 24
     assert payload["mcp_tools_available"] == sorted(tool.value for tool in ToolName)
     assert payload["capabilities_available"] == [name.value for name in CapabilityName]
     assert payload["database_status"] == "disabled"

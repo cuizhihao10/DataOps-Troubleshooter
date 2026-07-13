@@ -1,6 +1,6 @@
 """验证场景注册、Golden Case 引用、证据冲突标注和失败 Fixture 覆盖。
 
-测试确保十三个场景可重复加载、九工具主场景完整、错误类别齐全，并拒绝重复 scenario_id
+测试确保十四个场景可重复加载、九工具主场景完整、错误类别齐全，并拒绝重复 scenario_id
 和工具请求引用其他场景等会破坏可复现性的输入。
 """
 
@@ -28,8 +28,8 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     registry = FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
     golden_cases = load_golden_cases(GOLDEN_CASE_FILE)
 
-    assert len(registry) == 13
-    assert len(golden_cases) == 23
+    assert len(registry) == 14
+    assert len(golden_cases) == 24
     assert {case.scenario_id for case in golden_cases} == set(registry.scenario_ids)
     assert {case.contract_id for case in golden_cases} == {"golden-case:v7"}
     category_counts = {
@@ -38,7 +38,7 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     }
     assert category_counts == {
         GoldenCaseCategory.SINGLE_COMPONENT: 8,
-        GoldenCaseCategory.CROSS_COMPONENT: 5,
+        GoldenCaseCategory.CROSS_COMPONENT: 6,
         GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 4,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
         GoldenCaseCategory.MEMORY_RECALL: 3,
@@ -201,6 +201,30 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
         "task_flashsync_customer_profile_delta",
     ]
     assert len(schema_cross_case.required_evidence_sources) == 6
+    checkpoint_cross_case = next(
+        case
+        for case in golden_cases
+        if case.case_id == "golden_cross_bds_blocked_by_flashsync_checkpoint_regression"
+    )
+    assert checkpoint_cross_case.required_tools == [
+        ToolName.BDS_GET_TASK_STATUS,
+        ToolName.BDS_GET_TASK_LOG,
+        ToolName.BDS_GET_TABLE_INFO,
+        ToolName.FLASHSYNC_GET_SYNC_DELAY,
+        ToolName.FLASHSYNC_GET_SYNC_LOG,
+        ToolName.FLASHSYNC_CHECK_CONSISTENCY,
+    ]
+    assert [path.path_label for path in checkpoint_cross_case.required_fault_paths] == [
+        "customer_status_checkpoint_delivery_chain",
+        "customer_status_checkpoint_manifest_chain",
+        "flashsync_checkpoint_regression_solution_chain",
+    ]
+    assert checkpoint_cross_case.required_fault_paths[0].required_node_ids == [
+        "task_bds_customer_status_snapshot",
+        "task_flashsync_customer_status_delta",
+        "dataset_ods_customer_status_delta",
+    ]
+    assert checkpoint_cross_case.expected_risk_level.value == "high"
 
 
 def test_main_scenario_exercises_all_nine_tool_contracts() -> None:

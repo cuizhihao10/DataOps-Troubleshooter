@@ -1,6 +1,6 @@
 {
-  "seed_version": "graph-seed:v6",
-  "source_id": "synthetic_cross_chain_knowledge_v6",
+  "seed_version": "graph-seed:v7",
+  "source_id": "synthetic_cross_chain_knowledge_v7",
   "nodes": [
     {
       "node_id": "component_lts",
@@ -298,6 +298,39 @@
       "source_span": "ods_customer_profile_delta 是 FlashSync 与 BDS 之间的显式数据边界。",
       "reliability": 1.0,
       "embedding": null
+    },
+    {
+      "node_id": "task_bds_customer_status_snapshot",
+      "node_type": "task",
+      "name": "bds_customer_status_snapshot_hourly",
+      "content": "BDS 客户状态快照作业消费 FlashSync 同步的客户状态增量，并在输入数量不足时停在源数据校验。",
+      "aliases": ["customer status snapshot", "BDS 客户状态快照"],
+      "source_id": "synthetic_cross_chain_knowledge_v7",
+      "source_span": "BDS 客户状态快照作业依赖 FlashSync 客户状态增量任务及其数据集。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "task_flashsync_customer_status_delta",
+      "node_type": "task",
+      "name": "flashsync_customer_status_delta",
+      "content": "FlashSync 客户状态增量任务通过检查点记录位点并生成 ods_customer_status_delta。",
+      "aliases": ["customer status sync", "FlashSync 客户状态增量"],
+      "source_id": "synthetic_cross_chain_knowledge_v7",
+      "source_span": "FlashSync 客户状态增量任务为 BDS 快照作业提供输入。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "dataset_ods_customer_status_delta",
+      "node_type": "dataset",
+      "name": "ods_customer_status_delta",
+      "content": "客户状态增量数据集由 FlashSync 生成并被 BDS 客户状态快照作业消费。",
+      "aliases": ["customer status delta dataset"],
+      "source_id": "synthetic_cross_chain_knowledge_v7",
+      "source_span": "ods_customer_status_delta 是 FlashSync 与 BDS 之间的显式数据交接边界。",
+      "reliability": 1.0,
+      "embedding": null
     }
   ],
   "edges": [
@@ -561,6 +594,60 @@
       "weight": 1.0,
       "source_id": "synthetic_cross_chain_knowledge_v6",
       "source_span": "客户画像增量任务使用旧映射消费新 Schema 时表现为记录拒绝。"
+    },
+    {
+      "edge_id": "edge_bds_customer_status_runs_on",
+      "from_node_id": "task_bds_customer_status_snapshot",
+      "to_node_id": "component_bds",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v7",
+      "source_span": "bds_customer_status_snapshot_hourly 由 BDS 计算组件运行。"
+    },
+    {
+      "edge_id": "edge_flashsync_customer_status_runs_on",
+      "from_node_id": "task_flashsync_customer_status_delta",
+      "to_node_id": "component_flashsync",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v7",
+      "source_span": "flashsync_customer_status_delta 由 FlashSync 同步组件运行。"
+    },
+    {
+      "edge_id": "edge_bds_customer_status_depends_flashsync",
+      "from_node_id": "task_bds_customer_status_snapshot",
+      "to_node_id": "task_flashsync_customer_status_delta",
+      "relation_type": "DEPENDS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v7",
+      "source_span": "BDS 客户状态快照作业依赖 FlashSync 客户状态增量同步完成。"
+    },
+    {
+      "edge_id": "edge_flashsync_customer_status_produces_dataset",
+      "from_node_id": "task_flashsync_customer_status_delta",
+      "to_node_id": "dataset_ods_customer_status_delta",
+      "relation_type": "PRODUCES",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v7",
+      "source_span": "FlashSync 客户状态增量任务生成 ods_customer_status_delta。"
+    },
+    {
+      "edge_id": "edge_bds_customer_status_consumes_dataset",
+      "from_node_id": "task_bds_customer_status_snapshot",
+      "to_node_id": "dataset_ods_customer_status_delta",
+      "relation_type": "CONSUMES",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v7",
+      "source_span": "BDS 客户状态快照作业消费 ods_customer_status_delta。"
+    },
+    {
+      "edge_id": "edge_flashsync_customer_status_manifests_checkpoint_lag",
+      "from_node_id": "task_flashsync_customer_status_delta",
+      "to_node_id": "symptom_flashsync_checkpoint_lag",
+      "relation_type": "MANIFESTS_AS",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v7",
+      "source_span": "客户状态同步任务加载旧检查点时表现为位点落后和记录积压。"
     }
   ]
 }

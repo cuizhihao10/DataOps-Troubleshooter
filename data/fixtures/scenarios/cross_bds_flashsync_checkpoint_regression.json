@@ -1,0 +1,204 @@
+{
+  "scenario_id": "cross_bds_flashsync_checkpoint_regression",
+  "title": "FlashSync 检查点回退导致 BDS 输入缺失",
+  "description": "独立的 BDS 到 FlashSync 合成故障环境：同步任务重启后加载旧检查点，位点回退 1200 并产生同量目标缺失，使 BDS 停在源数据校验阶段。",
+  "components": ["bds", "flashsync"],
+  "expected_behavior": "诊断应排除 BDS 资源饱和、缺分区和数据倾斜，沿任务与数据集关系追到 FlashSync 检查点回退，并把恢复标为需要人工确认的高风险方案。",
+  "tool_results": [
+    {
+      "tool_name": "bds.get_task_status",
+      "request": {
+        "resource_id": "bds_customer_status_snapshot_hourly",
+        "time_range": {
+          "start": "2026-07-13T09:00:00+08:00",
+          "end": "2026-07-13T11:00:00+08:00"
+        },
+        "scenario_id": "cross_bds_flashsync_checkpoint_regression",
+        "trace_id": "trace_bds_flashsync_checkpoint_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "status": "running",
+          "stage": "source_validation",
+          "duration_seconds": 3600,
+          "cpu_percent": 22,
+          "memory_percent": 28,
+          "expected_records": 8000,
+          "available_records": 6800,
+          "missing_records": 1200
+        },
+        "evidence": [
+          {
+            "source_id": "bds_status_customer_status_checkpoint_cross",
+            "content": "BDS 停在源数据校验阶段，8000 条预期输入仅到达 6800 条，CPU 与内存未饱和。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T11:01:00+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_task_log",
+      "request": {
+        "resource_id": "bds_customer_status_snapshot_hourly",
+        "time_range": {
+          "start": "2026-07-13T09:00:00+08:00",
+          "end": "2026-07-13T11:00:00+08:00"
+        },
+        "scenario_id": "cross_bds_flashsync_checkpoint_regression",
+        "trace_id": "trace_bds_flashsync_checkpoint_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "warning": "SOURCE_OFFSET_GAP",
+          "source_sync_task": "flashsync_customer_status_delta",
+          "expected_offset": 88420,
+          "observed_offset": 87220,
+          "offset_gap": 1200,
+          "skew_ratio": 1.03
+        },
+        "evidence": [
+          {
+            "source_id": "bds_log_customer_status_checkpoint_cross",
+            "content": "BDS 日志显示 FlashSync 输入位点落后 1200，数据倾斜比例仅 1.03。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T11:01:05+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_table_info",
+      "request": {
+        "resource_id": "ods_customer_status_delta",
+        "time_range": {
+          "start": "2026-07-13T09:00:00+08:00",
+          "end": "2026-07-13T11:00:00+08:00"
+        },
+        "scenario_id": "cross_bds_flashsync_checkpoint_regression",
+        "trace_id": "trace_bds_flashsync_checkpoint_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "latest_partition": "2026-07-13-10",
+          "expected_partition": "2026-07-13-10",
+          "row_count": 6800,
+          "expected_row_count": 8000,
+          "missing_records": 1200,
+          "materialized_offset": 87220,
+          "expected_offset": 88420
+        },
+        "evidence": [
+          {
+            "source_id": "bds_table_customer_status_checkpoint_cross",
+            "content": "输入分区已按时建立，但只有 6800/8000 条，物化位点 87220 比期望位点 88420 落后 1200。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T11:01:10+08:00"
+      }
+    },
+    {
+      "tool_name": "flashsync.get_sync_delay",
+      "request": {
+        "resource_id": "ods_customer_status_delta",
+        "time_range": {
+          "start": "2026-07-13T09:00:00+08:00",
+          "end": "2026-07-13T11:00:00+08:00"
+        },
+        "scenario_id": "cross_bds_flashsync_checkpoint_regression",
+        "trace_id": "trace_bds_flashsync_checkpoint_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "delay_seconds": 2400,
+          "backlog_records": 1200,
+          "throughput_per_second": 0,
+          "current_offset": 87220,
+          "last_committed_offset": 88420,
+          "offset_gap": 1200
+        },
+        "evidence": [
+          {
+            "source_id": "flashsync_delay_customer_status_checkpoint_cross",
+            "content": "FlashSync 当前位点 87220 比已提交位点 88420 落后 1200，同时积压 1200 条且吞吐为零。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T11:01:15+08:00"
+      }
+    },
+    {
+      "tool_name": "flashsync.get_sync_log",
+      "request": {
+        "resource_id": "ods_customer_status_delta",
+        "time_range": {
+          "start": "2026-07-13T09:00:00+08:00",
+          "end": "2026-07-13T11:00:00+08:00"
+        },
+        "scenario_id": "cross_bds_flashsync_checkpoint_regression",
+        "trace_id": "trace_bds_flashsync_checkpoint_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "component_error_code": "CHECKPOINT_REGRESSION",
+          "restored_snapshot_offset": 87220,
+          "previous_committed_offset": 88420,
+          "checkpoint_source": "synthetic_snapshot_before_restart",
+          "automatic_replay_blocked": true
+        },
+        "evidence": [
+          {
+            "source_id": "flashsync_log_customer_status_checkpoint_cross",
+            "content": "任务重启后加载旧检查点 87220，低于此前提交位点 88420；系统阻止未经校验的自动重放。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T11:01:20+08:00"
+      }
+    },
+    {
+      "tool_name": "flashsync.check_consistency",
+      "request": {
+        "resource_id": "ods_customer_status_delta",
+        "time_range": {
+          "start": "2026-07-13T09:00:00+08:00",
+          "end": "2026-07-13T11:00:00+08:00"
+        },
+        "scenario_id": "cross_bds_flashsync_checkpoint_regression",
+        "trace_id": "trace_bds_flashsync_checkpoint_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "consistent": false,
+          "difference_count": 1200,
+          "missing_target_records": 1200,
+          "duplicate_target_records": 0,
+          "source_offset": 88420,
+          "target_offset": 87220,
+          "sampled_records": 8000
+        },
+        "evidence": [
+          {
+            "source_id": "flashsync_consistency_customer_status_checkpoint_cross",
+            "content": "目标端缺少 1200 条且无重复，源目标 offset 差同样为 1200。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T11:01:25+08:00"
+      }
+    }
+  ]
+}

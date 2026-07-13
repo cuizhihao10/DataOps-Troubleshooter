@@ -29,9 +29,9 @@ def test_curated_seed_uses_approved_node_and_relation_contracts() -> None:
 
     bundle = load_knowledge_seed(SEED_FILE)
 
-    assert bundle.seed_version == "graph-seed:v6"
-    assert len(bundle.nodes) == 27
-    assert len(bundle.edges) == 29
+    assert bundle.seed_version == "graph-seed:v7"
+    assert len(bundle.nodes) == 30
+    assert len(bundle.edges) == 35
     assert {node.node_type for node in bundle.nodes} <= set(KnowledgeNodeType)
     assert {edge.relation_type for edge in bundle.edges} <= set(KnowledgeRelationType)
     assert all(node.source_span for node in bundle.nodes)
@@ -189,6 +189,39 @@ def test_cross_component_seed_contains_customer_profile_task_and_dataset_topolog
         consumes.source_id,
         manifests.source_id,
     } == {"synthetic_cross_chain_knowledge_v6"}
+
+
+def test_cross_component_seed_contains_customer_status_checkpoint_topology() -> None:
+    """验证 v7 客户状态知识把 BDS 依赖、数据交接和检查点症状接成可扩展路径。
+
+    BDS 任务必须 DEPENDS_ON FlashSync，后者 PRODUCES BDS 同时 CONSUMES 的数据集；同步任务还需
+    MANIFESTS_AS 既有检查点落后症状。该测试保证 v7 只增加事实环境拓扑并复用 v4 因果知识，不会
+    复制一套同义根因，也防止 Golden 标注引用没有进入 PostgreSQL 的虚构节点。
+    """
+
+    bundle = load_knowledge_seed(SEED_FILE)
+    edges = {edge.edge_id: edge for edge in bundle.edges}
+
+    dependency = edges["edge_bds_customer_status_depends_flashsync"]
+    produces = edges["edge_flashsync_customer_status_produces_dataset"]
+    consumes = edges["edge_bds_customer_status_consumes_dataset"]
+    manifests = edges["edge_flashsync_customer_status_manifests_checkpoint_lag"]
+    assert dependency.from_node_id == "task_bds_customer_status_snapshot"
+    assert dependency.to_node_id == produces.from_node_id == manifests.from_node_id
+    assert dependency.to_node_id == "task_flashsync_customer_status_delta"
+    assert produces.to_node_id == consumes.to_node_id == "dataset_ods_customer_status_delta"
+    assert consumes.from_node_id == dependency.from_node_id
+    assert manifests.to_node_id == "symptom_flashsync_checkpoint_lag"
+    assert dependency.relation_type is KnowledgeRelationType.DEPENDS_ON
+    assert produces.relation_type is KnowledgeRelationType.PRODUCES
+    assert consumes.relation_type is KnowledgeRelationType.CONSUMES
+    assert manifests.relation_type is KnowledgeRelationType.MANIFESTS_AS
+    assert {
+        dependency.source_id,
+        produces.source_id,
+        consumes.source_id,
+        manifests.source_id,
+    } == {"synthetic_cross_chain_knowledge_v7"}
 
 
 def test_seed_rejects_dangling_edge_reference() -> None:

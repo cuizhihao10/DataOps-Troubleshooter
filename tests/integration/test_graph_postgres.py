@@ -70,14 +70,14 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
             await session.commit()
 
             node_count, edge_count = await repository.count_graph()
-            assert node_count == 27
-            assert edge_count == 29
+            assert node_count == 30
+            assert edge_count == 35
             assert (
                 await repository.count_embedded_nodes(
                     provider_id=embedding_provider.provider_id,
                     dimensions=embedding_provider.dimensions,
                 )
-                == 27
+                == 30
             )
 
             # 直接绕过 Pydantic 篡改维度，确认数据库 CheckConstraint 仍能拒绝不兼容向量元数据。
@@ -276,6 +276,52 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
             ]
             assert customer_schema_path.depth == 2
 
+            # v7 从 BDS 客户状态任务出发，必须沿 DEPENDS_ON→PRODUCES 到达同步数据集；该路径直接
+            # 对应 Golden 的 BDS→FlashSync 交付链，不能由通用组件边或相似文本替代。
+            customer_status_result = await service.retrieve(
+                "bds_customer_status_snapshot_hourly",
+                seed_limit=5,
+                max_hops=2,
+            )
+            customer_status_path = next(
+                path
+                for path in customer_status_result.paths
+                if [node.node_id for node in path.nodes]
+                == [
+                    "task_bds_customer_status_snapshot",
+                    "task_flashsync_customer_status_delta",
+                    "dataset_ods_customer_status_delta",
+                ]
+            )
+            assert [edge.relation_type.value for edge in customer_status_path.edges] == [
+                "DEPENDS_ON",
+                "PRODUCES",
+            ]
+            assert customer_status_path.depth == 2
+
+            # 从同步任务再验证 MANIFESTS_AS→CAUSED_BY，使 v7 任务拓扑接入 v4 检查点根因；如果只
+            # 新增任务和数据集而缺这条连接，跨组件报告无法用图解释输入缺失的直接原因。
+            checkpoint_manifest_result = await service.retrieve(
+                "flashsync_customer_status_delta",
+                seed_limit=5,
+                max_hops=2,
+            )
+            checkpoint_manifest_path = next(
+                path
+                for path in checkpoint_manifest_result.paths
+                if [node.node_id for node in path.nodes]
+                == [
+                    "task_flashsync_customer_status_delta",
+                    "symptom_flashsync_checkpoint_lag",
+                    "root_cause_flashsync_checkpoint_regression",
+                ]
+            )
+            assert [edge.relation_type.value for edge in checkpoint_manifest_path.edges] == [
+                "MANIFESTS_AS",
+                "CAUSED_BY",
+            ]
+            assert checkpoint_manifest_path.depth == 2
+
             # 使用同一查询和预算运行 vector-only/vector+graph，结构化记录图扩展的实测增益。
             ablation_case = load_graph_ablation_cases(
                 Path("data/evals/graphrag_ablation_cases.json")
@@ -317,8 +363,8 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
             assert causal_path.evidence_id == causal_path.path_id
             # 固定 Provider/seed/预算下锁定当前实测快照，使文档中的字节数和省略数量不能在图扩展后
             # 静默漂移；若知识内容合理变化，应重跑本测试并同步解释新候选排序，而不是放宽断言。
-            assert evidence_bundle.used_bytes == 4962
-            assert len(evidence_bundle.selected_nodes) == 7
+            assert evidence_bundle.used_bytes == 5881
+            assert len(evidence_bundle.selected_nodes) == 8
             assert len(evidence_bundle.selected_paths) == 4
             assert len(evidence_bundle.omitted_path_ids) == 6
             assert evidence_bundle.used_bytes <= evidence_bundle.budget.max_bytes

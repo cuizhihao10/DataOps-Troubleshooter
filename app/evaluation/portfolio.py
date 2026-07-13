@@ -21,8 +21,8 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-PORTFOLIO_EVAL_MANIFEST_CONTRACT_ID = "portfolio-eval-manifest:v17"
-PORTFOLIO_EVAL_RUN_CONTRACT_ID = "portfolio-eval-run:v17"
+PORTFOLIO_EVAL_MANIFEST_CONTRACT_ID = "portfolio-eval-manifest:v18"
+PORTFOLIO_EVAL_RUN_CONTRACT_ID = "portfolio-eval-run:v18"
 DEFAULT_MANIFEST_PATH = Path("data/evals/portfolio_eval_manifest.json")
 _V1_REQUIRED_SUITE_IDS = {
     "graphrag_ablation",
@@ -49,6 +49,7 @@ _REQUIRED_SUITE_IDS_BY_CONTRACT = {
     "portfolio-eval-manifest:v15": _V2_REQUIRED_SUITE_IDS,
     "portfolio-eval-manifest:v16": _V2_REQUIRED_SUITE_IDS,
     "portfolio-eval-manifest:v17": _V2_REQUIRED_SUITE_IDS,
+    "portfolio-eval-manifest:v18": _V2_REQUIRED_SUITE_IDS,
 }
 _GOLDEN_SOURCE_CONTRACT_BY_MANIFEST = {
     "portfolio-eval-manifest:v2": "golden-diagnosis-eval:v1",
@@ -67,6 +68,7 @@ _GOLDEN_SOURCE_CONTRACT_BY_MANIFEST = {
     "portfolio-eval-manifest:v15": "golden-diagnosis-eval:v14",
     "portfolio-eval-manifest:v16": "golden-diagnosis-eval:v15",
     "portfolio-eval-manifest:v17": "golden-diagnosis-eval:v16",
+    "portfolio-eval-manifest:v18": "golden-diagnosis-eval:v17",
 }
 _GOLDEN_COVERAGE_VALUE_BY_MANIFEST = {
     "portfolio-eval-manifest:v2": 0.1786,
@@ -85,6 +87,7 @@ _GOLDEN_COVERAGE_VALUE_BY_MANIFEST = {
     "portfolio-eval-manifest:v15": 0.75,
     "portfolio-eval-manifest:v16": 0.7857,
     "portfolio-eval-manifest:v17": 0.8214,
+    "portfolio-eval-manifest:v18": 0.8571,
 }
 _GOLDEN_V2_METRIC_IDS = {
     "golden_case_coverage",
@@ -188,6 +191,13 @@ _GOLDEN_REQUIRED_METRIC_IDS_BY_MANIFEST = {
         "golden_realtime_priority_pass",
         "golden_evidence_conflict_safe_resolution",
     },
+    "portfolio-eval-manifest:v18": _GOLDEN_V2_METRIC_IDS
+    | {
+        "golden_fault_path_completeness",
+        "golden_history_recall_coverage",
+        "golden_realtime_priority_pass",
+        "golden_evidence_conflict_safe_resolution",
+    },
 }
 _TEST_TARGET = re.compile(r"^tests/[a-zA-Z0-9_./-]+\.py(?:::[a-zA-Z0-9_\[\]-]+)?$")
 
@@ -283,8 +293,9 @@ class PortfolioEvalManifest(BaseModel):
     LTS→BDS 资源耗尽事实环境；v10 增加零工具补参；v11 增加症状工具成功但因果日志缺失；v12
     增加 LTS 状态、日志和拓扑全部不可用案例；v13 增加 LTS 参数校验失败及其因果路径；v14 增加
     BDS 数据倾斜、正常总量反证及解决路径；v15 增加 FlashSync 检查点回退；v16 增加 Schema 映射
-    滞后并补齐单组件配额；v17 增加同一 Schema 故障向 BDS/LTS 传播的独立三组件链。版本与精确
-    suite、Golden 来源和覆盖快照绑定，旧 JSON 不会被静默解释。
+    滞后并补齐单组件配额；v17 增加同一 Schema 故障向 BDS/LTS 传播的独立三组件链；v18 增加
+    FlashSync 检查点回退向 BDS 传播的高风险链。版本与精确 suite、Golden 来源和覆盖快照绑定，
+    旧 JSON 不会被静默解释。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -307,6 +318,7 @@ class PortfolioEvalManifest(BaseModel):
         "portfolio-eval-manifest:v15",
         "portfolio-eval-manifest:v16",
         "portfolio-eval-manifest:v17",
+        "portfolio-eval-manifest:v18",
     ]
     suites: list[PortfolioSuiteSpec] = Field(min_length=4)
 
@@ -431,7 +443,7 @@ class PortfolioEvalRunReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    contract_id: Literal["portfolio-eval-run:v17"]
+    contract_id: Literal["portfolio-eval-run:v18"]
     manifest_contract_id: Literal[
         "portfolio-eval-manifest:v1",
         "portfolio-eval-manifest:v2",
@@ -450,6 +462,7 @@ class PortfolioEvalRunReport(BaseModel):
         "portfolio-eval-manifest:v15",
         "portfolio-eval-manifest:v16",
         "portfolio-eval-manifest:v17",
+        "portfolio-eval-manifest:v18",
     ]
     metric_kind: Literal["measured"] = "measured"
     suites: list[PortfolioSuiteRun] = Field(min_length=4)
