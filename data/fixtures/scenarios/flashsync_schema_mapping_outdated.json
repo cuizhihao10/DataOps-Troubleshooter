@@ -1,0 +1,104 @@
+{
+  "scenario_id": "flashsync_schema_mapping_outdated",
+  "title": "FlashSync 目标字段映射落后于源 Schema",
+  "description": "源端 Schema 已升级到 v12 并新增 customer_tier，FlashSync 仍使用 v11 映射，导致 600 条记录被拒绝。",
+  "components": ["flashsync"],
+  "expected_behavior": "系统应结合同步停滞、映射错误和一致性缺失定位 Schema 映射滞后，不得误报主键冲突或检查点回退。",
+  "tool_results": [
+    {
+      "tool_name": "flashsync.get_sync_delay",
+      "request": {
+        "resource_id": "ods_customer_profile_delta",
+        "time_range": {
+          "start": "2026-07-13T07:00:00+08:00",
+          "end": "2026-07-13T08:00:00+08:00"
+        },
+        "scenario_id": "flashsync_schema_mapping_outdated",
+        "trace_id": "trace_flashsync_schema_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "delay_seconds": 1500,
+          "backlog_records": 600,
+          "throughput_per_second": 0,
+          "source_schema_version": 12,
+          "mapping_schema_version": 11
+        },
+        "evidence": [
+          {
+            "source_id": "flashsync_delay_customer_profile_schema",
+            "content": "同步吞吐为零并积压 600 条；源 Schema 为 v12，当前映射仍为 v11。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T08:01:00+08:00"
+      }
+    },
+    {
+      "tool_name": "flashsync.get_sync_log",
+      "request": {
+        "resource_id": "ods_customer_profile_delta",
+        "time_range": {
+          "start": "2026-07-13T07:00:00+08:00",
+          "end": "2026-07-13T08:00:00+08:00"
+        },
+        "scenario_id": "flashsync_schema_mapping_outdated",
+        "trace_id": "trace_flashsync_schema_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "component_error_code": "SCHEMA_MAPPING_OUTDATED",
+          "source_schema_version": 12,
+          "mapping_schema_version": 11,
+          "unmapped_fields": ["customer_tier"],
+          "rejected_records": 600,
+          "automatic_retry_blocked": true
+        },
+        "evidence": [
+          {
+            "source_id": "flashsync_log_customer_profile_schema",
+            "content": "v11 映射不包含源 v12 新增字段 customer_tier，600 条记录被 SCHEMA_MAPPING_OUTDATED 拒绝。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T08:01:05+08:00"
+      }
+    },
+    {
+      "tool_name": "flashsync.check_consistency",
+      "request": {
+        "resource_id": "ods_customer_profile_delta",
+        "time_range": {
+          "start": "2026-07-13T07:00:00+08:00",
+          "end": "2026-07-13T08:00:00+08:00"
+        },
+        "scenario_id": "flashsync_schema_mapping_outdated",
+        "trace_id": "trace_flashsync_schema_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "consistent": false,
+          "difference_count": 600,
+          "missing_target_records": 600,
+          "duplicate_target_records": 0,
+          "schema_parse_failures": 600,
+          "sampled_records": 5000
+        },
+        "evidence": [
+          {
+            "source_id": "flashsync_consistency_customer_profile_schema",
+            "content": "目标端缺少 600 条且无重复，600 条差异均记录为 Schema 解析失败。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T08:01:10+08:00"
+      }
+    }
+  ]
+}

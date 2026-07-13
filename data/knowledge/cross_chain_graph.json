@@ -1,6 +1,6 @@
 {
-  "seed_version": "graph-seed:v4",
-  "source_id": "synthetic_cross_chain_knowledge_v4",
+  "seed_version": "graph-seed:v5",
+  "source_id": "synthetic_cross_chain_knowledge_v5",
   "nodes": [
     {
       "node_id": "component_lts",
@@ -221,6 +221,39 @@
       "source_span": "位点恢复可能重复写入或遗漏数据，必须备份、验证幂等性并受控重放。",
       "reliability": 1.0,
       "embedding": null
+    },
+    {
+      "node_id": "symptom_flashsync_schema_rejection",
+      "node_type": "symptom",
+      "name": "FlashSync Schema 记录拒绝",
+      "content": "源 Schema 升级后同步吞吐归零，新增字段记录被旧映射批量拒绝。",
+      "aliases": ["schema rejection", "unmapped field", "schema parse failure"],
+      "source_id": "synthetic_cross_chain_knowledge_v5",
+      "source_span": "新增字段无法映射时，记录拒绝、积压和一致性缺失会同时出现。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "root_cause_flashsync_schema_mapping_outdated",
+      "node_type": "root_cause",
+      "name": "FlashSync 字段映射版本滞后",
+      "content": "FlashSync 使用旧映射消费新版源 Schema，新增字段未声明并触发 SCHEMA_MAPPING_OUTDATED。",
+      "aliases": ["outdated schema mapping", "SCHEMA_MAPPING_OUTDATED", "mapping version lag"],
+      "source_id": "synthetic_cross_chain_knowledge_v5",
+      "source_span": "源 Schema 版本高于映射版本且日志明确未映射字段时，可确认映射滞后。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "solution_validate_flashsync_schema_mapping",
+      "node_type": "solution",
+      "name": "预览并验证 FlashSync Schema 映射",
+      "content": "先比对源目标 Schema 和默认值，预览映射结果，再小批量回放并复核缺失、重复和字段语义。",
+      "aliases": ["validate schema mapping", "mapping preview", "schema compatibility"],
+      "source_id": "synthetic_cross_chain_knowledge_v5",
+      "source_span": "映射更新必须先做兼容性和预览验证，再受控回放并核对一致性。",
+      "reliability": 1.0,
+      "embedding": null
     }
   ],
   "edges": [
@@ -394,6 +427,24 @@
       "weight": 1.0,
       "source_id": "synthetic_cross_chain_knowledge_v4",
       "source_span": "检查点回退应通过备份、位点核对、幂等验证和受控重放处理。"
+    },
+    {
+      "edge_id": "edge_flashsync_schema_rejection_caused_by_outdated_mapping",
+      "from_node_id": "symptom_flashsync_schema_rejection",
+      "to_node_id": "root_cause_flashsync_schema_mapping_outdated",
+      "relation_type": "CAUSED_BY",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v5",
+      "source_span": "FlashSync Schema 记录拒绝由旧映射缺少源端新增字段导致。"
+    },
+    {
+      "edge_id": "edge_flashsync_outdated_mapping_resolved_by_validation",
+      "from_node_id": "root_cause_flashsync_schema_mapping_outdated",
+      "to_node_id": "solution_validate_flashsync_schema_mapping",
+      "relation_type": "RESOLVED_BY",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v5",
+      "source_span": "映射滞后应通过 Schema 比对、映射预览、小批量回放和一致性验证处理。"
     }
   ]
 }

@@ -70,14 +70,14 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
             await session.commit()
 
             node_count, edge_count = await repository.count_graph()
-            assert node_count == 20
-            assert edge_count == 19
+            assert node_count == 23
+            assert edge_count == 21
             assert (
                 await repository.count_embedded_nodes(
                     provider_id=embedding_provider.provider_id,
                     dimensions=embedding_provider.dimensions,
                 )
-                == 20
+                == 23
             )
 
             # 直接绕过 Pydantic 篡改维度，确认数据库 CheckConstraint 仍能拒绝不兼容向量元数据。
@@ -206,6 +206,29 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
                 "RESOLVED_BY",
             ]
             assert checkpoint_path.depth == 2
+
+            # v5 查询要求 Schema 故障也形成独立两跳路径；节点和关系双重匹配避免仅凭错误码文本
+            # 命中根因节点就误称已经得到映射验证方案。
+            schema_result = await service.retrieve(
+                "FlashSync Schema 记录拒绝 字段映射滞后",
+                seed_limit=5,
+                max_hops=2,
+            )
+            schema_path = next(
+                path
+                for path in schema_result.paths
+                if [node.node_id for node in path.nodes]
+                == [
+                    "symptom_flashsync_schema_rejection",
+                    "root_cause_flashsync_schema_mapping_outdated",
+                    "solution_validate_flashsync_schema_mapping",
+                ]
+            )
+            assert [edge.relation_type.value for edge in schema_path.edges] == [
+                "CAUSED_BY",
+                "RESOLVED_BY",
+            ]
+            assert schema_path.depth == 2
 
             # 使用同一查询和预算运行 vector-only/vector+graph，结构化记录图扩展的实测增益。
             ablation_case = load_graph_ablation_cases(

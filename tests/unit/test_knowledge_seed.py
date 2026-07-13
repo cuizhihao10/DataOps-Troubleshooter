@@ -29,9 +29,9 @@ def test_curated_seed_uses_approved_node_and_relation_contracts() -> None:
 
     bundle = load_knowledge_seed(SEED_FILE)
 
-    assert bundle.seed_version == "graph-seed:v4"
-    assert len(bundle.nodes) == 20
-    assert len(bundle.edges) == 19
+    assert bundle.seed_version == "graph-seed:v5"
+    assert len(bundle.nodes) == 23
+    assert len(bundle.edges) == 21
     assert {node.node_type for node in bundle.nodes} <= set(KnowledgeNodeType)
     assert {edge.relation_type for edge in bundle.edges} <= set(KnowledgeRelationType)
     assert all(node.source_span for node in bundle.nodes)
@@ -125,6 +125,30 @@ def test_single_component_seed_contains_flashsync_checkpoint_recovery_path() -> 
     assert cause.relation_type is KnowledgeRelationType.CAUSED_BY
     assert solution.relation_type is KnowledgeRelationType.RESOLVED_BY
     assert {cause.source_id, solution.source_id} == {"synthetic_cross_chain_knowledge_v4"}
+
+
+def test_single_component_seed_contains_flashsync_schema_mapping_path() -> None:
+    """验证 v5 种子把 Schema 拒绝、映射滞后和兼容性验证连接为有序路径。
+
+    两条新边必须来自 v5 且使用 CAUSED_BY/RESOLVED_BY。该检查保证映射方案来自显式图关系，并
+    防止只在 Fixture 中硬编码错误码却没有可复用的知识解释和验证步骤。
+    """
+
+    bundle = load_knowledge_seed(SEED_FILE)
+    edges = {edge.edge_id: edge for edge in bundle.edges}
+
+    cause = edges["edge_flashsync_schema_rejection_caused_by_outdated_mapping"]
+    solution = edges["edge_flashsync_outdated_mapping_resolved_by_validation"]
+    assert cause.from_node_id == "symptom_flashsync_schema_rejection"
+    assert (
+        cause.to_node_id
+        == solution.from_node_id
+        == "root_cause_flashsync_schema_mapping_outdated"
+    )
+    assert solution.to_node_id == "solution_validate_flashsync_schema_mapping"
+    assert cause.relation_type is KnowledgeRelationType.CAUSED_BY
+    assert solution.relation_type is KnowledgeRelationType.RESOLVED_BY
+    assert {cause.source_id, solution.source_id} == {"synthetic_cross_chain_knowledge_v5"}
 
 
 def test_seed_rejects_dangling_edge_reference() -> None:

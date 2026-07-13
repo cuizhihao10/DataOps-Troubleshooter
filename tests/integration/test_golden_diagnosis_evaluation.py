@@ -1,4 +1,4 @@
-"""用二十一条 Golden Cases 验证诊断、位点风险、降级、路径、冲突、记忆与 21/28 边界。
+"""用二十二条 Golden Cases 验证诊断、Schema 映射、降级、路径、冲突、记忆与 22/28 边界。
 
 测试运行器从合成 Fixture 构造真实 ``ToolEvent``/``Evidence``，再通过生产 Pydantic 顶层结果契约
 进入评测器。Planner、Auditor 和报告文本是确定性脚本，因此这些数字只证明数据流与评分规则可
@@ -152,13 +152,13 @@ class FixtureBackedGoldenRunner:
 
 
 @pytest.mark.asyncio
-async def test_twenty_one_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
-    """验证二十一条案例命中诊断、FlashSync 位点风险与路径契约，并保持 21/28 未完成标记。
+async def test_twenty_two_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
+    """验证二十二条案例命中诊断、FlashSync Schema 映射与路径契约，并保持 22/28 未完成标记。
 
     确定性基线预期意图、必要 Action、允许根因、关键来源、停止原因、引用、风险和安全降级全部
     命中；七个故意失败 Action 使尝试成功率低于一，成功响应冲突案例的三个调用则全部成功。覆盖标记
-    必须保持 false，防止 21 条通过被宣传为 28 条验收完成；检查点案例必须对齐 offset/缺失数量、
-    使用 v4 因果路径并命中 high 风险；倾斜和参数案例继续保留各自反证与 v3/v2 路径。
+    必须保持 false，防止 22 条通过被宣传为 28 条验收完成；Schema 案例必须对齐版本差、拒绝数和
+    缺失数并使用 v5 路径；检查点案例继续命中 high 风险和 v4 路径。
     """
 
     cases = load_golden_cases(GOLDEN_CASE_FILE)
@@ -168,12 +168,12 @@ async def test_twenty_one_golden_cases_produce_versioned_measured_diagnosis_base
 
     assert report.contract_id == GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID
     assert report.metric_kind == "measured"
-    assert report.case_count == 21
+    assert report.case_count == 22
     assert report.target_case_count == 28
-    assert report.case_coverage_rate == pytest.approx(21 / 28)
+    assert report.case_coverage_rate == pytest.approx(22 / 28)
     assert report.target_coverage_complete is False
     assert report.category_case_counts == {
-        GoldenCaseCategory.SINGLE_COMPONENT: 7,
+        GoldenCaseCategory.SINGLE_COMPONENT: 8,
         GoldenCaseCategory.CROSS_COMPONENT: 4,
         GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 4,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
@@ -188,7 +188,7 @@ async def test_twenty_one_golden_cases_produce_versioned_measured_diagnosis_base
     assert report.citation_completeness == 1
     assert report.unsupported_critical_claim_rate == 0
     assert report.duplicate_action_rate == 0
-    assert report.tool_attempt_success_rate == pytest.approx(53 / 60)
+    assert report.tool_attempt_success_rate == pytest.approx(56 / 63)
     assert report.risk_level_hit_rate == 1
     assert report.safe_degradation_rate == 1
     assert report.evidence_conflict_safe_resolution_rate == 1
@@ -349,6 +349,26 @@ async def test_twenty_one_golden_cases_produce_versioned_measured_diagnosis_base
         "flashsync_checkpoint_regression_solution_chain"
     ]
     assert checkpoint_result.actual_risk_level is RiskLevel.HIGH
+    schema_result = next(
+        result
+        for result in report.cases
+        if result.case_id == "golden_flashsync_schema_mapping_outdated_single"
+    )
+    assert schema_result.executed_tools == [
+        "flashsync.get_sync_delay",
+        "flashsync.get_sync_log",
+        "flashsync.check_consistency",
+    ]
+    assert schema_result.observed_evidence_sources == [
+        "flashsync_delay_customer_profile_schema",
+        "flashsync_log_customer_profile_schema",
+        "flashsync_consistency_customer_profile_schema",
+    ]
+    assert schema_result.actual_top1_root_cause == "FlashSync 字段映射版本滞后"
+    assert schema_result.matched_fault_path_labels == [
+        "flashsync_schema_mapping_solution_chain"
+    ]
+    assert schema_result.actual_risk_level is RiskLevel.MEDIUM
 
 
 @pytest.mark.asyncio
@@ -852,6 +872,9 @@ def _build_retrieved_paths(case: GoldenCaseSpec) -> list[RetrievedPath]:
                     "bds_data_skew_solution_chain": "synthetic_cross_chain_knowledge_v3",
                     "flashsync_checkpoint_regression_solution_chain": (
                         "synthetic_cross_chain_knowledge_v4"
+                    ),
+                    "flashsync_schema_mapping_solution_chain": (
+                        "synthetic_cross_chain_knowledge_v5"
                     ),
                 }.get(requirement.path_label, "synthetic_cross_chain_knowledge_v1")
             ],

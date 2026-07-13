@@ -686,6 +686,56 @@ async def test_flashsync_checkpoint_regression_aligns_offset_and_consistency_gap
 
 
 @pytest.mark.asyncio
+async def test_flashsync_schema_mapping_aligns_rejections_and_missing_records() -> None:
+    """验证 Schema 映射滞后在真实 MCP 中形成版本差、拒绝数和缺失数闭环。
+
+    延迟工具公开源 v12/映射 v11，日志给出 customer_tier 未映射和 600 条拒绝，一致性工具给出
+    同量解析失败与目标缺失且无重复。三项均成功并保留 Evidence，防止把 Schema 漂移误判为主键
+    冲突、检查点回退或普通吞吐波动。
+    """
+
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    observations = {}
+    # 相同资源/窗口保证数值可比较，独立 trace 保证三个 Observation 可分别审计。
+    for tool_name in (
+        "flashsync.get_sync_delay",
+        "flashsync.get_sync_log",
+        "flashsync.check_consistency",
+    ):
+        observations[tool_name] = await executor.execute(
+            _action(
+                "flashsync_schema_mapping_outdated",
+                "ods_customer_profile_delta",
+                f"trace_schema_{tool_name.replace('.', '_')}",
+                tool_name=tool_name,
+            )
+        )
+
+    delay = observations["flashsync.get_sync_delay"]
+    log = observations["flashsync.get_sync_log"]
+    consistency = observations["flashsync.check_consistency"]
+    assert all(observation.response.ok for observation in observations.values())
+    assert delay.response.data["source_schema_version"] == 12
+    assert delay.response.data["mapping_schema_version"] == 11
+    assert delay.response.data["backlog_records"] == 600
+    assert log.response.data["component_error_code"] == "SCHEMA_MAPPING_OUTDATED"
+    assert log.response.data["unmapped_fields"] == ["customer_tier"]
+    assert log.response.data["rejected_records"] == 600
+    assert consistency.response.data["schema_parse_failures"] == 600
+    assert consistency.response.data["missing_target_records"] == 600
+    assert consistency.response.data["duplicate_target_records"] == 0
+    # 三个来源分别支持症状、直接根因和影响范围，报告不能只引用错误日志省略一致性验证。
+    assert {
+        observation.response.evidence[0].source_id
+        for observation in observations.values()
+    } == {
+        "flashsync_delay_customer_profile_schema",
+        "flashsync_log_customer_profile_schema",
+        "flashsync_consistency_customer_profile_schema",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "expected_data_key"),
     [

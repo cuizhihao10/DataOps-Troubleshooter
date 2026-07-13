@@ -1,6 +1,6 @@
 """验证场景注册、Golden Case 引用、证据冲突标注和失败 Fixture 覆盖。
 
-测试确保十一个场景可重复加载、九工具主场景完整、错误类别齐全，并拒绝重复 scenario_id
+测试确保十二个场景可重复加载、九工具主场景完整、错误类别齐全，并拒绝重复 scenario_id
 和工具请求引用其他场景等会破坏可复现性的输入。
 """
 
@@ -28,8 +28,8 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     registry = FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
     golden_cases = load_golden_cases(GOLDEN_CASE_FILE)
 
-    assert len(registry) == 11
-    assert len(golden_cases) == 21
+    assert len(registry) == 12
+    assert len(golden_cases) == 22
     assert {case.scenario_id for case in golden_cases} == set(registry.scenario_ids)
     assert {case.contract_id for case in golden_cases} == {"golden-case:v7"}
     category_counts = {
@@ -37,7 +37,7 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
         for category in GoldenCaseCategory
     }
     assert category_counts == {
-        GoldenCaseCategory.SINGLE_COMPONENT: 7,
+        GoldenCaseCategory.SINGLE_COMPONENT: 8,
         GoldenCaseCategory.CROSS_COMPONENT: 4,
         GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 4,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
@@ -159,6 +159,24 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
         "solution_validate_flashsync_checkpoint_restore",
     ]
     assert checkpoint_case.expected_risk_level.value == "high"
+    schema_case = next(
+        case
+        for case in golden_cases
+        if case.case_id == "golden_flashsync_schema_mapping_outdated_single"
+    )
+    assert schema_case.required_tools == [
+        ToolName.FLASHSYNC_GET_SYNC_DELAY,
+        ToolName.FLASHSYNC_GET_SYNC_LOG,
+        ToolName.FLASHSYNC_CHECK_CONSISTENCY,
+    ]
+    assert schema_case.required_fault_paths[0].required_node_ids == [
+        "symptom_flashsync_schema_rejection",
+        "root_cause_flashsync_schema_mapping_outdated",
+        "solution_validate_flashsync_schema_mapping",
+    ]
+    assert "flashsync_consistency_customer_profile_schema" in (
+        schema_case.required_evidence_sources
+    )
 
 
 def test_main_scenario_exercises_all_nine_tool_contracts() -> None:

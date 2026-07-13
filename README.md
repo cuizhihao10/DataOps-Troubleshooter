@@ -13,7 +13,7 @@
 - 提供 `GET /health`，返回契约版本、运行预算和已加载场景。
 - 通过官方 MCP Python SDK 和 stdio 协议暴露产品规定的 9 个只读工具，并将返回标准化为 Evidence 与 ToolEvent。
 - 瞬时错误最多自动重试一次，每次尝试均保留独立 ToolEvent；空结果和权限错误不会重试。
-- PostgreSQL + pgvector 保存 `graph-seed:v4` 的 20 个显式知识节点、19 条关系边和带 Provider 溯源的向量，支持全文/向量混合召回、五项可解释评分与 1–2 跳路径扩展。
+- PostgreSQL + pgvector 保存 `graph-seed:v5` 的 23 个显式知识节点、21 条关系边和带 Provider 溯源的向量，支持全文/向量混合召回、五项可解释评分与 1–2 跳路径扩展。
 - Evidence Bundle 按 UTF-8 JSON 字节、节点数和路径数三重预算原子选择证据，并返回稳定 `kn_*` / `path_*` 引用与 omitted IDs。
 - 版本控制的消融案例真实比较 vector-only 与 vector+graph；当前实测根因命中持平，必要因果链完整率由 0.0 提升至 1.0。
 - 五项 capability 以 `runtime-capabilities:v1` 输出 Prompt 片段、工具优先级、输入要求和输出规则；历史匹配仅按需启用，实时 Observation 始终优先。
@@ -28,14 +28,14 @@
 - `memory-recall-eval:v1` 使用 3 条合成查询真实比较 vector-only/vector+graph；当前小样本 Macro Recall@K 与 Precision@K 实测从 0.8333 变为 1.0000，禁止案例命中为 0。
 - `history-impact-eval:v1` 使用 3 条合成诊断真实比较 Memory off/on；确定性 LangGraph 小样本中必要 Action 覆盖实测从 0.6667 变为 1.0000，意外 Action 率从 0.3333 降为 0，根因命中、实时引用、历史投影和冲突保护均保持 1.0000。
 - `auditor-impact-eval:v1` 使用 3 条语义缺陷案例比较规则对照与完整 Auditor；预期问题发现率实测从 0 变为 1.0000，危险内容残留率从 1.0000 降为 0，安全处置率从 0 变为 1.0000，其中两例修订后接受、一例持续冲突后降级。
-- `golden-case:v7` 同时覆盖安全降级、参数/倾斜反证与 FlashSync 检查点回退高风险恢复；当前 21 条案例使用 11 个脱敏 Fixture。
-- `golden-diagnosis-eval:v14` 要求位点差、积压和目标缺失数量一致，并使用 v4 因果路径；当前 21/28 确定性脚本满分不冒充真实 LLM 成绩。
-- `portfolio-eval-run:v15` 通过 `python -m app.evaluation` 一次执行五层、19 个独立指标。
+- `golden-case:v7` 同时覆盖安全降级、反证、检查点回退与 Schema 映射滞后；当前 22 条案例使用 12 个脱敏 Fixture，单组件达到 8/8。
+- `golden-diagnosis-eval:v15` 要求 Schema 版本差、拒绝记录和目标缺失数量一致，并使用 v5 因果路径；当前 22/28 确定性脚本满分不冒充真实 LLM 成绩。
+- `portfolio-eval-run:v16` 通过 `python -m app.evaluation` 一次执行五层、19 个独立指标。
 - `audited-diagnosis-workflow:v2` 按 history trigger 召回 confirmed 案例，在 ReAct 前后两次确定性比较同批候选，再串联独立 Auditor 和审计后 memory staging。
 - `diagnosis-resources:v2` 提供 session/message/run/event PostgreSQL 资源；最终报告可直接展示相似度、共同点、差异点、参考方案、避坑提示与引用。
 - `session-checkpoint:v1` 在成功 run 的同一事务保存最新公开状态；同 session 追问恢复报告、证据、路径和工具事件，失败 run 不覆盖旧快照，跨 run 同参 Action 仍会被拦截。
 
-当前已完成全部 MCP 工具、GraphRAG 检索闭环、五项固定 runtime capabilities、Planner ReAct、独立 Auditor、长期案例记忆、五层小样本统一评测运行器、顶层诊断工作流、资源 API 和同 session checkpoint 追问恢复。默认模型 Provider 仍为 disabled；Golden 诊断层是 21 条确定性脚本回归基线，自动化测试不宣称已经调用付费模型或取得模型质量成绩。可靠后台 worker、LangGraph 逐节点中断恢复、模型级复杂语义对比和完整 28 条 Golden Case 仍待后续实现。
+当前已完成全部 MCP 工具、GraphRAG 检索闭环、五项固定 runtime capabilities、Planner ReAct、独立 Auditor、长期案例记忆、五层小样本统一评测运行器、顶层诊断工作流、资源 API 和同 session checkpoint 追问恢复。默认模型 Provider 仍为 disabled；Golden 诊断层是 22 条确定性脚本回归基线，自动化测试不宣称已经调用付费模型或取得模型质量成绩。可靠后台 worker、LangGraph 逐节点中断恢复、模型级复杂语义对比和完整 28 条 Golden Case 仍待后续实现。
 
 ## 本地启动
 
