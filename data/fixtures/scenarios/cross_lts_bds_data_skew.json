@@ -1,0 +1,193 @@
+{
+  "scenario_id": "cross_lts_bds_data_skew",
+  "title": "BDS 数据倾斜导致 LTS 上游超时",
+  "description": "独立的 LTS 到 BDS 合成故障环境：BDS 输入分区和总量正常，但 9.6 倍热点分桶造成聚合阶段长尾，最终使 LTS 在截止时间前等不到客户分群产出。",
+  "components": ["lts", "bds"],
+  "expected_behavior": "诊断应使用 LTS 依赖证据与 BDS 热点/溢写证据定位数据倾斜，并用正常分区、总量和在线执行器排除缺分区、输入暴增与资源整体失效。",
+  "tool_results": [
+    {
+      "tool_name": "lts.get_task_status",
+      "request": {
+        "resource_id": "dws_customer_segment_daily",
+        "time_range": {
+          "start": "2026-07-13T11:00:00+08:00",
+          "end": "2026-07-13T14:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_data_skew",
+        "trace_id": "trace_lts_bds_skew_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "status": "failed",
+          "retry_count": 1,
+          "upstream_ready": false,
+          "deadline_exceeded": true
+        },
+        "evidence": [
+          {
+            "source_id": "lts_status_customer_segment_skew_cross",
+            "content": "LTS 客户分群日报重试后失败，截止时间前仍未检测到 BDS 上游产出。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T14:01:00+08:00"
+      }
+    },
+    {
+      "tool_name": "lts.get_task_log",
+      "request": {
+        "resource_id": "dws_customer_segment_daily",
+        "time_range": {
+          "start": "2026-07-13T11:00:00+08:00",
+          "end": "2026-07-13T14:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_data_skew",
+        "trace_id": "trace_lts_bds_skew_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "log_level": "ERROR",
+          "component_error_code": "LTS_UPSTREAM_TIMEOUT",
+          "waited_seconds": 5400,
+          "local_execution_started": false
+        },
+        "evidence": [
+          {
+            "source_id": "lts_log_customer_segment_skew_cross",
+            "content": "LTS 等待上游 5400 秒后超时，本地业务执行尚未开始，没有 LTS 自身运行错误。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T14:01:05+08:00"
+      }
+    },
+    {
+      "tool_name": "lts.get_dependency_topology",
+      "request": {
+        "resource_id": "dws_customer_segment_daily",
+        "time_range": {
+          "start": "2026-07-13T11:00:00+08:00",
+          "end": "2026-07-13T14:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_data_skew",
+        "trace_id": "trace_lts_bds_skew_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "upstream_task": "bds_customer_segment_daily",
+          "dataset": "dws_customer_segment_hourly",
+          "link_state": "blocked"
+        },
+        "evidence": [
+          {
+            "source_id": "lts_topology_customer_segment_skew_cross",
+            "content": "LTS 日报依赖 BDS 客户分群作业产出的 dws_customer_segment_hourly，当前依赖边阻塞。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T14:01:10+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_task_status",
+      "request": {
+        "resource_id": "bds_customer_segment_daily",
+        "time_range": {
+          "start": "2026-07-13T11:00:00+08:00",
+          "end": "2026-07-13T14:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_data_skew",
+        "trace_id": "trace_lts_bds_skew_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "status": "running",
+          "stage": "aggregate",
+          "progress_percent": 83,
+          "duration_seconds": 1080,
+          "executors_online": 16,
+          "cpu_percent": 68,
+          "memory_percent": 64
+        },
+        "evidence": [
+          {
+            "source_id": "bds_status_customer_segment_skew_cross",
+            "content": "BDS 聚合阶段在 83% 停滞 1080 秒，16 个执行器仍在线，CPU/内存未整体饱和。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T14:01:15+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_task_log",
+      "request": {
+        "resource_id": "bds_customer_segment_daily",
+        "time_range": {
+          "start": "2026-07-13T11:00:00+08:00",
+          "end": "2026-07-13T14:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_data_skew",
+        "trace_id": "trace_lts_bds_skew_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "warning": "DATA_SKEW_DETECTED",
+          "hot_bucket": "synthetic_segment_unknown",
+          "skew_ratio": 9.6,
+          "spill_count": 27,
+          "executor_lost": 0
+        },
+        "evidence": [
+          {
+            "source_id": "bds_log_customer_segment_skew_cross",
+            "content": "热点分桶 synthetic_segment_unknown 为中位分桶 9.6 倍并触发 27 次 spill，没有执行器丢失。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T14:01:20+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_table_info",
+      "request": {
+        "resource_id": "dwd_customer_event",
+        "time_range": {
+          "start": "2026-07-13T11:00:00+08:00",
+          "end": "2026-07-13T14:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_data_skew",
+        "trace_id": "trace_lts_bds_skew_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "latest_partition": "2026-07-13",
+          "expected_partition": "2026-07-13",
+          "row_count": 3180000,
+          "baseline_row_count_min": 3000000,
+          "baseline_row_count_max": 3400000
+        },
+        "evidence": [
+          {
+            "source_id": "bds_table_customer_segment_skew_cross",
+            "content": "输入分区已就绪，318 万行处于 300–340 万基线范围，可排除缺分区和总量暴增。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T14:01:25+08:00"
+      }
+    }
+  ]
+}

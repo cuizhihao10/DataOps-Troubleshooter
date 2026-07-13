@@ -1,6 +1,6 @@
 {
-  "seed_version": "graph-seed:v7",
-  "source_id": "synthetic_cross_chain_knowledge_v7",
+  "seed_version": "graph-seed:v8",
+  "source_id": "synthetic_cross_chain_knowledge_v8",
   "nodes": [
     {
       "node_id": "component_lts",
@@ -331,6 +331,39 @@
       "source_span": "ods_customer_status_delta 是 FlashSync 与 BDS 之间的显式数据交接边界。",
       "reliability": 1.0,
       "embedding": null
+    },
+    {
+      "node_id": "task_lts_customer_segment_report",
+      "node_type": "task",
+      "name": "dws_customer_segment_daily",
+      "content": "LTS 客户分群日报等待 BDS 客户分群聚合作业完成后开始本地业务执行。",
+      "aliases": ["customer segment daily report", "LTS 客户分群日报"],
+      "source_id": "synthetic_cross_chain_knowledge_v8",
+      "source_span": "LTS 客户分群日报以 BDS 客户分群作业作为直接上游依赖。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "task_bds_customer_segment_aggregate",
+      "node_type": "task",
+      "name": "bds_customer_segment_daily",
+      "content": "BDS 客户分群作业聚合客户事件并生成 dws_customer_segment_hourly，热点分桶会形成尾部长任务。",
+      "aliases": ["customer segment aggregate", "BDS 客户分群作业"],
+      "source_id": "synthetic_cross_chain_knowledge_v8",
+      "source_span": "BDS 客户分群作业为 LTS 日报生成客户分群小时数据集。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "dataset_dws_customer_segment_hourly",
+      "node_type": "dataset",
+      "name": "dws_customer_segment_hourly",
+      "content": "客户分群小时数据集由 BDS 聚合作业生成并被 LTS 客户分群日报消费。",
+      "aliases": ["customer segment hourly dataset"],
+      "source_id": "synthetic_cross_chain_knowledge_v8",
+      "source_span": "dws_customer_segment_hourly 是 BDS 与 LTS 之间的显式数据交付边界。",
+      "reliability": 1.0,
+      "embedding": null
     }
   ],
   "edges": [
@@ -648,6 +681,60 @@
       "weight": 1.0,
       "source_id": "synthetic_cross_chain_knowledge_v7",
       "source_span": "客户状态同步任务加载旧检查点时表现为位点落后和记录积压。"
+    },
+    {
+      "edge_id": "edge_lts_customer_segment_runs_on",
+      "from_node_id": "task_lts_customer_segment_report",
+      "to_node_id": "component_lts",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v8",
+      "source_span": "dws_customer_segment_daily 由 LTS 调度组件运行。"
+    },
+    {
+      "edge_id": "edge_bds_customer_segment_runs_on",
+      "from_node_id": "task_bds_customer_segment_aggregate",
+      "to_node_id": "component_bds",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v8",
+      "source_span": "bds_customer_segment_daily 由 BDS 计算组件运行。"
+    },
+    {
+      "edge_id": "edge_lts_customer_segment_depends_bds",
+      "from_node_id": "task_lts_customer_segment_report",
+      "to_node_id": "task_bds_customer_segment_aggregate",
+      "relation_type": "DEPENDS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v8",
+      "source_span": "LTS 客户分群日报依赖 BDS 客户分群聚合作业完成。"
+    },
+    {
+      "edge_id": "edge_bds_customer_segment_produces_dataset",
+      "from_node_id": "task_bds_customer_segment_aggregate",
+      "to_node_id": "dataset_dws_customer_segment_hourly",
+      "relation_type": "PRODUCES",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v8",
+      "source_span": "BDS 客户分群作业生成 dws_customer_segment_hourly。"
+    },
+    {
+      "edge_id": "edge_lts_customer_segment_consumes_dataset",
+      "from_node_id": "task_lts_customer_segment_report",
+      "to_node_id": "dataset_dws_customer_segment_hourly",
+      "relation_type": "CONSUMES",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v8",
+      "source_span": "LTS 客户分群日报消费 dws_customer_segment_hourly。"
+    },
+    {
+      "edge_id": "edge_bds_customer_segment_manifests_long_tail",
+      "from_node_id": "task_bds_customer_segment_aggregate",
+      "to_node_id": "symptom_bds_long_tail_stage",
+      "relation_type": "MANIFESTS_AS",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v8",
+      "source_span": "客户分群聚合中的热点分桶表现为 BDS 执行阶段长尾。"
     }
   ]
 }

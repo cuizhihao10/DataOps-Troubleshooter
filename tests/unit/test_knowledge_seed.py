@@ -29,9 +29,9 @@ def test_curated_seed_uses_approved_node_and_relation_contracts() -> None:
 
     bundle = load_knowledge_seed(SEED_FILE)
 
-    assert bundle.seed_version == "graph-seed:v7"
-    assert len(bundle.nodes) == 30
-    assert len(bundle.edges) == 35
+    assert bundle.seed_version == "graph-seed:v8"
+    assert len(bundle.nodes) == 33
+    assert len(bundle.edges) == 41
     assert {node.node_type for node in bundle.nodes} <= set(KnowledgeNodeType)
     assert {edge.relation_type for edge in bundle.edges} <= set(KnowledgeRelationType)
     assert all(node.source_span for node in bundle.nodes)
@@ -222,6 +222,38 @@ def test_cross_component_seed_contains_customer_status_checkpoint_topology() -> 
         consumes.source_id,
         manifests.source_id,
     } == {"synthetic_cross_chain_knowledge_v7"}
+
+
+def test_cross_component_seed_contains_customer_segment_skew_topology() -> None:
+    """验证 v8 客户分群知识把 LTS 依赖、BDS 产出和数据倾斜症状接成显式路径。
+
+    LTS 必须 DEPENDS_ON BDS，BDS PRODUCES LTS 消费的数据集，并以 MANIFESTS_AS 接入既有 v3
+    长尾→倾斜→再平衡知识。该门禁确保正常总量反证仍来自 MCP，而知识图只解释传播与通用方案，
+    也防止新增跨组件案例只复用通用组件边而没有真实任务身份。
+    """
+
+    bundle = load_knowledge_seed(SEED_FILE)
+    edges = {edge.edge_id: edge for edge in bundle.edges}
+
+    dependency = edges["edge_lts_customer_segment_depends_bds"]
+    produces = edges["edge_bds_customer_segment_produces_dataset"]
+    consumes = edges["edge_lts_customer_segment_consumes_dataset"]
+    manifests = edges["edge_bds_customer_segment_manifests_long_tail"]
+    assert dependency.from_node_id == consumes.from_node_id == "task_lts_customer_segment_report"
+    assert dependency.to_node_id == produces.from_node_id == manifests.from_node_id
+    assert dependency.to_node_id == "task_bds_customer_segment_aggregate"
+    assert produces.to_node_id == consumes.to_node_id == "dataset_dws_customer_segment_hourly"
+    assert manifests.to_node_id == "symptom_bds_long_tail_stage"
+    assert dependency.relation_type is KnowledgeRelationType.DEPENDS_ON
+    assert produces.relation_type is KnowledgeRelationType.PRODUCES
+    assert consumes.relation_type is KnowledgeRelationType.CONSUMES
+    assert manifests.relation_type is KnowledgeRelationType.MANIFESTS_AS
+    assert {
+        dependency.source_id,
+        produces.source_id,
+        consumes.source_id,
+        manifests.source_id,
+    } == {"synthetic_cross_chain_knowledge_v8"}
 
 
 def test_seed_rejects_dangling_edge_reference() -> None:

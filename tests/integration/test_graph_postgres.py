@@ -70,14 +70,14 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
             await session.commit()
 
             node_count, edge_count = await repository.count_graph()
-            assert node_count == 30
-            assert edge_count == 35
+            assert node_count == 33
+            assert edge_count == 41
             assert (
                 await repository.count_embedded_nodes(
                     provider_id=embedding_provider.provider_id,
                     dimensions=embedding_provider.dimensions,
                 )
-                == 30
+                == 33
             )
 
             # 直接绕过 Pydantic 篡改维度，确认数据库 CheckConstraint 仍能拒绝不兼容向量元数据。
@@ -321,6 +321,52 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
                 "CAUSED_BY",
             ]
             assert checkpoint_manifest_path.depth == 2
+
+            # v8 从 LTS 客户分群日报出发，必须沿 DEPENDS_ON→PRODUCES 到达 BDS 输出数据集；这条
+            # 任务级路径证明 LTS 超时和 BDS 长尾属于同一事实环境，不是通用组件关系的重复计分。
+            customer_segment_result = await service.retrieve(
+                "dws_customer_segment_daily",
+                seed_limit=5,
+                max_hops=2,
+            )
+            customer_segment_path = next(
+                path
+                for path in customer_segment_result.paths
+                if [node.node_id for node in path.nodes]
+                == [
+                    "task_lts_customer_segment_report",
+                    "task_bds_customer_segment_aggregate",
+                    "dataset_dws_customer_segment_hourly",
+                ]
+            )
+            assert [edge.relation_type.value for edge in customer_segment_path.edges] == [
+                "DEPENDS_ON",
+                "PRODUCES",
+            ]
+            assert customer_segment_path.depth == 2
+
+            # 从 BDS 任务验证 MANIFESTS_AS→CAUSED_BY，使 v8 任务拓扑接入 v3 数据倾斜根因；正常输入
+            # 总量仍必须来自实时表工具，图路径不能单独确认本次根因。
+            skew_manifest_result = await service.retrieve(
+                "bds_customer_segment_daily",
+                seed_limit=5,
+                max_hops=2,
+            )
+            skew_manifest_path = next(
+                path
+                for path in skew_manifest_result.paths
+                if [node.node_id for node in path.nodes]
+                == [
+                    "task_bds_customer_segment_aggregate",
+                    "symptom_bds_long_tail_stage",
+                    "root_cause_bds_data_skew",
+                ]
+            )
+            assert [edge.relation_type.value for edge in skew_manifest_path.edges] == [
+                "MANIFESTS_AS",
+                "CAUSED_BY",
+            ]
+            assert skew_manifest_path.depth == 2
 
             # 使用同一查询和预算运行 vector-only/vector+graph，结构化记录图扩展的实测增益。
             ablation_case = load_graph_ablation_cases(

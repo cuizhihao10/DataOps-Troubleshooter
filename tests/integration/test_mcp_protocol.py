@@ -875,6 +875,68 @@ async def test_checkpoint_regression_propagates_to_bds_across_real_mcp_protocol(
 
 
 @pytest.mark.asyncio
+async def test_bds_data_skew_propagates_to_lts_across_real_mcp_protocol() -> None:
+    """验证 BDS 热点长尾经真实 MCP 传播为 LTS 上游超时，并保留三项排除证据。
+
+    LTS 状态/日志/拓扑必须证明本地执行未开始且依赖 BDS；BDS 状态/日志/表信息必须同时给出 9.6 倍
+    热点、27 次 spill、在线执行器、正常资源、已就绪分区和基线内总量。这个组合区分数据倾斜与
+    资源耗尽、输入暴增或缺分区，并证明 Golden runner 没有绕过 stdio MCP 读取 Fixture 答案。
+    """
+
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    calls = (
+        ("lts.get_task_status", "dws_customer_segment_daily"),
+        ("lts.get_task_log", "dws_customer_segment_daily"),
+        ("lts.get_dependency_topology", "dws_customer_segment_daily"),
+        ("bds.get_task_status", "bds_customer_segment_daily"),
+        ("bds.get_task_log", "bds_customer_segment_daily"),
+        ("bds.get_table_info", "dwd_customer_event"),
+    )
+    observations = {}
+    for tool_name, resource_id in calls:
+        # 每项 Action 使用独立 trace；共享 scenario 只固定事实，不合并 ToolEvent 的审计身份。
+        observations[tool_name] = await executor.execute(
+            _action(
+                "cross_lts_bds_data_skew",
+                resource_id,
+                f"trace_skew_cross_{tool_name.replace('.', '_')}",
+                tool_name=tool_name,
+            )
+        )
+
+    assert all(observation.response.ok for observation in observations.values())
+    lts_status = observations["lts.get_task_status"].response.data
+    lts_log = observations["lts.get_task_log"].response.data
+    topology = observations["lts.get_dependency_topology"].response.data
+    bds_status = observations["bds.get_task_status"].response.data
+    bds_log = observations["bds.get_task_log"].response.data
+    table = observations["bds.get_table_info"].response.data
+    assert lts_status["upstream_ready"] is False
+    assert lts_log["local_execution_started"] is False
+    assert topology["upstream_task"] == "bds_customer_segment_daily"
+    assert bds_status["executors_online"] == 16
+    assert bds_status["cpu_percent"] < 80
+    assert bds_status["memory_percent"] < 80
+    assert bds_log["warning"] == "DATA_SKEW_DETECTED"
+    assert bds_log["skew_ratio"] == 9.6
+    assert bds_log["spill_count"] == 27
+    assert bds_log["executor_lost"] == 0
+    assert table["latest_partition"] == table["expected_partition"]
+    assert table["baseline_row_count_min"] <= table["row_count"] <= table["baseline_row_count_max"]
+    assert {
+        observation.response.evidence[0].source_id
+        for observation in observations.values()
+    } == {
+        "lts_status_customer_segment_skew_cross",
+        "lts_log_customer_segment_skew_cross",
+        "lts_topology_customer_segment_skew_cross",
+        "bds_status_customer_segment_skew_cross",
+        "bds_log_customer_segment_skew_cross",
+        "bds_table_customer_segment_skew_cross",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "expected_data_key"),
     [

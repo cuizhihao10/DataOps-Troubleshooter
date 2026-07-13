@@ -874,5 +874,75 @@
       "evidence_sufficient"
     ],
     "expected_risk_level": "high"
+  },
+  {
+    "contract_id": "golden-case:v7",
+    "case_id": "golden_cross_lts_blocked_by_bds_data_skew",
+    "case_category": "cross_component",
+    "user_query": "LTS 客户分群日报等待上游超时，请检查 BDS 是资源不足、输入异常还是数据倾斜。",
+    "scenario_id": "cross_lts_bds_data_skew",
+    "expected_intent": "cross_component_diagnosis",
+    "required_tools": [
+      "lts.get_task_status",
+      "lts.get_task_log",
+      "lts.get_dependency_topology",
+      "bds.get_task_status",
+      "bds.get_task_log",
+      "bds.get_table_info"
+    ],
+    "required_fault_paths": [
+      {
+        "path_label": "customer_segment_delivery_chain",
+        "required_node_ids": [
+          "task_lts_customer_segment_report",
+          "task_bds_customer_segment_aggregate",
+          "dataset_dws_customer_segment_hourly"
+        ],
+        "required_relation_types": [
+          "DEPENDS_ON",
+          "PRODUCES"
+        ]
+      },
+      {
+        "path_label": "customer_segment_skew_manifest_chain",
+        "required_node_ids": [
+          "task_bds_customer_segment_aggregate",
+          "symptom_bds_long_tail_stage",
+          "root_cause_bds_data_skew"
+        ],
+        "required_relation_types": [
+          "MANIFESTS_AS",
+          "CAUSED_BY"
+        ]
+      },
+      {
+        "path_label": "bds_data_skew_solution_chain",
+        "required_node_ids": [
+          "symptom_bds_long_tail_stage",
+          "root_cause_bds_data_skew",
+          "solution_rebalance_bds_skew"
+        ],
+        "required_relation_types": [
+          "CAUSED_BY",
+          "RESOLVED_BY"
+        ]
+      }
+    ],
+    "allowed_root_causes": [
+      "BDS 数据倾斜",
+      "热点分区导致执行阶段长尾"
+    ],
+    "required_evidence_sources": [
+      "lts_status_customer_segment_skew_cross",
+      "lts_log_customer_segment_skew_cross",
+      "lts_topology_customer_segment_skew_cross",
+      "bds_status_customer_segment_skew_cross",
+      "bds_log_customer_segment_skew_cross",
+      "bds_table_customer_segment_skew_cross"
+    ],
+    "expected_stop_reasons": [
+      "evidence_sufficient"
+    ],
+    "expected_risk_level": "medium"
   }
 ]
