@@ -1,6 +1,6 @@
 """验证场景注册、Golden Case 引用、证据冲突标注和失败 Fixture 覆盖。
 
-测试确保九个场景可重复加载、九工具主场景完整、错误类别齐全，并拒绝重复 scenario_id
+测试确保十个场景可重复加载、九工具主场景完整、错误类别齐全，并拒绝重复 scenario_id
 和工具请求引用其他场景等会破坏可复现性的输入。
 """
 
@@ -28,8 +28,8 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     registry = FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
     golden_cases = load_golden_cases(GOLDEN_CASE_FILE)
 
-    assert len(registry) == 9
-    assert len(golden_cases) == 19
+    assert len(registry) == 10
+    assert len(golden_cases) == 20
     assert {case.scenario_id for case in golden_cases} == set(registry.scenario_ids)
     assert {case.contract_id for case in golden_cases} == {"golden-case:v7"}
     category_counts = {
@@ -37,7 +37,7 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
         for category in GoldenCaseCategory
     }
     assert category_counts == {
-        GoldenCaseCategory.SINGLE_COMPONENT: 5,
+        GoldenCaseCategory.SINGLE_COMPONENT: 6,
         GoldenCaseCategory.CROSS_COMPONENT: 4,
         GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 4,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
@@ -126,6 +126,22 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     ]
     assert "lts_topology_finance_reconciliation_ready" in (
         parameter_case.required_evidence_sources
+    )
+    skew_case = next(
+        case for case in golden_cases if case.case_id == "golden_bds_data_skew_single"
+    )
+    assert skew_case.required_tools == [
+        ToolName.BDS_GET_TASK_STATUS,
+        ToolName.BDS_GET_TASK_LOG,
+        ToolName.BDS_GET_TABLE_INFO,
+    ]
+    assert skew_case.required_fault_paths[0].required_node_ids == [
+        "symptom_bds_long_tail_stage",
+        "root_cause_bds_data_skew",
+        "solution_rebalance_bds_skew",
+    ]
+    assert "bds_table_customer_segment_normal_volume" in (
+        skew_case.required_evidence_sources
     )
 
 

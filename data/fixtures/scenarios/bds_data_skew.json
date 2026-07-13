@@ -1,0 +1,106 @@
+{
+  "scenario_id": "bds_data_skew",
+  "title": "BDS 热点分区导致执行阶段长尾",
+  "description": "BDS 聚合作业总输入量处于正常基线，但单个哈希分桶记录数约为中位数的 9.6 倍并产生溢写。",
+  "components": ["bds"],
+  "expected_behavior": "系统应结合阶段停滞、热点分布和正常总量反证定位数据倾斜，不得误报缺分区或整体输入暴增。",
+  "tool_results": [
+    {
+      "tool_name": "bds.get_task_status",
+      "request": {
+        "resource_id": "bds_customer_segment_daily",
+        "time_range": {
+          "start": "2026-07-13T03:00:00+08:00",
+          "end": "2026-07-13T04:00:00+08:00"
+        },
+        "scenario_id": "bds_data_skew",
+        "trace_id": "trace_bds_data_skew_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "state": "RUNNING",
+          "stage": "aggregate_by_customer",
+          "duration_seconds": 2700,
+          "progress_percent": 83,
+          "stalled_seconds": 1080,
+          "active_executors": 16
+        },
+        "evidence": [
+          {
+            "source_id": "bds_status_customer_segment_long_tail",
+            "content": "聚合阶段进度停留在 83% 达 1080 秒，16 个执行器仍在线。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T04:01:00+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_task_log",
+      "request": {
+        "resource_id": "bds_customer_segment_daily",
+        "time_range": {
+          "start": "2026-07-13T03:00:00+08:00",
+          "end": "2026-07-13T04:00:00+08:00"
+        },
+        "scenario_id": "bds_data_skew",
+        "trace_id": "trace_bds_data_skew_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "component_error_code": "DATA_SKEW_DETECTED",
+          "skew_ratio": 9.6,
+          "hottest_bucket": "customer_hash_bucket_07",
+          "max_bucket_records": 960000,
+          "median_bucket_records": 100000,
+          "spill_count": 27,
+          "executor_lost": 0
+        },
+        "evidence": [
+          {
+            "source_id": "bds_log_customer_segment_skew",
+            "content": "customer_hash_bucket_07 有 960000 条记录，是分桶中位数的 9.6 倍，并触发 27 次磁盘溢写。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T04:01:05+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_table_info",
+      "request": {
+        "resource_id": "dwd_customer_segment_input",
+        "time_range": {
+          "start": "2026-07-13T03:00:00+08:00",
+          "end": "2026-07-13T04:00:00+08:00"
+        },
+        "scenario_id": "bds_data_skew",
+        "trace_id": "trace_bds_data_skew_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "latest_partition": "2026-07-13",
+          "expected_partition": "2026-07-13",
+          "partition_ready": true,
+          "row_count": 3180000,
+          "baseline_row_count_min": 3000000,
+          "baseline_row_count_max": 3400000
+        },
+        "evidence": [
+          {
+            "source_id": "bds_table_customer_segment_normal_volume",
+            "content": "目标分区已就绪，总行数 3180000，处于 3000000 到 3400000 的合成基线范围。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T04:01:10+08:00"
+      }
+    }
+  ]
+}

@@ -29,9 +29,9 @@ def test_curated_seed_uses_approved_node_and_relation_contracts() -> None:
 
     bundle = load_knowledge_seed(SEED_FILE)
 
-    assert bundle.seed_version == "graph-seed:v2"
-    assert len(bundle.nodes) == 14
-    assert len(bundle.edges) == 15
+    assert bundle.seed_version == "graph-seed:v3"
+    assert len(bundle.nodes) == 17
+    assert len(bundle.edges) == 17
     assert {node.node_type for node in bundle.nodes} <= set(KnowledgeNodeType)
     assert {edge.relation_type for edge in bundle.edges} <= set(KnowledgeRelationType)
     assert all(node.source_span for node in bundle.nodes)
@@ -79,6 +79,28 @@ def test_single_component_seed_contains_lts_parameter_cause_and_solution_path() 
     assert cause.relation_type is KnowledgeRelationType.CAUSED_BY
     assert solution.relation_type is KnowledgeRelationType.RESOLVED_BY
     assert {cause.source_id, solution.source_id} == {"synthetic_cross_chain_knowledge_v2"}
+
+
+def test_single_component_seed_contains_bds_skew_cause_and_solution_path() -> None:
+    """验证 v3 种子把 BDS 长尾、数据倾斜和再平衡方案连接为有序路径。
+
+    两条边必须使用 v3 source 且方向为症状到根因再到方案。该门禁避免仅新增三个相似文本节点却
+    没有可扩展关系，也防止把 v3 知识错误标成 v1/v2 来源而破坏面试时可解释的演进历史。
+    """
+
+    bundle = load_knowledge_seed(SEED_FILE)
+    edges = {edge.edge_id: edge for edge in bundle.edges}
+
+    cause = edges["edge_bds_long_tail_caused_by_data_skew"]
+    solution = edges["edge_bds_skew_resolved_by_rebalance"]
+    assert cause.from_node_id == "symptom_bds_long_tail_stage"
+    assert (
+        cause.to_node_id == solution.from_node_id == "root_cause_bds_data_skew"
+    )
+    assert solution.to_node_id == "solution_rebalance_bds_skew"
+    assert cause.relation_type is KnowledgeRelationType.CAUSED_BY
+    assert solution.relation_type is KnowledgeRelationType.RESOLVED_BY
+    assert {cause.source_id, solution.source_id} == {"synthetic_cross_chain_knowledge_v3"}
 
 
 def test_seed_rejects_dangling_edge_reference() -> None:

@@ -1,6 +1,6 @@
 {
-  "seed_version": "graph-seed:v2",
-  "source_id": "synthetic_cross_chain_knowledge_v2",
+  "seed_version": "graph-seed:v3",
+  "source_id": "synthetic_cross_chain_knowledge_v3",
   "nodes": [
     {
       "node_id": "component_lts",
@@ -155,6 +155,39 @@
       "source_span": "修正前先核对参数 Schema 和渲染结果，避免直接重跑放大配置错误。",
       "reliability": 1.0,
       "embedding": null
+    },
+    {
+      "node_id": "symptom_bds_long_tail_stage",
+      "node_type": "symptom",
+      "name": "BDS 执行阶段长尾",
+      "content": "BDS 聚合阶段大部分分桶完成后，少量热点分桶长时间占用尾部执行时间。",
+      "aliases": ["long tail stage", "stalled aggregate stage"],
+      "source_id": "synthetic_cross_chain_knowledge_v3",
+      "source_span": "执行进度长时间停留在尾部通常需要检查分桶负载分布，而非只看总输入量。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "root_cause_bds_data_skew",
+      "node_type": "root_cause",
+      "name": "BDS 数据倾斜",
+      "content": "热点键或分桶记录量显著高于中位数时，少量执行器溢写并形成阶段长尾。",
+      "aliases": ["data skew", "hot partition", "DATA_SKEW_DETECTED"],
+      "source_id": "synthetic_cross_chain_knowledge_v3",
+      "source_span": "高倾斜比与热点分桶溢写共同支持数据倾斜根因。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "solution_rebalance_bds_skew",
+      "node_type": "solution",
+      "name": "拆分热点并重新平衡 BDS 分区",
+      "content": "先确认热点键范围，再评估加盐或二阶段聚合，并用小范围回放验证分布和结果一致性。",
+      "aliases": ["rebalance skew", "salt hot keys", "two stage aggregation"],
+      "source_id": "synthetic_cross_chain_knowledge_v3",
+      "source_span": "处理倾斜应先验证热点，再受控调整分区策略并复核结果，不能直接扩大全局资源。",
+      "reliability": 1.0,
+      "embedding": null
     }
   ],
   "edges": [
@@ -292,6 +325,24 @@
       "weight": 1.0,
       "source_id": "synthetic_cross_chain_knowledge_v2",
       "source_span": "格式错误应通过核对 Schema、修正参数和预览渲染结果处理。"
+    },
+    {
+      "edge_id": "edge_bds_long_tail_caused_by_data_skew",
+      "from_node_id": "symptom_bds_long_tail_stage",
+      "to_node_id": "root_cause_bds_data_skew",
+      "relation_type": "CAUSED_BY",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v3",
+      "source_span": "BDS 尾部阶段停滞由热点分桶的数据倾斜导致。"
+    },
+    {
+      "edge_id": "edge_bds_skew_resolved_by_rebalance",
+      "from_node_id": "root_cause_bds_data_skew",
+      "to_node_id": "solution_rebalance_bds_skew",
+      "relation_type": "RESOLVED_BY",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v3",
+      "source_span": "数据倾斜通过确认热点并受控调整分区或聚合策略缓解。"
     }
   ]
 }

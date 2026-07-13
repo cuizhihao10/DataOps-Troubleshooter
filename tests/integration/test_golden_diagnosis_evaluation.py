@@ -1,4 +1,4 @@
-"""用十九条 Golden Cases 验证诊断、参数反证、降级、路径、冲突、记忆与 19/28 边界。
+"""用二十条 Golden Cases 验证诊断、倾斜反证、降级、路径、冲突、记忆与 20/28 边界。
 
 测试运行器从合成 Fixture 构造真实 ``ToolEvent``/``Evidence``，再通过生产 Pydantic 顶层结果契约
 进入评测器。Planner、Auditor 和报告文本是确定性脚本，因此这些数字只证明数据流与评分规则可
@@ -152,13 +152,13 @@ class FixtureBackedGoldenRunner:
 
 
 @pytest.mark.asyncio
-async def test_nineteen_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
-    """验证十九条案例命中诊断、LTS 参数反证、路径与安全契约，并保持 19/28 未完成标记。
+async def test_twenty_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
+    """验证二十条案例命中诊断、BDS 倾斜反证、路径与安全契约，并保持 20/28 未完成标记。
 
     确定性基线预期意图、必要 Action、允许根因、关键来源、停止原因、引用、风险和安全降级全部
     命中；七个故意失败 Action 使尝试成功率低于一，成功响应冲突案例的三个调用则全部成功。覆盖标记
-    必须保持 false，防止 19 条通过被宣传为 28 条验收完成；参数案例必须同时引用错误日志与上游
-    已就绪反证，并使用 v2 因果路径；全源不可用案例仍须保持空 Evidence/根因并安全停止。
+    必须保持 false，防止 20 条通过被宣传为 28 条验收完成；倾斜案例必须同时引用热点分布与正常
+    总量反证，并使用 v3 因果路径；参数案例继续使用 v2 路径，全源不可用案例继续安全停止。
     """
 
     cases = load_golden_cases(GOLDEN_CASE_FILE)
@@ -168,12 +168,12 @@ async def test_nineteen_golden_cases_produce_versioned_measured_diagnosis_baseli
 
     assert report.contract_id == GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID
     assert report.metric_kind == "measured"
-    assert report.case_count == 19
+    assert report.case_count == 20
     assert report.target_case_count == 28
-    assert report.case_coverage_rate == pytest.approx(19 / 28)
+    assert report.case_coverage_rate == pytest.approx(20 / 28)
     assert report.target_coverage_complete is False
     assert report.category_case_counts == {
-        GoldenCaseCategory.SINGLE_COMPONENT: 5,
+        GoldenCaseCategory.SINGLE_COMPONENT: 6,
         GoldenCaseCategory.CROSS_COMPONENT: 4,
         GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 4,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
@@ -188,7 +188,7 @@ async def test_nineteen_golden_cases_produce_versioned_measured_diagnosis_baseli
     assert report.citation_completeness == 1
     assert report.unsupported_critical_claim_rate == 0
     assert report.duplicate_action_rate == 0
-    assert report.tool_attempt_success_rate == pytest.approx(47 / 54)
+    assert report.tool_attempt_success_rate == pytest.approx(50 / 57)
     assert report.risk_level_hit_rate == 1
     assert report.safe_degradation_rate == 1
     assert report.evidence_conflict_safe_resolution_rate == 1
@@ -311,6 +311,24 @@ async def test_nineteen_golden_cases_produce_versioned_measured_diagnosis_baseli
         "lts_parameter_validation_solution_chain"
     ]
     assert parameter_result.safe_degradation_hit is None
+    skew_result = next(
+        result
+        for result in report.cases
+        if result.case_id == "golden_bds_data_skew_single"
+    )
+    assert skew_result.executed_tools == [
+        "bds.get_task_status",
+        "bds.get_task_log",
+        "bds.get_table_info",
+    ]
+    assert skew_result.observed_evidence_sources == [
+        "bds_status_customer_segment_long_tail",
+        "bds_log_customer_segment_skew",
+        "bds_table_customer_segment_normal_volume",
+    ]
+    assert skew_result.actual_top1_root_cause == "BDS 数据倾斜"
+    assert skew_result.matched_fault_path_labels == ["bds_data_skew_solution_chain"]
+    assert skew_result.actual_risk_level is RiskLevel.MEDIUM
 
 
 @pytest.mark.asyncio
@@ -805,11 +823,14 @@ def _build_retrieved_paths(case: GoldenCaseSpec) -> list[RetrievedPath]:
             node_ids=requirement.required_node_ids,
             relation_types=list(requirement.required_relation_types),
             score=0.9,
-            # 新增参数因果链来自 graph-seed:v2；旧路径保留 v1 来源，避免评测替身抹平知识演进。
+            # v2/v3 新路径保留各自来源，旧路径继续使用 v1，避免评测替身抹平知识演进。
             source_ids=[
-                "synthetic_cross_chain_knowledge_v2"
-                if requirement.path_label == "lts_parameter_validation_solution_chain"
-                else "synthetic_cross_chain_knowledge_v1"
+                {
+                    "lts_parameter_validation_solution_chain": (
+                        "synthetic_cross_chain_knowledge_v2"
+                    ),
+                    "bds_data_skew_solution_chain": "synthetic_cross_chain_knowledge_v3",
+                }.get(requirement.path_label, "synthetic_cross_chain_knowledge_v1")
             ],
         )
         for requirement in case.required_fault_paths

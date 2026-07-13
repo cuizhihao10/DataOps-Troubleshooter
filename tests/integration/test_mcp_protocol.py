@@ -322,6 +322,59 @@ async def test_bds_permission_denied_is_not_retried_or_turned_into_evidence() ->
 
 
 @pytest.mark.asyncio
+async def test_bds_data_skew_preserves_normal_volume_counterevidence() -> None:
+    """验证 BDS 长尾场景同时返回热点分布证据和正常总量反证。
+
+    状态确认尾部停滞但执行器在线，日志提供 9.6 倍热点分桶，表信息证明分区已就绪且行数落在
+    基线区间。三项均通过真实 MCP 成功返回并保留 source_id，使上层能够区分数据倾斜、输入暴增、
+    缺分区和资源丢失，而不是只凭“运行很慢”选择根因。
+    """
+
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    resources = {
+        "bds.get_task_status": "bds_customer_segment_daily",
+        "bds.get_task_log": "bds_customer_segment_daily",
+        "bds.get_table_info": "dwd_customer_segment_input",
+    }
+    observations = {}
+    # 表工具使用数据集 ID、状态/日志使用任务 ID，保留真实工具边界而不是强行统一 resource_id。
+    for tool_name, resource_id in resources.items():
+        observations[tool_name] = await executor.execute(
+            _action(
+                "bds_data_skew",
+                resource_id,
+                f"trace_bds_skew_{tool_name.replace('.', '_')}",
+                tool_name=tool_name,
+            )
+        )
+
+    status = observations["bds.get_task_status"]
+    log = observations["bds.get_task_log"]
+    table = observations["bds.get_table_info"]
+    assert all(observation.response.ok for observation in observations.values())
+    assert status.response.data["progress_percent"] == 83
+    assert status.response.data["active_executors"] == 16
+    assert log.response.data["component_error_code"] == "DATA_SKEW_DETECTED"
+    assert log.response.data["skew_ratio"] == pytest.approx(9.6)
+    assert log.response.data["executor_lost"] == 0
+    assert table.response.data["partition_ready"] is True
+    assert (
+        table.response.data["baseline_row_count_min"]
+        <= table.response.data["row_count"]
+        <= table.response.data["baseline_row_count_max"]
+    )
+    # 反证 source 与直接倾斜 source 同等可寻址，确保报告审计能检查排除过程。
+    assert {
+        observation.response.evidence[0].source_id
+        for observation in observations.values()
+    } == {
+        "bds_status_customer_segment_long_tail",
+        "bds_log_customer_segment_skew",
+        "bds_table_customer_segment_normal_volume",
+    }
+
+
+@pytest.mark.asyncio
 async def test_successful_bds_responses_preserve_conflicting_partition_facts_over_mcp() -> None:
     """验证三个成功 BDS 响应经真实 MCP 后仍保留互相矛盾的业务事实。
 

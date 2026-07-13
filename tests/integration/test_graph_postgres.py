@@ -70,14 +70,14 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
             await session.commit()
 
             node_count, edge_count = await repository.count_graph()
-            assert node_count == 14
-            assert edge_count == 15
+            assert node_count == 17
+            assert edge_count == 17
             assert (
                 await repository.count_embedded_nodes(
                     provider_id=embedding_provider.provider_id,
                     dimensions=embedding_provider.dimensions,
                 )
-                == 14
+                == 17
             )
 
             # 直接绕过 Pydantic 篡改维度，确认数据库 CheckConstraint 仍能拒绝不兼容向量元数据。
@@ -160,6 +160,29 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
                 "RESOLVED_BY",
             ]
             assert parameter_path.depth == 2
+
+            # v3 的 BDS 查询必须得到另一条独立两跳路径；使用节点序列和关系序列双重断言，避免
+            # LTS v2 路径通过后掩盖新边没有真正写入 PostgreSQL 的问题。
+            skew_result = await service.retrieve(
+                "BDS 执行阶段长尾 数据倾斜",
+                seed_limit=5,
+                max_hops=2,
+            )
+            skew_path = next(
+                path
+                for path in skew_result.paths
+                if [node.node_id for node in path.nodes]
+                == [
+                    "symptom_bds_long_tail_stage",
+                    "root_cause_bds_data_skew",
+                    "solution_rebalance_bds_skew",
+                ]
+            )
+            assert [edge.relation_type.value for edge in skew_path.edges] == [
+                "CAUSED_BY",
+                "RESOLVED_BY",
+            ]
+            assert skew_path.depth == 2
 
             # 使用同一查询和预算运行 vector-only/vector+graph，结构化记录图扩展的实测增益。
             ablation_case = load_graph_ablation_cases(

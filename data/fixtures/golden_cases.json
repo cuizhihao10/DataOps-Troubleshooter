@@ -614,5 +614,45 @@
       "evidence_sufficient"
     ],
     "expected_risk_level": "medium"
+  },
+  {
+    "contract_id": "golden-case:v7",
+    "case_id": "golden_bds_data_skew_single",
+    "case_category": "single_component",
+    "user_query": "BDS 作业 bds_customer_segment_daily 在聚合阶段长时间停在 83%，请判断是总数据量暴增还是数据倾斜。",
+    "scenario_id": "bds_data_skew",
+    "expected_intent": "single_component_diagnosis",
+    "required_tools": [
+      "bds.get_task_status",
+      "bds.get_task_log",
+      "bds.get_table_info"
+    ],
+    "required_fault_paths": [
+      {
+        "path_label": "bds_data_skew_solution_chain",
+        "required_node_ids": [
+          "symptom_bds_long_tail_stage",
+          "root_cause_bds_data_skew",
+          "solution_rebalance_bds_skew"
+        ],
+        "required_relation_types": [
+          "CAUSED_BY",
+          "RESOLVED_BY"
+        ]
+      }
+    ],
+    "allowed_root_causes": [
+      "BDS 数据倾斜",
+      "热点分区导致执行阶段长尾"
+    ],
+    "required_evidence_sources": [
+      "bds_status_customer_segment_long_tail",
+      "bds_log_customer_segment_skew",
+      "bds_table_customer_segment_normal_volume"
+    ],
+    "expected_stop_reasons": [
+      "evidence_sufficient"
+    ],
+    "expected_risk_level": "medium"
   }
 ]
