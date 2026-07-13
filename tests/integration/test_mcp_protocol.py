@@ -632,6 +632,60 @@ async def test_flashsync_partial_evidence_preserves_symptoms_without_fake_cause(
 
 
 @pytest.mark.asyncio
+async def test_flashsync_checkpoint_regression_aligns_offset_and_consistency_gaps() -> None:
+    """验证检查点回退的位点差、积压和目标缺失记录在真实 MCP 中一致。
+
+    延迟工具给出当前/已提交 offset，日志明确旧快照恢复并阻止自动重放，一致性工具确认同量目标
+    缺失且无重复。三项独立 Observation 必须共享 1200 的差值和稳定 source_id，防止上层把普通延迟、
+    主键冲突或目标重复误报成检查点回退。
+    """
+
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    observations = {}
+    # 三项工具共享同一资源和事实窗口，但使用独立 trace 保证每个 ToolEvent 可单独审计。
+    for tool_name in (
+        "flashsync.get_sync_delay",
+        "flashsync.get_sync_log",
+        "flashsync.check_consistency",
+    ):
+        observations[tool_name] = await executor.execute(
+            _action(
+                "flashsync_checkpoint_regression",
+                "ods_customer_status_delta",
+                f"trace_checkpoint_{tool_name.replace('.', '_')}",
+                tool_name=tool_name,
+            )
+        )
+
+    delay = observations["flashsync.get_sync_delay"]
+    log = observations["flashsync.get_sync_log"]
+    consistency = observations["flashsync.check_consistency"]
+    assert all(observation.response.ok for observation in observations.values())
+    assert delay.response.data["offset_gap"] == 1200
+    assert delay.response.data["backlog_records"] == 1200
+    assert log.response.data["component_error_code"] == "CHECKPOINT_REGRESSION"
+    assert log.response.data["automatic_replay_blocked"] is True
+    assert consistency.response.data["missing_target_records"] == 1200
+    assert consistency.response.data["duplicate_target_records"] == 0
+    assert (
+        delay.response.data["last_committed_offset"]
+        - delay.response.data["current_offset"]
+        == consistency.response.data["source_offset"]
+        - consistency.response.data["target_offset"]
+        == 1200
+    )
+    # 全部 source_id 都进入公开引用面，后续高风险建议才能同时引用症状、根因和影响范围。
+    assert {
+        observation.response.evidence[0].source_id
+        for observation in observations.values()
+    } == {
+        "flashsync_delay_customer_status_checkpoint",
+        "flashsync_log_customer_status_checkpoint",
+        "flashsync_consistency_customer_status_checkpoint",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "expected_data_key"),
     [

@@ -654,5 +654,45 @@
       "evidence_sufficient"
     ],
     "expected_risk_level": "medium"
+  },
+  {
+    "contract_id": "golden-case:v7",
+    "case_id": "golden_flashsync_checkpoint_regression_single",
+    "case_category": "single_component",
+    "user_query": "FlashSync 的 ods_customer_status_delta 重启后延迟增加，请检查是否发生位点回退并说明恢复风险。",
+    "scenario_id": "flashsync_checkpoint_regression",
+    "expected_intent": "single_component_diagnosis",
+    "required_tools": [
+      "flashsync.get_sync_delay",
+      "flashsync.get_sync_log",
+      "flashsync.check_consistency"
+    ],
+    "required_fault_paths": [
+      {
+        "path_label": "flashsync_checkpoint_regression_solution_chain",
+        "required_node_ids": [
+          "symptom_flashsync_checkpoint_lag",
+          "root_cause_flashsync_checkpoint_regression",
+          "solution_validate_flashsync_checkpoint_restore"
+        ],
+        "required_relation_types": [
+          "CAUSED_BY",
+          "RESOLVED_BY"
+        ]
+      }
+    ],
+    "allowed_root_causes": [
+      "FlashSync 检查点位点回退",
+      "同步任务从旧检查点恢复"
+    ],
+    "required_evidence_sources": [
+      "flashsync_delay_customer_status_checkpoint",
+      "flashsync_log_customer_status_checkpoint",
+      "flashsync_consistency_customer_status_checkpoint"
+    ],
+    "expected_stop_reasons": [
+      "evidence_sufficient"
+    ],
+    "expected_risk_level": "high"
   }
 ]

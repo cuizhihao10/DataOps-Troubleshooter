@@ -1,0 +1,105 @@
+{
+  "scenario_id": "flashsync_checkpoint_regression",
+  "title": "FlashSync 从旧检查点恢复导致位点回退",
+  "description": "FlashSync 合成任务重启后加载旧检查点，当前 offset 比已提交位点落后 1200，并产生同量目标端缺失。",
+  "components": ["flashsync"],
+  "expected_behavior": "系统应结合延迟、检查点日志和一致性差异定位位点回退，并将恢复操作标记为需要备份和受控重放的高风险建议。",
+  "tool_results": [
+    {
+      "tool_name": "flashsync.get_sync_delay",
+      "request": {
+        "resource_id": "ods_customer_status_delta",
+        "time_range": {
+          "start": "2026-07-13T05:00:00+08:00",
+          "end": "2026-07-13T06:00:00+08:00"
+        },
+        "scenario_id": "flashsync_checkpoint_regression",
+        "trace_id": "trace_flashsync_checkpoint_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "delay_seconds": 2400,
+          "backlog_records": 1200,
+          "throughput_per_second": 12,
+          "current_offset": 87220,
+          "last_committed_offset": 88420,
+          "offset_gap": 1200
+        },
+        "evidence": [
+          {
+            "source_id": "flashsync_delay_customer_status_checkpoint",
+            "content": "当前 offset 87220 比已提交位点 88420 落后 1200，积压同为 1200 条。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T06:01:00+08:00"
+      }
+    },
+    {
+      "tool_name": "flashsync.get_sync_log",
+      "request": {
+        "resource_id": "ods_customer_status_delta",
+        "time_range": {
+          "start": "2026-07-13T05:00:00+08:00",
+          "end": "2026-07-13T06:00:00+08:00"
+        },
+        "scenario_id": "flashsync_checkpoint_regression",
+        "trace_id": "trace_flashsync_checkpoint_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "component_error_code": "CHECKPOINT_REGRESSION",
+          "restore_source": "stale_snapshot_20260713_0455",
+          "restored_offset": 87220,
+          "last_committed_offset": 88420,
+          "automatic_replay_blocked": true
+        },
+        "evidence": [
+          {
+            "source_id": "flashsync_log_customer_status_checkpoint",
+            "content": "任务从 stale_snapshot_20260713_0455 恢复到旧位点 87220，系统因 CHECKPOINT_REGRESSION 阻止自动重放。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T06:01:05+08:00"
+      }
+    },
+    {
+      "tool_name": "flashsync.check_consistency",
+      "request": {
+        "resource_id": "ods_customer_status_delta",
+        "time_range": {
+          "start": "2026-07-13T05:00:00+08:00",
+          "end": "2026-07-13T06:00:00+08:00"
+        },
+        "scenario_id": "flashsync_checkpoint_regression",
+        "trace_id": "trace_flashsync_checkpoint_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "consistent": false,
+          "difference_count": 1200,
+          "missing_target_records": 1200,
+          "duplicate_target_records": 0,
+          "source_offset": 88420,
+          "target_offset": 87220,
+          "sampled_records": 5000
+        },
+        "evidence": [
+          {
+            "source_id": "flashsync_consistency_customer_status_checkpoint",
+            "content": "目标端缺少 1200 条且没有重复记录，源目标 offset 差值同为 1200。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T06:01:10+08:00"
+      }
+    }
+  ]
+}

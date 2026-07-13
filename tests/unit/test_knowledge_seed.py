@@ -29,9 +29,9 @@ def test_curated_seed_uses_approved_node_and_relation_contracts() -> None:
 
     bundle = load_knowledge_seed(SEED_FILE)
 
-    assert bundle.seed_version == "graph-seed:v3"
-    assert len(bundle.nodes) == 17
-    assert len(bundle.edges) == 17
+    assert bundle.seed_version == "graph-seed:v4"
+    assert len(bundle.nodes) == 20
+    assert len(bundle.edges) == 19
     assert {node.node_type for node in bundle.nodes} <= set(KnowledgeNodeType)
     assert {edge.relation_type for edge in bundle.edges} <= set(KnowledgeRelationType)
     assert all(node.source_span for node in bundle.nodes)
@@ -101,6 +101,30 @@ def test_single_component_seed_contains_bds_skew_cause_and_solution_path() -> No
     assert cause.relation_type is KnowledgeRelationType.CAUSED_BY
     assert solution.relation_type is KnowledgeRelationType.RESOLVED_BY
     assert {cause.source_id, solution.source_id} == {"synthetic_cross_chain_knowledge_v3"}
+
+
+def test_single_component_seed_contains_flashsync_checkpoint_recovery_path() -> None:
+    """验证 v4 种子把位点落后、检查点回退和受控恢复连接为高风险路径。
+
+    原因边与方案边必须按症状→根因→方案连接并保留 v4 source。静态检查不能衡量恢复安全性，但能
+    防止知识 JSON 只写“重放”文本却缺少显式因果关系，或把新知识错误归入旧版本来源。
+    """
+
+    bundle = load_knowledge_seed(SEED_FILE)
+    edges = {edge.edge_id: edge for edge in bundle.edges}
+
+    cause = edges["edge_flashsync_checkpoint_lag_caused_by_regression"]
+    solution = edges["edge_flashsync_checkpoint_regression_resolved_by_validation"]
+    assert cause.from_node_id == "symptom_flashsync_checkpoint_lag"
+    assert (
+        cause.to_node_id
+        == solution.from_node_id
+        == "root_cause_flashsync_checkpoint_regression"
+    )
+    assert solution.to_node_id == "solution_validate_flashsync_checkpoint_restore"
+    assert cause.relation_type is KnowledgeRelationType.CAUSED_BY
+    assert solution.relation_type is KnowledgeRelationType.RESOLVED_BY
+    assert {cause.source_id, solution.source_id} == {"synthetic_cross_chain_knowledge_v4"}
 
 
 def test_seed_rejects_dangling_edge_reference() -> None:

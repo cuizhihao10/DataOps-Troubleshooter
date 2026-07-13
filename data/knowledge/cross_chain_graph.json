@@ -1,6 +1,6 @@
 {
-  "seed_version": "graph-seed:v3",
-  "source_id": "synthetic_cross_chain_knowledge_v3",
+  "seed_version": "graph-seed:v4",
+  "source_id": "synthetic_cross_chain_knowledge_v4",
   "nodes": [
     {
       "node_id": "component_lts",
@@ -188,6 +188,39 @@
       "source_span": "处理倾斜应先验证热点，再受控调整分区策略并复核结果，不能直接扩大全局资源。",
       "reliability": 1.0,
       "embedding": null
+    },
+    {
+      "node_id": "symptom_flashsync_checkpoint_lag",
+      "node_type": "symptom",
+      "name": "FlashSync 检查点落后",
+      "content": "当前同步 offset 落后于已提交位点，并出现与位点差相同的记录积压。",
+      "aliases": ["checkpoint lag", "offset gap", "stale checkpoint"],
+      "source_id": "synthetic_cross_chain_knowledge_v4",
+      "source_span": "检查点落后会表现为位点差、同步延迟和待处理记录同时增加。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "root_cause_flashsync_checkpoint_regression",
+      "node_type": "root_cause",
+      "name": "FlashSync 检查点位点回退",
+      "content": "任务重启时加载旧检查点，使当前 offset 低于已提交位点并触发重放保护。",
+      "aliases": ["checkpoint regression", "CHECKPOINT_REGRESSION", "offset rollback"],
+      "source_id": "synthetic_cross_chain_knowledge_v4",
+      "source_span": "旧检查点恢复和当前/已提交 offset 差共同支持位点回退根因。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "solution_validate_flashsync_checkpoint_restore",
+      "node_type": "solution",
+      "name": "校验位点并受控恢复 FlashSync",
+      "content": "先备份目标差异与检查点，核对已提交位点和幂等边界，再小批量重放并复查重复与缺失。",
+      "aliases": ["validate checkpoint restore", "controlled replay", "checkpoint recovery"],
+      "source_id": "synthetic_cross_chain_knowledge_v4",
+      "source_span": "位点恢复可能重复写入或遗漏数据，必须备份、验证幂等性并受控重放。",
+      "reliability": 1.0,
+      "embedding": null
     }
   ],
   "edges": [
@@ -343,6 +376,24 @@
       "weight": 1.0,
       "source_id": "synthetic_cross_chain_knowledge_v3",
       "source_span": "数据倾斜通过确认热点并受控调整分区或聚合策略缓解。"
+    },
+    {
+      "edge_id": "edge_flashsync_checkpoint_lag_caused_by_regression",
+      "from_node_id": "symptom_flashsync_checkpoint_lag",
+      "to_node_id": "root_cause_flashsync_checkpoint_regression",
+      "relation_type": "CAUSED_BY",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v4",
+      "source_span": "FlashSync 位点落后和积压由加载旧检查点导致。"
+    },
+    {
+      "edge_id": "edge_flashsync_checkpoint_regression_resolved_by_validation",
+      "from_node_id": "root_cause_flashsync_checkpoint_regression",
+      "to_node_id": "solution_validate_flashsync_checkpoint_restore",
+      "relation_type": "RESOLVED_BY",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v4",
+      "source_span": "检查点回退应通过备份、位点核对、幂等验证和受控重放处理。"
     }
   ]
 }
