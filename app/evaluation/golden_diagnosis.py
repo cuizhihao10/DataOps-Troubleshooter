@@ -23,7 +23,7 @@ from app.domain.scenarios import (
 from app.orchestration.diagnosis_models import DiagnosisRunResult
 from app.orchestration.report_models import ReportWorkflowOutcome
 
-GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID = "golden-diagnosis-eval:v15"
+GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID = "golden-diagnosis-eval:v16"
 GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT = 28
 GOLDEN_DIAGNOSIS_CATEGORY_TARGETS: dict[GoldenCaseCategory, int] = {
     GoldenCaseCategory.SINGLE_COMPONENT: 8,
@@ -193,7 +193,7 @@ class GoldenDiagnosisEvalReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    contract_id: Literal["golden-diagnosis-eval:v15"]
+    contract_id: Literal["golden-diagnosis-eval:v16"]
     metric_kind: Literal["measured"] = "measured"
     case_count: int = Field(ge=1)
     target_case_count: int = Field(default=GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT, ge=1)

@@ -736,6 +736,75 @@ async def test_flashsync_schema_mapping_aligns_rejections_and_missing_records() 
 
 
 @pytest.mark.asyncio
+async def test_customer_profile_schema_failure_propagates_across_real_mcp_protocol() -> None:
+    """验证同一 600 条 Schema 缺口经真实 MCP 从 FlashSync 传播到 BDS 和 LTS。
+
+    六项只读调用必须共同证明：LTS 依赖拓扑指向 BDS/FlashSync；BDS 分区存在且资源正常，但
+    5000 条预期输入只到达 4400 条；FlashSync v11 映射拒绝源 v12 的 600 条记录且无重复。
+    数量、版本和稳定 source_id 同时闭合，防止 Golden runner 绕过协议或把 BDS 资源压力误报为根因。
+    """
+
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    calls = (
+        ("lts.get_task_status", "dws_customer_profile_daily"),
+        ("lts.get_dependency_topology", "dws_customer_profile_daily"),
+        ("bds.get_task_status", "bds_customer_profile_hourly"),
+        ("bds.get_table_info", "ods_customer_profile_delta"),
+        ("flashsync.get_sync_log", "ods_customer_profile_delta"),
+        ("flashsync.check_consistency", "ods_customer_profile_delta"),
+    )
+    observations = {}
+    for tool_name, resource_id in calls:
+        # 每次调用使用独立 trace，既共享同一合成事实窗口，又让六个 ToolEvent 可分别审计。
+        observations[tool_name] = await executor.execute(
+            _action(
+                "cross_customer_profile_schema_propagation",
+                resource_id,
+                f"trace_schema_cross_{tool_name.replace('.', '_')}",
+                tool_name=tool_name,
+            )
+        )
+
+    assert all(observation.response.ok for observation in observations.values())
+    lts_status = observations["lts.get_task_status"].response.data
+    topology = observations["lts.get_dependency_topology"].response.data
+    bds_status = observations["bds.get_task_status"].response.data
+    table = observations["bds.get_table_info"].response.data
+    sync_log = observations["flashsync.get_sync_log"].response.data
+    consistency = observations["flashsync.check_consistency"].response.data
+    assert lts_status["upstream_ready"] is False
+    assert topology["upstream_task"] == "bds_customer_profile_hourly"
+    assert topology["source_sync_task"] == "flashsync_customer_profile_delta"
+    assert bds_status["cpu_percent"] < 50
+    assert bds_status["memory_percent"] < 50
+    assert table["latest_partition"] == table["expected_partition"]
+    assert sync_log["source_schema_version"] == 12
+    assert sync_log["mapping_schema_version"] == 11
+    assert sync_log["unmapped_fields"] == ["customer_tier"]
+    assert consistency["duplicate_target_records"] == 0
+    assert (
+        lts_status["missing_upstream_records"]
+        == bds_status["missing_records"]
+        == table["missing_records"]
+        == sync_log["rejected_records"]
+        == consistency["missing_target_records"]
+        == consistency["schema_parse_failures"]
+        == 600
+    )
+    assert {
+        observation.response.evidence[0].source_id
+        for observation in observations.values()
+    } == {
+        "lts_status_customer_profile_schema_cross",
+        "lts_topology_customer_profile_schema_cross",
+        "bds_status_customer_profile_schema_cross",
+        "bds_table_customer_profile_schema_cross",
+        "flashsync_log_customer_profile_schema_cross",
+        "flashsync_consistency_customer_profile_schema_cross",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "expected_data_key"),
     [

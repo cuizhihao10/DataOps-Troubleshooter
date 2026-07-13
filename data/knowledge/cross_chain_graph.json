@@ -1,6 +1,6 @@
 {
-  "seed_version": "graph-seed:v5",
-  "source_id": "synthetic_cross_chain_knowledge_v5",
+  "seed_version": "graph-seed:v6",
+  "source_id": "synthetic_cross_chain_knowledge_v6",
   "nodes": [
     {
       "node_id": "component_lts",
@@ -254,6 +254,50 @@
       "source_span": "映射更新必须先做兼容性和预览验证，再受控回放并核对一致性。",
       "reliability": 1.0,
       "embedding": null
+    },
+    {
+      "node_id": "task_lts_customer_profile_report",
+      "node_type": "task",
+      "name": "dws_customer_profile_daily",
+      "content": "LTS 客户画像日报等待 BDS 小时聚合作业完成后生成下游报表。",
+      "aliases": ["customer profile daily report", "LTS 客户画像日报"],
+      "source_id": "synthetic_cross_chain_knowledge_v6",
+      "source_span": "LTS 客户画像日报以 BDS 客户画像小时聚合作业作为直接上游依赖。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "task_bds_customer_profile_aggregate",
+      "node_type": "task",
+      "name": "bds_customer_profile_hourly",
+      "content": "BDS 客户画像小时作业消费 FlashSync 同步的客户画像增量数据。",
+      "aliases": ["customer profile aggregate", "BDS 客户画像小时作业"],
+      "source_id": "synthetic_cross_chain_knowledge_v6",
+      "source_span": "BDS 客户画像小时作业依赖 FlashSync 客户画像增量同步任务和其数据集。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "task_flashsync_customer_profile_delta",
+      "node_type": "task",
+      "name": "flashsync_customer_profile_delta",
+      "content": "FlashSync 客户画像增量任务将源端新版 Schema 记录同步到 ods_customer_profile_delta。",
+      "aliases": ["customer profile sync", "FlashSync 客户画像增量"],
+      "source_id": "synthetic_cross_chain_knowledge_v6",
+      "source_span": "FlashSync 客户画像增量任务为 BDS 生成客户画像增量数据集。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "dataset_ods_customer_profile_delta",
+      "node_type": "dataset",
+      "name": "ods_customer_profile_delta",
+      "content": "客户画像增量数据集由 FlashSync 生成并被 BDS 小时聚合作业消费。",
+      "aliases": ["customer profile delta dataset"],
+      "source_id": "synthetic_cross_chain_knowledge_v6",
+      "source_span": "ods_customer_profile_delta 是 FlashSync 与 BDS 之间的显式数据边界。",
+      "reliability": 1.0,
+      "embedding": null
     }
   ],
   "edges": [
@@ -445,6 +489,78 @@
       "weight": 1.0,
       "source_id": "synthetic_cross_chain_knowledge_v5",
       "source_span": "映射滞后应通过 Schema 比对、映射预览、小批量回放和一致性验证处理。"
+    },
+    {
+      "edge_id": "edge_lts_customer_profile_runs_on",
+      "from_node_id": "task_lts_customer_profile_report",
+      "to_node_id": "component_lts",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v6",
+      "source_span": "dws_customer_profile_daily 由 LTS 调度组件运行。"
+    },
+    {
+      "edge_id": "edge_bds_customer_profile_runs_on",
+      "from_node_id": "task_bds_customer_profile_aggregate",
+      "to_node_id": "component_bds",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v6",
+      "source_span": "bds_customer_profile_hourly 由 BDS 计算组件运行。"
+    },
+    {
+      "edge_id": "edge_flashsync_customer_profile_runs_on",
+      "from_node_id": "task_flashsync_customer_profile_delta",
+      "to_node_id": "component_flashsync",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v6",
+      "source_span": "flashsync_customer_profile_delta 由 FlashSync 同步组件运行。"
+    },
+    {
+      "edge_id": "edge_lts_customer_profile_depends_bds",
+      "from_node_id": "task_lts_customer_profile_report",
+      "to_node_id": "task_bds_customer_profile_aggregate",
+      "relation_type": "DEPENDS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v6",
+      "source_span": "LTS 客户画像日报依赖 BDS 客户画像小时聚合作业产出。"
+    },
+    {
+      "edge_id": "edge_bds_customer_profile_depends_flashsync",
+      "from_node_id": "task_bds_customer_profile_aggregate",
+      "to_node_id": "task_flashsync_customer_profile_delta",
+      "relation_type": "DEPENDS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v6",
+      "source_span": "BDS 客户画像聚合作业依赖 FlashSync 客户画像增量同步完成。"
+    },
+    {
+      "edge_id": "edge_flashsync_customer_profile_produces_dataset",
+      "from_node_id": "task_flashsync_customer_profile_delta",
+      "to_node_id": "dataset_ods_customer_profile_delta",
+      "relation_type": "PRODUCES",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v6",
+      "source_span": "FlashSync 客户画像增量任务生成 ods_customer_profile_delta。"
+    },
+    {
+      "edge_id": "edge_bds_customer_profile_consumes_dataset",
+      "from_node_id": "task_bds_customer_profile_aggregate",
+      "to_node_id": "dataset_ods_customer_profile_delta",
+      "relation_type": "CONSUMES",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v6",
+      "source_span": "BDS 客户画像聚合作业消费 ods_customer_profile_delta。"
+    },
+    {
+      "edge_id": "edge_flashsync_customer_profile_manifests_schema_rejection",
+      "from_node_id": "task_flashsync_customer_profile_delta",
+      "to_node_id": "symptom_flashsync_schema_rejection",
+      "relation_type": "MANIFESTS_AS",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v6",
+      "source_span": "客户画像增量任务使用旧映射消费新 Schema 时表现为记录拒绝。"
     }
   ]
 }

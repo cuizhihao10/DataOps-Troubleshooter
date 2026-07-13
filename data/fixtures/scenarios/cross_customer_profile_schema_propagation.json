@@ -1,0 +1,201 @@
+{
+  "scenario_id": "cross_customer_profile_schema_propagation",
+  "title": "FlashSync Schema 映射滞后阻塞客户画像链路",
+  "description": "独立的三组件合成故障环境：FlashSync 旧字段映射拒绝 600 条客户画像增量，BDS 输入校验发现同量缺失，最终使 LTS 日报等待上游产出超时。",
+  "components": ["lts", "bds", "flashsync"],
+  "expected_behavior": "诊断应沿 LTS→BDS→FlashSync 依赖链追到字段映射版本滞后，并用三层一致的 600 条缺失排除 LTS 自身故障和 BDS 资源问题。",
+  "tool_results": [
+    {
+      "tool_name": "lts.get_task_status",
+      "request": {
+        "resource_id": "dws_customer_profile_daily",
+        "time_range": {
+          "start": "2026-07-13T07:00:00+08:00",
+          "end": "2026-07-13T09:00:00+08:00"
+        },
+        "scenario_id": "cross_customer_profile_schema_propagation",
+        "trace_id": "trace_customer_profile_schema_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "status": "failed",
+          "retry_count": 1,
+          "upstream_ready": false,
+          "deadline_exceeded": true,
+          "missing_upstream_records": 600
+        },
+        "evidence": [
+          {
+            "source_id": "lts_status_customer_profile_schema_cross",
+            "content": "LTS 日报等待客户画像上游产出超时，校验窗口仍缺少 600 条记录。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T09:01:00+08:00"
+      }
+    },
+    {
+      "tool_name": "lts.get_dependency_topology",
+      "request": {
+        "resource_id": "dws_customer_profile_daily",
+        "time_range": {
+          "start": "2026-07-13T07:00:00+08:00",
+          "end": "2026-07-13T09:00:00+08:00"
+        },
+        "scenario_id": "cross_customer_profile_schema_propagation",
+        "trace_id": "trace_customer_profile_schema_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "upstream_task": "bds_customer_profile_hourly",
+          "source_sync_task": "flashsync_customer_profile_delta",
+          "dataset": "ods_customer_profile_delta",
+          "link_state": "blocked"
+        },
+        "evidence": [
+          {
+            "source_id": "lts_topology_customer_profile_schema_cross",
+            "content": "LTS 日报依赖 BDS 客户画像作业，后者消费 FlashSync 产出的 ods_customer_profile_delta，当前链路阻塞。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T09:01:05+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_task_status",
+      "request": {
+        "resource_id": "bds_customer_profile_hourly",
+        "time_range": {
+          "start": "2026-07-13T07:00:00+08:00",
+          "end": "2026-07-13T09:00:00+08:00"
+        },
+        "scenario_id": "cross_customer_profile_schema_propagation",
+        "trace_id": "trace_customer_profile_schema_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "status": "running",
+          "stage": "source_validation",
+          "duration_seconds": 4200,
+          "cpu_percent": 24,
+          "memory_percent": 31,
+          "expected_records": 5000,
+          "available_records": 4400,
+          "missing_records": 600
+        },
+        "evidence": [
+          {
+            "source_id": "bds_status_customer_profile_schema_cross",
+            "content": "BDS 停在源数据校验阶段，5000 条预期输入仅到达 4400 条，CPU 与内存未饱和。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T09:01:10+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_table_info",
+      "request": {
+        "resource_id": "ods_customer_profile_delta",
+        "time_range": {
+          "start": "2026-07-13T07:00:00+08:00",
+          "end": "2026-07-13T09:00:00+08:00"
+        },
+        "scenario_id": "cross_customer_profile_schema_propagation",
+        "trace_id": "trace_customer_profile_schema_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "latest_partition": "2026-07-13-08",
+          "expected_partition": "2026-07-13-08",
+          "row_count": 4400,
+          "expected_row_count": 5000,
+          "missing_records": 600,
+          "observed_schema_version": 11,
+          "expected_schema_version": 12
+        },
+        "evidence": [
+          {
+            "source_id": "bds_table_customer_profile_schema_cross",
+            "content": "输入分区已按时建立，但只有 4400/5000 条且仍呈现 v11 结构，缺口为 600 条。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T09:01:15+08:00"
+      }
+    },
+    {
+      "tool_name": "flashsync.get_sync_log",
+      "request": {
+        "resource_id": "ods_customer_profile_delta",
+        "time_range": {
+          "start": "2026-07-13T07:00:00+08:00",
+          "end": "2026-07-13T09:00:00+08:00"
+        },
+        "scenario_id": "cross_customer_profile_schema_propagation",
+        "trace_id": "trace_customer_profile_schema_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "component_error_code": "SCHEMA_MAPPING_OUTDATED",
+          "source_schema_version": 12,
+          "mapping_schema_version": 11,
+          "unmapped_fields": ["customer_tier"],
+          "rejected_records": 600,
+          "automatic_retry_blocked": true
+        },
+        "evidence": [
+          {
+            "source_id": "flashsync_log_customer_profile_schema_cross",
+            "content": "FlashSync v11 映射缺少源 v12 的 customer_tier，SCHEMA_MAPPING_OUTDATED 拒绝 600 条记录。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T09:01:20+08:00"
+      }
+    },
+    {
+      "tool_name": "flashsync.check_consistency",
+      "request": {
+        "resource_id": "ods_customer_profile_delta",
+        "time_range": {
+          "start": "2026-07-13T07:00:00+08:00",
+          "end": "2026-07-13T09:00:00+08:00"
+        },
+        "scenario_id": "cross_customer_profile_schema_propagation",
+        "trace_id": "trace_customer_profile_schema_cross_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "consistent": false,
+          "difference_count": 600,
+          "missing_target_records": 600,
+          "duplicate_target_records": 0,
+          "schema_parse_failures": 600,
+          "sampled_records": 5000
+        },
+        "evidence": [
+          {
+            "source_id": "flashsync_consistency_customer_profile_schema_cross",
+            "content": "目标端缺少 600 条且无重复，全部 600 条差异均由 Schema 解析失败产生。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-13T09:01:25+08:00"
+      }
+    }
+  ]
+}

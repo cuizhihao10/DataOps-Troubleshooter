@@ -29,9 +29,9 @@ def test_curated_seed_uses_approved_node_and_relation_contracts() -> None:
 
     bundle = load_knowledge_seed(SEED_FILE)
 
-    assert bundle.seed_version == "graph-seed:v5"
-    assert len(bundle.nodes) == 23
-    assert len(bundle.edges) == 21
+    assert bundle.seed_version == "graph-seed:v6"
+    assert len(bundle.nodes) == 27
+    assert len(bundle.edges) == 29
     assert {node.node_type for node in bundle.nodes} <= set(KnowledgeNodeType)
     assert {edge.relation_type for edge in bundle.edges} <= set(KnowledgeRelationType)
     assert all(node.source_span for node in bundle.nodes)
@@ -149,6 +149,46 @@ def test_single_component_seed_contains_flashsync_schema_mapping_path() -> None:
     assert cause.relation_type is KnowledgeRelationType.CAUSED_BY
     assert solution.relation_type is KnowledgeRelationType.RESOLVED_BY
     assert {cause.source_id, solution.source_id} == {"synthetic_cross_chain_knowledge_v5"}
+
+
+def test_cross_component_seed_contains_customer_profile_task_and_dataset_topology() -> None:
+    """验证 v6 客户画像知识同时表达任务依赖、数据边界和 Schema 症状入口。
+
+    LTS→BDS→FlashSync 必须是两条同向 DEPENDS_ON，FlashSync/BDS 还需分别 PRODUCES/CONSUMES
+    同一个数据集；同步任务到 Schema 拒绝的 MANIFESTS_AS 使跨组件拓扑能接入既有 v5 因果知识。
+    该门禁避免仅在 Golden 标注中虚构三组件路径，或新增孤立任务节点却无法被递归 CTE 扩展。
+    """
+
+    bundle = load_knowledge_seed(SEED_FILE)
+    edges = {edge.edge_id: edge for edge in bundle.edges}
+
+    lts_dependency = edges["edge_lts_customer_profile_depends_bds"]
+    bds_dependency = edges["edge_bds_customer_profile_depends_flashsync"]
+    produces = edges["edge_flashsync_customer_profile_produces_dataset"]
+    consumes = edges["edge_bds_customer_profile_consumes_dataset"]
+    manifests = edges["edge_flashsync_customer_profile_manifests_schema_rejection"]
+    assert lts_dependency.from_node_id == "task_lts_customer_profile_report"
+    assert (
+        lts_dependency.to_node_id
+        == bds_dependency.from_node_id
+        == "task_bds_customer_profile_aggregate"
+    )
+    assert bds_dependency.to_node_id == "task_flashsync_customer_profile_delta"
+    assert produces.to_node_id == consumes.to_node_id == "dataset_ods_customer_profile_delta"
+    assert produces.from_node_id == manifests.from_node_id
+    assert manifests.to_node_id == "symptom_flashsync_schema_rejection"
+    assert lts_dependency.relation_type is KnowledgeRelationType.DEPENDS_ON
+    assert bds_dependency.relation_type is KnowledgeRelationType.DEPENDS_ON
+    assert produces.relation_type is KnowledgeRelationType.PRODUCES
+    assert consumes.relation_type is KnowledgeRelationType.CONSUMES
+    assert manifests.relation_type is KnowledgeRelationType.MANIFESTS_AS
+    assert {
+        lts_dependency.source_id,
+        bds_dependency.source_id,
+        produces.source_id,
+        consumes.source_id,
+        manifests.source_id,
+    } == {"synthetic_cross_chain_knowledge_v6"}
 
 
 def test_seed_rejects_dangling_edge_reference() -> None:
