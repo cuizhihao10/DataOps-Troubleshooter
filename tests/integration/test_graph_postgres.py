@@ -70,14 +70,14 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
             await session.commit()
 
             node_count, edge_count = await repository.count_graph()
-            assert node_count == 47
-            assert edge_count == 61
+            assert node_count == 54
+            assert edge_count == 71
             assert (
                 await repository.count_embedded_nodes(
                     provider_id=embedding_provider.provider_id,
                     dimensions=embedding_provider.dimensions,
                 )
-                == 47
+                == 54
             )
 
             # 直接绕过 Pydantic 篡改维度，确认数据库 CheckConstraint 仍能拒绝不兼容向量元数据。
@@ -505,6 +505,76 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
                 "RESOLVED_BY",
             ]
             assert source_auth_solution_path.depth == 2
+
+            # v11 从 LTS 订单履约日报沿两条 DEPENDS_ON 到达 FlashSync 订单事件任务，证明最后一条
+            # Golden Case 使用独立任务身份，而不是复用既有订单主键冲突链来凑足跨组件配额。
+            order_dependency_result = await service.retrieve(
+                "dws_order_fulfillment_daily",
+                seed_limit=5,
+                max_hops=2,
+            )
+            order_dependency_path = next(
+                path
+                for path in order_dependency_result.paths
+                if [node.node_id for node in path.nodes]
+                == [
+                    "task_lts_order_fulfillment_report",
+                    "task_bds_order_fulfillment_aggregate",
+                    "task_flashsync_order_event_delta",
+                ]
+            )
+            assert [edge.relation_type.value for edge in order_dependency_path.edges] == [
+                "DEPENDS_ON",
+                "DEPENDS_ON",
+            ]
+            assert order_dependency_path.depth == 2
+
+            # 同步任务查询必须通过 MANIFESTS_AS→CAUSED_BY 连接“进程完成但漏数”的症状与时区根因；
+            # 这防止 GraphRAG 只返回通用延迟文本而没有解释绿色状态下的数据质量失败。
+            watermark_manifest_result = await service.retrieve(
+                "flashsync_order_event_delta",
+                seed_limit=5,
+                max_hops=2,
+            )
+            watermark_manifest_path = next(
+                path
+                for path in watermark_manifest_result.paths
+                if [node.node_id for node in path.nodes]
+                == [
+                    "task_flashsync_order_event_delta",
+                    "symptom_flashsync_incremental_window_skipped",
+                    "root_cause_flashsync_watermark_timezone_mismatch",
+                ]
+            )
+            assert [edge.relation_type.value for edge in watermark_manifest_path.edges] == [
+                "MANIFESTS_AS",
+                "CAUSED_BY",
+            ]
+            assert watermark_manifest_path.depth == 2
+
+            # 从实时一致性结果可形成的“增量窗口静默漏数”症状查询受控方案链；不能从根因反向补
+            # 症状，因为图扩展保持有向语义。高风险回补需要冻结位点、幂等验证和回滚点，路径存在
+            # 只提供解释与建议，不授予 Agent 自动修改水位线或向生产目标写入的能力。
+            watermark_solution_result = await service.retrieve(
+                "FlashSync 增量窗口静默漏数 incremental window skipped",
+                seed_limit=5,
+                max_hops=2,
+            )
+            watermark_solution_path = next(
+                path
+                for path in watermark_solution_result.paths
+                if [node.node_id for node in path.nodes]
+                == [
+                    "symptom_flashsync_incremental_window_skipped",
+                    "root_cause_flashsync_watermark_timezone_mismatch",
+                    "solution_align_flashsync_watermark_and_bounded_backfill",
+                ]
+            )
+            assert [edge.relation_type.value for edge in watermark_solution_path.edges] == [
+                "CAUSED_BY",
+                "RESOLVED_BY",
+            ]
+            assert watermark_solution_path.depth == 2
 
             # 使用同一查询和预算运行 vector-only/vector+graph，结构化记录图扩展的实测增益。
             ablation_case = load_graph_ablation_cases(

@@ -1,6 +1,6 @@
 {
-  "seed_version": "graph-seed:v10",
-  "source_id": "synthetic_cross_chain_knowledge_v10",
+  "seed_version": "graph-seed:v11",
+  "source_id": "synthetic_cross_chain_knowledge_v11",
   "nodes": [
     {
       "node_id": "component_lts",
@@ -516,6 +516,83 @@
       "aliases": ["secure source authorization rotation", "源端授权安全轮换"],
       "source_id": "synthetic_cross_chain_knowledge_v10",
       "source_span": "方案只描述安全流程、验证和回滚边界，不生成、存储或传输授权值。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "task_lts_order_fulfillment_report",
+      "node_type": "task",
+      "name": "dws_order_fulfillment_daily",
+      "content": "LTS 订单履约日报在 BDS 输入数量通过质量门禁后才开始本地计算。",
+      "aliases": ["order fulfillment daily", "LTS 订单履约日报"],
+      "source_id": "synthetic_cross_chain_knowledge_v11",
+      "source_span": "LTS 订单履约日报以 BDS 订单履约聚合作业作为直接上游依赖。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "task_bds_order_fulfillment_aggregate",
+      "node_type": "task",
+      "name": "bds_order_fulfillment_aggregate_hourly",
+      "content": "BDS 订单履约聚合作业消费订单事件增量，输入数量不足时停在源记录数校验。",
+      "aliases": ["order fulfillment aggregate hourly", "BDS 订单履约聚合"],
+      "source_id": "synthetic_cross_chain_knowledge_v11",
+      "source_span": "BDS 订单履约聚合作业依赖 FlashSync 订单事件增量任务及其数据集。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "task_flashsync_order_event_delta",
+      "node_type": "task",
+      "name": "flashsync_order_event_delta",
+      "content": "FlashSync 订单事件增量任务按事件时间水位线筛选合成源记录并生成 ods_order_event_delta。",
+      "aliases": ["order event delta delivery", "FlashSync 订单事件增量"],
+      "source_id": "synthetic_cross_chain_knowledge_v11",
+      "source_span": "FlashSync 订单事件增量任务为 BDS 订单履约聚合作业提供输入。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "dataset_ods_order_event_delta",
+      "node_type": "dataset",
+      "name": "ods_order_event_delta",
+      "content": "订单事件增量数据集由 FlashSync 生成并被 BDS 订单履约聚合作业消费。",
+      "aliases": ["order event delta dataset"],
+      "source_id": "synthetic_cross_chain_knowledge_v11",
+      "source_span": "ods_order_event_delta 是 FlashSync 与 BDS 之间的显式数据交付边界。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "symptom_flashsync_incremental_window_skipped",
+      "node_type": "symptom",
+      "name": "FlashSync 增量窗口静默漏数",
+      "content": "同步进程可报告完成且无积压，但一致性抽检发现一段事件时间窗口未写入目标端。",
+      "aliases": ["incremental window skipped", "增量窗口漏数"],
+      "source_id": "synthetic_cross_chain_knowledge_v11",
+      "source_span": "运行状态正常不能替代源目标数量和时间边界一致性验证。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "root_cause_flashsync_watermark_timezone_mismatch",
+      "node_type": "root_cause",
+      "name": "FlashSync 水位线时区错配",
+      "content": "源事件时间使用 UTC，而增量水位线按 Asia/Shanghai 解释，导致 WATERMARK_TIMEZONE_MISMATCH 并跳过边界窗口记录。",
+      "aliases": ["WATERMARK_TIMEZONE_MISMATCH", "增量水位线时区错配"],
+      "source_id": "synthetic_cross_chain_knowledge_v11",
+      "source_span": "稳定错误码、时区配置差和一致性缺口共同确认水位线时区错配。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "solution_align_flashsync_watermark_and_bounded_backfill",
+      "node_type": "solution",
+      "name": "校准水位线并受控回补缺失窗口",
+      "content": "先冻结当前位点并核对源事件时间语义，由有权限人员在隔离环境校准时区，再按缺失窗口小批量回补、检查幂等与一致性并保留回滚点。",
+      "aliases": ["align watermark timezone", "水位线校准与受控回补"],
+      "source_id": "synthetic_cross_chain_knowledge_v11",
+      "source_span": "只提供人工校准、边界验证、小批量回补和回滚建议，不自动修改水位线或写入生产目标。",
       "reliability": 1.0,
       "embedding": null
     }
@@ -1069,6 +1146,96 @@
       "weight": 1.0,
       "source_id": "synthetic_cross_chain_knowledge_v10",
       "source_span": "授权过期必须通过受控渠道安全轮换并验证最小权限和回滚边界。"
+    },
+    {
+      "edge_id": "edge_lts_order_fulfillment_runs_on",
+      "from_node_id": "task_lts_order_fulfillment_report",
+      "to_node_id": "component_lts",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v11",
+      "source_span": "dws_order_fulfillment_daily 由 LTS 调度组件运行。"
+    },
+    {
+      "edge_id": "edge_bds_order_fulfillment_runs_on",
+      "from_node_id": "task_bds_order_fulfillment_aggregate",
+      "to_node_id": "component_bds",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v11",
+      "source_span": "bds_order_fulfillment_aggregate_hourly 由 BDS 计算组件运行。"
+    },
+    {
+      "edge_id": "edge_flashsync_order_event_runs_on",
+      "from_node_id": "task_flashsync_order_event_delta",
+      "to_node_id": "component_flashsync",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v11",
+      "source_span": "flashsync_order_event_delta 由 FlashSync 同步组件运行。"
+    },
+    {
+      "edge_id": "edge_lts_order_fulfillment_depends_bds",
+      "from_node_id": "task_lts_order_fulfillment_report",
+      "to_node_id": "task_bds_order_fulfillment_aggregate",
+      "relation_type": "DEPENDS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v11",
+      "source_span": "LTS 订单履约日报依赖 BDS 订单履约聚合作业完成。"
+    },
+    {
+      "edge_id": "edge_bds_order_fulfillment_depends_flashsync",
+      "from_node_id": "task_bds_order_fulfillment_aggregate",
+      "to_node_id": "task_flashsync_order_event_delta",
+      "relation_type": "DEPENDS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v11",
+      "source_span": "BDS 订单履约聚合作业依赖 FlashSync 订单事件增量任务完成。"
+    },
+    {
+      "edge_id": "edge_flashsync_order_event_produces_dataset",
+      "from_node_id": "task_flashsync_order_event_delta",
+      "to_node_id": "dataset_ods_order_event_delta",
+      "relation_type": "PRODUCES",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v11",
+      "source_span": "FlashSync 订单事件增量任务生成 ods_order_event_delta。"
+    },
+    {
+      "edge_id": "edge_bds_order_fulfillment_consumes_dataset",
+      "from_node_id": "task_bds_order_fulfillment_aggregate",
+      "to_node_id": "dataset_ods_order_event_delta",
+      "relation_type": "CONSUMES",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v11",
+      "source_span": "BDS 订单履约聚合作业消费 ods_order_event_delta。"
+    },
+    {
+      "edge_id": "edge_flashsync_order_event_manifests_window_skip",
+      "from_node_id": "task_flashsync_order_event_delta",
+      "to_node_id": "symptom_flashsync_incremental_window_skipped",
+      "relation_type": "MANIFESTS_AS",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v11",
+      "source_span": "订单事件同步水位线错配表现为增量窗口记录被跳过。"
+    },
+    {
+      "edge_id": "edge_window_skip_caused_by_watermark_timezone_mismatch",
+      "from_node_id": "symptom_flashsync_incremental_window_skipped",
+      "to_node_id": "root_cause_flashsync_watermark_timezone_mismatch",
+      "relation_type": "CAUSED_BY",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v11",
+      "source_span": "错配的 UTC 与 Asia/Shanghai 水位线解释导致增量窗口静默漏数。"
+    },
+    {
+      "edge_id": "edge_watermark_timezone_resolved_by_bounded_backfill",
+      "from_node_id": "root_cause_flashsync_watermark_timezone_mismatch",
+      "to_node_id": "solution_align_flashsync_watermark_and_bounded_backfill",
+      "relation_type": "RESOLVED_BY",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v11",
+      "source_span": "水位线时区错配需先校准时间语义，再按缺失窗口执行可回滚的小批量回补。"
     }
   ]
 }

@@ -1,4 +1,4 @@
-"""用二十七条 Golden Cases 验证诊断、授权过期传播、降级、路径、冲突、记忆与 27/28 边界。
+"""用二十八条 Golden Cases 验证诊断、静默漏数、降级、路径、冲突、记忆与 28/28 边界。
 
 测试运行器从合成 Fixture 构造真实 ``ToolEvent``/``Evidence``，再通过生产 Pydantic 顶层结果契约
 进入评测器。Planner、Auditor 和报告文本是确定性脚本，因此这些数字只证明数据流与评分规则可
@@ -152,13 +152,14 @@ class FixtureBackedGoldenRunner:
 
 
 @pytest.mark.asyncio
-async def test_twenty_seven_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
-    """验证二十七条案例命中诊断、三组件授权过期传播与路径契约，并保持 27/28 标记。
+async def test_twenty_eight_golden_cases_complete_versioned_measured_diagnosis_baseline() -> None:
+    """验证二十八条案例命中诊断、水位线错配传播和路径契约，并完成 28/28 标记。
 
     确定性基线预期意图、必要 Action、允许根因、关键来源、停止原因、引用、风险和安全降级全部
     命中；七个故意失败 Action 使尝试成功率低于一，成功响应冲突案例的三个调用则全部成功。覆盖标记
-    必须保持 false，防止 27 条通过被宣传为 28 条验收完成；新案例必须在六项 Action 中同时证明
-    LTS 等待、BDS 正常资源下的输入缺口、FlashSync 源端授权拒绝与健康目标端，并引用 v10 三条路径。
+    只有精确 28 条才为 true；新案例必须在六项 Action 中同时证明 LTS 质量门禁、BDS 正常资源下的
+    900 条缺口、FlashSync 时区错误码和源目标一致性差异，并引用 v11 三条路径。数量达标只证明当前
+    确定性数据集完整，仍不能外推为真实 Planner/Auditor 模型能力。
     """
 
     cases = load_golden_cases(GOLDEN_CASE_FILE)
@@ -168,13 +169,13 @@ async def test_twenty_seven_golden_cases_produce_versioned_measured_diagnosis_ba
 
     assert report.contract_id == GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID
     assert report.metric_kind == "measured"
-    assert report.case_count == 27
+    assert report.case_count == 28
     assert report.target_case_count == 28
-    assert report.case_coverage_rate == pytest.approx(27 / 28)
-    assert report.target_coverage_complete is False
+    assert report.case_coverage_rate == 1
+    assert report.target_coverage_complete is True
     assert report.category_case_counts == {
         GoldenCaseCategory.SINGLE_COMPONENT: 8,
-        GoldenCaseCategory.CROSS_COMPONENT: 9,
+        GoldenCaseCategory.CROSS_COMPONENT: 10,
         GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 4,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
         GoldenCaseCategory.MEMORY_RECALL: 3,
@@ -188,7 +189,7 @@ async def test_twenty_seven_golden_cases_produce_versioned_measured_diagnosis_ba
     assert report.citation_completeness == 1
     assert report.unsupported_critical_claim_rate == 0
     assert report.duplicate_action_rate == 0
-    assert report.tool_attempt_success_rate == pytest.approx(86 / 93)
+    assert report.tool_attempt_success_rate == pytest.approx(92 / 99)
     assert report.risk_level_hit_rate == 1
     assert report.safe_degradation_rate == 1
     assert report.evidence_conflict_safe_resolution_rate == 1
@@ -413,6 +414,34 @@ async def test_twenty_seven_golden_cases_produce_versioned_measured_diagnosis_ba
         "flashsync_source_auth_solution_chain",
     ]
     assert source_auth_result.actual_risk_level is RiskLevel.HIGH
+    watermark_result = next(
+        result
+        for result in report.cases
+        if result.case_id == "golden_cross_lts_bds_flashsync_watermark_timezone_mismatch"
+    )
+    assert watermark_result.executed_tools == [
+        "lts.get_task_status",
+        "lts.get_dependency_topology",
+        "bds.get_task_status",
+        "bds.get_table_info",
+        "flashsync.get_sync_log",
+        "flashsync.check_consistency",
+    ]
+    assert watermark_result.observed_evidence_sources == [
+        "lts_status_order_watermark_timezone_cross",
+        "lts_topology_order_watermark_timezone_cross",
+        "bds_status_order_watermark_timezone_cross",
+        "bds_table_order_watermark_timezone_cross",
+        "flashsync_log_order_watermark_timezone_cross",
+        "flashsync_consistency_order_watermark_timezone_cross",
+    ]
+    assert watermark_result.actual_top1_root_cause == "FlashSync 水位线时区错配"
+    assert watermark_result.matched_fault_path_labels == [
+        "order_fulfillment_task_dependency_chain",
+        "order_event_watermark_manifest_chain",
+        "flashsync_watermark_bounded_backfill_solution_chain",
+    ]
+    assert watermark_result.actual_risk_level is RiskLevel.HIGH
     checkpoint_result = next(
         result
         for result in report.cases
@@ -1003,7 +1032,7 @@ def _build_retrieved_paths(case: GoldenCaseSpec) -> list[RetrievedPath]:
             node_ids=requirement.required_node_ids,
             relation_types=list(requirement.required_relation_types),
             score=0.9,
-            # v2/v3 新路径保留各自来源，旧路径继续使用 v1，避免评测替身抹平知识演进。
+            # 每个新增路径保留引入它的种子来源，旧路径继续使用 v1，避免评测替身抹平知识演进。
             source_ids=[
                 {
                     "lts_parameter_validation_solution_chain": (
@@ -1051,6 +1080,15 @@ def _build_retrieved_paths(case: GoldenCaseSpec) -> list[RetrievedPath]:
                     ),
                     "flashsync_source_auth_solution_chain": (
                         "synthetic_cross_chain_knowledge_v10"
+                    ),
+                    "order_fulfillment_task_dependency_chain": (
+                        "synthetic_cross_chain_knowledge_v11"
+                    ),
+                    "order_event_watermark_manifest_chain": (
+                        "synthetic_cross_chain_knowledge_v11"
+                    ),
+                    "flashsync_watermark_bounded_backfill_solution_chain": (
+                        "synthetic_cross_chain_knowledge_v11"
                     ),
                 }.get(requirement.path_label, "synthetic_cross_chain_knowledge_v1")
             ],

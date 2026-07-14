@@ -1084,5 +1084,75 @@
       "evidence_sufficient"
     ],
     "expected_risk_level": "high"
+  },
+  {
+    "contract_id": "golden-case:v7",
+    "case_id": "golden_cross_lts_bds_flashsync_watermark_timezone_mismatch",
+    "case_category": "cross_component",
+    "user_query": "LTS 订单履约日报被质量门禁阻止，BDS 输入缺 900 条，但同步进程显示已完成，请沿链路检查是否有静默漏数。",
+    "scenario_id": "cross_lts_bds_flashsync_watermark_timezone_mismatch",
+    "expected_intent": "cross_component_diagnosis",
+    "required_tools": [
+      "lts.get_task_status",
+      "lts.get_dependency_topology",
+      "bds.get_task_status",
+      "bds.get_table_info",
+      "flashsync.get_sync_log",
+      "flashsync.check_consistency"
+    ],
+    "required_fault_paths": [
+      {
+        "path_label": "order_fulfillment_task_dependency_chain",
+        "required_node_ids": [
+          "task_lts_order_fulfillment_report",
+          "task_bds_order_fulfillment_aggregate",
+          "task_flashsync_order_event_delta"
+        ],
+        "required_relation_types": [
+          "DEPENDS_ON",
+          "DEPENDS_ON"
+        ]
+      },
+      {
+        "path_label": "order_event_watermark_manifest_chain",
+        "required_node_ids": [
+          "task_flashsync_order_event_delta",
+          "symptom_flashsync_incremental_window_skipped",
+          "root_cause_flashsync_watermark_timezone_mismatch"
+        ],
+        "required_relation_types": [
+          "MANIFESTS_AS",
+          "CAUSED_BY"
+        ]
+      },
+      {
+        "path_label": "flashsync_watermark_bounded_backfill_solution_chain",
+        "required_node_ids": [
+          "symptom_flashsync_incremental_window_skipped",
+          "root_cause_flashsync_watermark_timezone_mismatch",
+          "solution_align_flashsync_watermark_and_bounded_backfill"
+        ],
+        "required_relation_types": [
+          "CAUSED_BY",
+          "RESOLVED_BY"
+        ]
+      }
+    ],
+    "allowed_root_causes": [
+      "FlashSync 水位线时区错配",
+      "增量窗口因时区解释错误而漏数"
+    ],
+    "required_evidence_sources": [
+      "lts_status_order_watermark_timezone_cross",
+      "lts_topology_order_watermark_timezone_cross",
+      "bds_status_order_watermark_timezone_cross",
+      "bds_table_order_watermark_timezone_cross",
+      "flashsync_log_order_watermark_timezone_cross",
+      "flashsync_consistency_order_watermark_timezone_cross"
+    ],
+    "expected_stop_reasons": [
+      "evidence_sufficient"
+    ],
+    "expected_risk_level": "high"
   }
 ]

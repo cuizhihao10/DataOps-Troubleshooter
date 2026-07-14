@@ -1,0 +1,202 @@
+{
+  "scenario_id": "cross_lts_bds_flashsync_watermark_timezone_mismatch",
+  "title": "FlashSync 水位线时区错配造成订单履约链路静默漏数",
+  "description": "独立的三组件合成故障环境：FlashSync 将 UTC 事件时间按 Asia/Shanghai 水位线过滤，跳过 900 条订单事件；同步进程表面运行完成，但一致性抽检、BDS 输入校验和 LTS 质量门禁均确认同量缺口。",
+  "components": ["lts", "bds", "flashsync"],
+  "expected_behavior": "诊断应沿 LTS→BDS→FlashSync 依赖链定位增量水位线时区错配，使用 900 条数量闭环和一致性差异确认静默漏数，并用正常资源、已存在分区、兼容 Schema 与零重复排除 BDS 资源、缺分区、Schema 漂移和重复写入。",
+  "tool_results": [
+    {
+      "tool_name": "lts.get_task_status",
+      "request": {
+        "resource_id": "dws_order_fulfillment_daily",
+        "time_range": {
+          "start": "2026-07-14T00:00:00+08:00",
+          "end": "2026-07-14T08:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_flashsync_watermark_timezone_mismatch",
+        "trace_id": "trace_order_watermark_timezone_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "status": "failed",
+          "retry_count": 1,
+          "upstream_ready": false,
+          "data_quality_gate_passed": false,
+          "missing_upstream_records": 900,
+          "local_execution_started": false
+        },
+        "evidence": [
+          {
+            "source_id": "lts_status_order_watermark_timezone_cross",
+            "content": "LTS 订单履约日报被数据质量门禁阻止，本地计算尚未开始，上游输入仍缺 900 条记录。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-14T08:01:00+08:00"
+      }
+    },
+    {
+      "tool_name": "lts.get_dependency_topology",
+      "request": {
+        "resource_id": "dws_order_fulfillment_daily",
+        "time_range": {
+          "start": "2026-07-14T00:00:00+08:00",
+          "end": "2026-07-14T08:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_flashsync_watermark_timezone_mismatch",
+        "trace_id": "trace_order_watermark_timezone_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "upstream_task": "bds_order_fulfillment_aggregate_hourly",
+          "source_sync_task": "flashsync_order_event_delta",
+          "dataset": "ods_order_event_delta",
+          "link_state": "data_quality_blocked"
+        },
+        "evidence": [
+          {
+            "source_id": "lts_topology_order_watermark_timezone_cross",
+            "content": "LTS 订单履约日报依赖 BDS 履约聚合，后者消费 FlashSync 产出的 ods_order_event_delta，当前链路被数据质量门禁阻止。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-14T08:01:05+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_task_status",
+      "request": {
+        "resource_id": "bds_order_fulfillment_aggregate_hourly",
+        "time_range": {
+          "start": "2026-07-14T00:00:00+08:00",
+          "end": "2026-07-14T08:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_flashsync_watermark_timezone_mismatch",
+        "trace_id": "trace_order_watermark_timezone_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "status": "running",
+          "stage": "source_count_validation",
+          "duration_seconds": 2700,
+          "cpu_percent": 31,
+          "memory_percent": 36,
+          "expected_records": 7200,
+          "available_records": 6300,
+          "missing_records": 900
+        },
+        "evidence": [
+          {
+            "source_id": "bds_status_order_watermark_timezone_cross",
+            "content": "BDS 停在源记录数校验，7200 条预期订单事件只到达 6300 条，缺口 900 条且 CPU/内存正常。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-14T08:01:10+08:00"
+      }
+    },
+    {
+      "tool_name": "bds.get_table_info",
+      "request": {
+        "resource_id": "ods_order_event_delta",
+        "time_range": {
+          "start": "2026-07-14T00:00:00+08:00",
+          "end": "2026-07-14T08:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_flashsync_watermark_timezone_mismatch",
+        "trace_id": "trace_order_watermark_timezone_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "latest_partition": "2026-07-14-07",
+          "expected_partition": "2026-07-14-07",
+          "row_count": 6300,
+          "expected_row_count": 7200,
+          "missing_records": 900,
+          "schema_compatible": true
+        },
+        "evidence": [
+          {
+            "source_id": "bds_table_order_watermark_timezone_cross",
+            "content": "订单事件分区已按时建立且 Schema 兼容，但只有 6300/7200 条，缺口仍为 900 条。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-14T08:01:15+08:00"
+      }
+    },
+    {
+      "tool_name": "flashsync.get_sync_log",
+      "request": {
+        "resource_id": "ods_order_event_delta",
+        "time_range": {
+          "start": "2026-07-14T00:00:00+08:00",
+          "end": "2026-07-14T08:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_flashsync_watermark_timezone_mismatch",
+        "trace_id": "trace_order_watermark_timezone_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "component_error_code": "WATERMARK_TIMEZONE_MISMATCH",
+          "source_event_timezone": "UTC",
+          "configured_watermark_timezone": "Asia/Shanghai",
+          "timezone_offset_minutes": 480,
+          "skipped_records": 900,
+          "sync_process_state": "completed_with_quality_error",
+          "automatic_watermark_change_blocked": true
+        },
+        "evidence": [
+          {
+            "source_id": "flashsync_log_order_watermark_timezone_cross",
+            "content": "FlashSync 返回 WATERMARK_TIMEZONE_MISMATCH：源事件时间为 UTC，水位线按 Asia/Shanghai 解释，增量窗口跳过 900 条记录且自动修改水位线被阻止。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-14T08:01:20+08:00"
+      }
+    },
+    {
+      "tool_name": "flashsync.check_consistency",
+      "request": {
+        "resource_id": "ods_order_event_delta",
+        "time_range": {
+          "start": "2026-07-14T00:00:00+08:00",
+          "end": "2026-07-14T08:00:00+08:00"
+        },
+        "scenario_id": "cross_lts_bds_flashsync_watermark_timezone_mismatch",
+        "trace_id": "trace_order_watermark_timezone_001"
+      },
+      "response": {
+        "ok": true,
+        "data": {
+          "consistent": false,
+          "source_count": 7200,
+          "target_count": 6300,
+          "missing_on_target": 900,
+          "duplicate_on_target": 0,
+          "timezone_boundary_mismatch_records": 900
+        },
+        "evidence": [
+          {
+            "source_id": "flashsync_consistency_order_watermark_timezone_cross",
+            "content": "一致性抽检确认源端 7200 条、目标端 6300 条，缺失 900 条且零重复；全部缺失都落在错配的时区窗口边界。"
+          }
+        ],
+        "error_code": null,
+        "error_message": null,
+        "observed_at": "2026-07-14T08:01:25+08:00"
+      }
+    }
+  ]
+}

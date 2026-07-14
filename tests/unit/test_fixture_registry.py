@@ -1,6 +1,6 @@
 """验证场景注册、Golden Case 引用、证据冲突标注和失败 Fixture 覆盖。
 
-测试确保十七个场景可重复加载、九工具主场景完整、错误类别齐全，并拒绝重复 scenario_id
+测试确保十八个场景可重复加载、九工具主场景完整、错误类别齐全，并拒绝重复 scenario_id
 和工具请求引用其他场景等会破坏可复现性的输入。
 """
 
@@ -28,8 +28,8 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     registry = FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
     golden_cases = load_golden_cases(GOLDEN_CASE_FILE)
 
-    assert len(registry) == 17
-    assert len(golden_cases) == 27
+    assert len(registry) == 18
+    assert len(golden_cases) == 28
     assert {case.scenario_id for case in golden_cases} == set(registry.scenario_ids)
     assert {case.contract_id for case in golden_cases} == {"golden-case:v7"}
     category_counts = {
@@ -38,7 +38,7 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     }
     assert category_counts == {
         GoldenCaseCategory.SINGLE_COMPONENT: 8,
-        GoldenCaseCategory.CROSS_COMPONENT: 9,
+        GoldenCaseCategory.CROSS_COMPONENT: 10,
         GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 4,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
         GoldenCaseCategory.MEMORY_RECALL: 3,
@@ -300,6 +300,32 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     assert source_auth_cross_case.allowed_root_causes[0] == "FlashSync 源端授权租约过期"
     assert source_auth_cross_case.expected_risk_level.value == "high"
     assert len(source_auth_cross_case.required_evidence_sources) == 6
+    watermark_cross_case = next(
+        case
+        for case in golden_cases
+        if case.case_id == "golden_cross_lts_bds_flashsync_watermark_timezone_mismatch"
+    )
+    assert watermark_cross_case.required_tools == [
+        ToolName.LTS_GET_TASK_STATUS,
+        ToolName.LTS_GET_DEPENDENCY_TOPOLOGY,
+        ToolName.BDS_GET_TASK_STATUS,
+        ToolName.BDS_GET_TABLE_INFO,
+        ToolName.FLASHSYNC_GET_SYNC_LOG,
+        ToolName.FLASHSYNC_CHECK_CONSISTENCY,
+    ]
+    assert [path.path_label for path in watermark_cross_case.required_fault_paths] == [
+        "order_fulfillment_task_dependency_chain",
+        "order_event_watermark_manifest_chain",
+        "flashsync_watermark_bounded_backfill_solution_chain",
+    ]
+    assert watermark_cross_case.required_fault_paths[0].required_node_ids == [
+        "task_lts_order_fulfillment_report",
+        "task_bds_order_fulfillment_aggregate",
+        "task_flashsync_order_event_delta",
+    ]
+    assert watermark_cross_case.allowed_root_causes[0] == "FlashSync 水位线时区错配"
+    assert watermark_cross_case.expected_risk_level.value == "high"
+    assert len(watermark_cross_case.required_evidence_sources) == 6
 
 
 def test_main_scenario_exercises_all_nine_tool_contracts() -> None:

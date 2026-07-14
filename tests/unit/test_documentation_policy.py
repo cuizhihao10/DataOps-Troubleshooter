@@ -169,13 +169,14 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
     assert "独立 Auditor 增量影响消融评测" in guide
     assert "auditor-impact-eval:v1" in guide
     assert "golden-case:v7" in guide
-    assert "golden-diagnosis-eval:v20" in guide
+    assert "golden-diagnosis-eval:v21" in guide
     assert "GoldenEvidenceConflictExpectation" in guide
     assert "统一作品集评测 manifest 与单命令运行器" in guide
-    assert "portfolio-eval-run:v21" in guide
-    assert "graph-seed:v10" in guide
-    assert "47 节点/61 边" in guide
+    assert "portfolio-eval-run:v22" in guide
+    assert "graph-seed:v11" in guide
+    assert "54 节点/71 边" in guide
     assert "authorization_value_exposed=false" in guide
+    assert "WATERMARK_TIMEZONE_MISMATCH" in guide
     assert "尚未完成" in guide
     assert "代码注释的强制粒度" in guide
     assert "callable 级 docstring" in guide
@@ -239,43 +240,43 @@ def test_auditor_impact_report_separates_rules_control_and_model_quality_claims(
     assert "不能据此宣称真实 LLM" in report
 
 
-def test_portfolio_eval_report_documents_publish_gate_and_incomplete_golden_scope() -> None:
-    """确认统一报告锁定 passed 才发布指标、快速模式不完整和 27/28 条边界。
+def test_portfolio_eval_report_documents_publish_gate_and_complete_golden_scope() -> None:
+    """确认统一报告锁定 passed 才发布指标、快速模式不完整和 28/28 数量边界。
 
-    该门禁防止 CLI 失败后仍宣传 manifest 快照，也防止把四层消融或现有 27 条案例相加后冒充
-    28 条诊断 Golden Case 成绩；完整命令、快速命令和十九个指标范围都必须可见。
+    该门禁防止 CLI 失败后仍宣传 manifest 快照，也防止把 28 条确定性脚本数量达标冒充真实模型
+    诊断成绩；完整命令、快速命令和十九个指标范围都必须可见。
     """
 
     report = Path("docs/portfolio-eval-results.md").read_text(encoding="utf-8")
 
-    assert "portfolio-eval-manifest:v21" in report
-    assert "portfolio-eval-run:v21" in report
+    assert "portfolio-eval-manifest:v22" in report
+    assert "portfolio-eval-run:v22" in report
     assert "只有" in report and "status=`passed`" in report
     assert "failed、skipped、blocked" in report
     assert "python -m app.evaluation" in report
     assert "--skip-postgres" in report
     assert '"complete": true' in report
     assert "共发布 19 个指标" in report
-    assert "有 27 条案例、使用 17 个场景" in report
+    assert "有 28 条案例、使用 18 个场景" in report
     assert "成功响应证据冲突安全处置率" in report
-    assert "产品目标是 28 条" in report
+    assert "28 条产品目标" in report
     assert "不能外推为真实 LLM" in report
 
 
-def test_golden_diagnosis_report_documents_scoring_and_twenty_seven_case_boundary() -> None:
-    """确认 Golden 报告解释源授权三组件传播、安全边界和 27/28 未完成资格。
+def test_golden_diagnosis_report_documents_scoring_and_twenty_eight_case_boundary() -> None:
+    """确认 Golden 报告解释水位线三组件传播、安全边界和 28/28 完整资格。
 
     该门禁防止把脚本按标注选择 Action/根因得到的满分宣传为模型准确率；报告还必须区分 Top-1
-    有根因分母、安全降级分母、结构引用检查和故意异常工具成功率。授权案例还必须明确协议成功
-    与业务失败分层，并证明合成 Fixture 不保存授权值。
+    有根因分母、安全降级分母、结构引用检查和故意异常工具成功率。水位线案例还必须证明进程完成
+    不等于数据正确，并保留禁止自动修改和生产写入的高风险边界。
     """
 
     report = Path("docs/golden-diagnosis-eval-results.md").read_text(encoding="utf-8")
 
     assert "golden-case:v7" in report
-    assert "golden-diagnosis-eval:v20" in report
-    assert "27/28 = 96.43%" in report
-    assert "target_coverage_complete=false" in report
+    assert "golden-diagnosis-eval:v21" in report
+    assert "28/28 = 100%" in report
+    assert "target_coverage_complete=true" in report
     assert "确定性脚本" in report
     assert "不能外推为真实 LLM" in report
     assert "根因 Top-1" in report
@@ -285,14 +286,14 @@ def test_golden_diagnosis_report_documents_scoring_and_twenty_seven_case_boundar
     assert "关键结论引用完整率" in report
     assert "单组件明确故障 | 8 | 8 | 0" in report
     assert "长期记忆召回 | 3 | 3 | 0" in report
-    assert "工具尝试成功率 | 92.47%" in report
+    assert "工具尝试成功率 | 92.93%" in report
     assert "必要历史召回覆盖率 | 100%" in report
     assert "实时事实优先通过率 | 100%" in report
     assert "禁止记忆命中数 | 0" in report
     assert "证据冲突安全处置率 | 100%" in report
     assert "禁止冲突根因命中数 | 0" in report
-    assert "跨组件故障 | 9 | 10 | 1" in report
-    assert "19 条适用案例、33 条必要路径" in report
+    assert "跨组件故障 | 10 | 10 | 0" in report
+    assert "20 条适用案例、36 条必要路径" in report
     assert "cross_lts_bds_resource_exhaustion" in report
     assert "零 MCP Action" in report
     assert "missing_resource_id" in report
@@ -302,7 +303,7 @@ def test_golden_diagnosis_report_documents_scoring_and_twenty_seven_case_boundar
     assert "attempt 1/2" in report
     assert "lts_parameter_validation_failure" in report
     assert "INVALID_PARTITION_DATE" in report
-    assert "graph-seed:v10" in report
+    assert "graph-seed:v11" in report
     assert "bds_data_skew" in report
     assert "DATA_SKEW_DETECTED" in report
     assert "9.6 倍热点分桶" in report
@@ -330,6 +331,12 @@ def test_golden_diagnosis_report_documents_scoring_and_twenty_seven_case_boundar
     assert "authorization_value_exposed=false" in report
     assert "不展示、" in report and "任何授权值" in report
     assert "风险命中 high" in report
+    assert "cross_lts_bds_flashsync_watermark_timezone_mismatch" in report
+    assert "WATERMARK_TIMEZONE_MISMATCH" in report
+    assert "UTC" in report and "Asia/Shanghai" in report
+    assert "偏移 480 分钟" in report
+    assert "缺失 900 条且零重复" in report
+    assert "不自动修改水位线" in report
 
 
 def test_prompt_contract_versions_budgeted_retrieval_inputs() -> None:
@@ -497,11 +504,11 @@ def test_diagnosis_resource_contract_documents_persistence_events_and_failure_se
     assert "synchronous" in prompt_contract
     assert "running | completed | failed" in prompt_contract
     assert "不保存 Thought" in prompt_contract
-    assert "portfolio-eval-manifest:v21" in prompt_contract
-    assert "portfolio-eval-run:v21" in prompt_contract
+    assert "portfolio-eval-manifest:v22" in prompt_contract
+    assert "portfolio-eval-run:v22" in prompt_contract
     assert "subprocess.run(shell=False)" in prompt_contract
     assert "failed、skipped 或 blocked 必须隐藏 metrics" in prompt_contract
-    assert "不等于产品目标的 28 条诊断 Golden Cases" in prompt_contract
+    assert "28/28 条和五类配额已经完整" in prompt_contract
     assert "required_fault_paths" in prompt_contract
     assert "case_category" in prompt_contract
     assert "至少包含两个不同组件前缀" in prompt_contract
@@ -526,8 +533,8 @@ def test_ablation_report_labels_measured_values_and_honest_zero_gain() -> None:
     assert "根因节点命中 | 1 | 1 | 0" in report
     assert "必要有序链路完整率 | 0.0 | 1.0 | +1.0" in report
     assert "path_4f6638ec28f7073d" in report
-    assert "graph-seed:v10" in report
-    assert "47 个节点、61 条边" in report
+    assert "graph-seed:v11" in report
+    assert "54 个节点、71 条边" in report
     assert "5634 字节" in report
     assert "7 个去重节点" in report
     assert "5 个节点和 4 条路径" in report
@@ -547,6 +554,9 @@ def test_ablation_report_labels_measured_values_and_honest_zero_gain() -> None:
     assert "dws_settlement_summary_daily" in report
     assert "flashsync_settlement_delta" in report
     assert "SOURCE_AUTHORIZATION_EXPIRED" in report
+    assert "dws_order_fulfillment_daily" in report
+    assert "flashsync_order_event_delta" in report
+    assert "FlashSync 增量窗口静默漏数" in report
     assert "不能将本次结果外推" in report
 
 

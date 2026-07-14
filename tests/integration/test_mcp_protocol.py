@@ -1083,6 +1083,83 @@ async def test_source_authorization_expiry_propagates_via_real_mcp_without_secre
 
 
 @pytest.mark.asyncio
+async def test_watermark_timezone_mismatch_exposes_silent_loss_via_real_mcp() -> None:
+    """验证水位线时区错配经真实 MCP 形成三组件 900 条静默漏数闭环。
+
+    六个响应都为 ``ok=true``，因为协议成功和同步进程结束都不能证明数据完整；LTS 质量门禁、BDS
+    记录校验、FlashSync 错误码与一致性抽检必须独立给出同一 900 条差异。分区、Schema、资源和零
+    重复作为反证，避免把漏数误归因于缺分区、字段映射、资源压力或重复写入。
+    """
+
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    calls = (
+        ("lts.get_task_status", "dws_order_fulfillment_daily"),
+        ("lts.get_dependency_topology", "dws_order_fulfillment_daily"),
+        ("bds.get_task_status", "bds_order_fulfillment_aggregate_hourly"),
+        ("bds.get_table_info", "ods_order_event_delta"),
+        ("flashsync.get_sync_log", "ods_order_event_delta"),
+        ("flashsync.check_consistency", "ods_order_event_delta"),
+    )
+    observations = {}
+    for tool_name, resource_id in calls:
+        # 独立 trace 让每项跨组件事实都能回溯到真实协议调用，而不是由测试在内存中拼接响应。
+        observations[tool_name] = await executor.execute(
+            _action(
+                "cross_lts_bds_flashsync_watermark_timezone_mismatch",
+                resource_id,
+                f"trace_watermark_timezone_{tool_name.replace('.', '_')}",
+                tool_name=tool_name,
+            )
+        )
+
+    assert all(observation.response.ok for observation in observations.values())
+    lts_status = observations["lts.get_task_status"].response.data
+    topology = observations["lts.get_dependency_topology"].response.data
+    bds_status = observations["bds.get_task_status"].response.data
+    table = observations["bds.get_table_info"].response.data
+    sync_log = observations["flashsync.get_sync_log"].response.data
+    consistency = observations["flashsync.check_consistency"].response.data
+    assert lts_status["local_execution_started"] is False
+    assert lts_status["data_quality_gate_passed"] is False
+    assert topology["upstream_task"] == "bds_order_fulfillment_aggregate_hourly"
+    assert topology["source_sync_task"] == "flashsync_order_event_delta"
+    assert bds_status["cpu_percent"] < 80
+    assert bds_status["memory_percent"] < 80
+    assert table["latest_partition"] == table["expected_partition"]
+    assert table["schema_compatible"] is True
+    assert sync_log["component_error_code"] == "WATERMARK_TIMEZONE_MISMATCH"
+    assert sync_log["source_event_timezone"] == "UTC"
+    assert sync_log["configured_watermark_timezone"] == "Asia/Shanghai"
+    assert sync_log["timezone_offset_minutes"] == 480
+    assert sync_log["automatic_watermark_change_blocked"] is True
+    assert consistency["consistent"] is False
+    assert consistency["duplicate_on_target"] == 0
+    assert (
+        lts_status["missing_upstream_records"]
+        == bds_status["missing_records"]
+        == bds_status["expected_records"] - bds_status["available_records"]
+        == table["missing_records"]
+        == table["expected_row_count"] - table["row_count"]
+        == sync_log["skipped_records"]
+        == consistency["missing_on_target"]
+        == consistency["source_count"] - consistency["target_count"]
+        == consistency["timezone_boundary_mismatch_records"]
+        == 900
+    )
+    assert {
+        observation.response.evidence[0].source_id
+        for observation in observations.values()
+    } == {
+        "lts_status_order_watermark_timezone_cross",
+        "lts_topology_order_watermark_timezone_cross",
+        "bds_status_order_watermark_timezone_cross",
+        "bds_table_order_watermark_timezone_cross",
+        "flashsync_log_order_watermark_timezone_cross",
+        "flashsync_consistency_order_watermark_timezone_cross",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "expected_data_key"),
     [

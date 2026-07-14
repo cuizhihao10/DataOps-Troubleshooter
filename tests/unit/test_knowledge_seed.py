@@ -29,9 +29,9 @@ def test_curated_seed_uses_approved_node_and_relation_contracts() -> None:
 
     bundle = load_knowledge_seed(SEED_FILE)
 
-    assert bundle.seed_version == "graph-seed:v10"
-    assert len(bundle.nodes) == 47
-    assert len(bundle.edges) == 61
+    assert bundle.seed_version == "graph-seed:v11"
+    assert len(bundle.nodes) == 54
+    assert len(bundle.edges) == 71
     assert {node.node_type for node in bundle.nodes} <= set(KnowledgeNodeType)
     assert {edge.relation_type for edge in bundle.edges} <= set(KnowledgeRelationType)
     assert all(node.source_span for node in bundle.nodes)
@@ -376,6 +376,70 @@ def test_cross_component_seed_contains_settlement_source_authorization_topology(
     assert "授权值" not in nodes["root_cause_flashsync_source_authorization_expired"].content
     assert "不生成、存储或传输授权值" in nodes[
         "solution_secure_flashsync_source_authorization_rotation"
+    ].source_span
+
+
+def test_cross_component_seed_contains_order_watermark_timezone_topology() -> None:
+    """验证 v11 订单履约链连接静默漏数、水位线时区根因和受控回补方案。
+
+    两条任务依赖和数据交付边证明缺口如何从 FlashSync 传播到 BDS/LTS；症状→根因→方案则把
+    ``WATERMARK_TIMEZONE_MISMATCH`` 与普通延迟区分。方案 source_span 必须保留人工校准、幂等
+    验证和禁止自动写入边界，防止高风险回补知识被误解为执行权限。
+    """
+
+    bundle = load_knowledge_seed(SEED_FILE)
+    edges = {edge.edge_id: edge for edge in bundle.edges}
+    nodes = {node.node_id: node for node in bundle.nodes}
+
+    lts_dependency = edges["edge_lts_order_fulfillment_depends_bds"]
+    bds_dependency = edges["edge_bds_order_fulfillment_depends_flashsync"]
+    produces = edges["edge_flashsync_order_event_produces_dataset"]
+    consumes = edges["edge_bds_order_fulfillment_consumes_dataset"]
+    manifests = edges["edge_flashsync_order_event_manifests_window_skip"]
+    cause = edges["edge_window_skip_caused_by_watermark_timezone_mismatch"]
+    solution = edges["edge_watermark_timezone_resolved_by_bounded_backfill"]
+    assert lts_dependency.from_node_id == "task_lts_order_fulfillment_report"
+    assert (
+        lts_dependency.to_node_id
+        == bds_dependency.from_node_id
+        == "task_bds_order_fulfillment_aggregate"
+    )
+    assert bds_dependency.to_node_id == produces.from_node_id == manifests.from_node_id
+    assert bds_dependency.to_node_id == "task_flashsync_order_event_delta"
+    assert produces.to_node_id == consumes.to_node_id == "dataset_ods_order_event_delta"
+    assert consumes.from_node_id == bds_dependency.from_node_id
+    assert manifests.to_node_id == cause.from_node_id
+    assert cause.to_node_id == solution.from_node_id
+    assert solution.to_node_id == "solution_align_flashsync_watermark_and_bounded_backfill"
+    assert [
+        lts_dependency.relation_type,
+        bds_dependency.relation_type,
+        produces.relation_type,
+        consumes.relation_type,
+        manifests.relation_type,
+        cause.relation_type,
+        solution.relation_type,
+    ] == [
+        KnowledgeRelationType.DEPENDS_ON,
+        KnowledgeRelationType.DEPENDS_ON,
+        KnowledgeRelationType.PRODUCES,
+        KnowledgeRelationType.CONSUMES,
+        KnowledgeRelationType.MANIFESTS_AS,
+        KnowledgeRelationType.CAUSED_BY,
+        KnowledgeRelationType.RESOLVED_BY,
+    ]
+    assert {
+        lts_dependency.source_id,
+        bds_dependency.source_id,
+        produces.source_id,
+        consumes.source_id,
+        manifests.source_id,
+        cause.source_id,
+        solution.source_id,
+    } == {"synthetic_cross_chain_knowledge_v11"}
+    assert "UTC" in nodes["root_cause_flashsync_watermark_timezone_mismatch"].content
+    assert "不自动修改水位线或写入生产目标" in nodes[
+        "solution_align_flashsync_watermark_and_bounded_backfill"
     ].source_span
 
 
