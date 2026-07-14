@@ -1008,6 +1008,81 @@ async def test_target_write_throttle_propagates_across_three_components_via_real
 
 
 @pytest.mark.asyncio
+async def test_source_authorization_expiry_propagates_via_real_mcp_without_secret() -> None:
+    """验证业务授权过期经真实 MCP 传播，同时不把授权材料带入 Observation。
+
+    六个协议响应都必须 ``ok=true``，表示 MCP 传输成功；FlashSync data 内的
+    ``SOURCE_AUTHORIZATION_EXPIRED`` 才是业务失败。LTS/BDS/FlashSync 的 1800 条缺口必须闭合，
+    目标写入健康用于排除上一案例的目标限流；日志只能公开合成租约 ID，并明确授权值未暴露。
+    """
+
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    calls = (
+        ("lts.get_task_status", "dws_settlement_summary_daily"),
+        ("lts.get_dependency_topology", "dws_settlement_summary_daily"),
+        ("bds.get_task_status", "bds_settlement_aggregate_hourly"),
+        ("bds.get_table_info", "ods_settlement_delta"),
+        ("flashsync.get_sync_delay", "ods_settlement_delta"),
+        ("flashsync.get_sync_log", "ods_settlement_delta"),
+    )
+    observations = {}
+    for tool_name, resource_id in calls:
+        # 独立 trace 证明六次协议调用均可审计，且不会把一个授权异常复制成多次工具失败。
+        observations[tool_name] = await executor.execute(
+            _action(
+                "cross_lts_bds_flashsync_source_auth_expired",
+                resource_id,
+                f"trace_source_auth_{tool_name.replace('.', '_')}",
+                tool_name=tool_name,
+            )
+        )
+
+    assert all(observation.response.ok for observation in observations.values())
+    lts_status = observations["lts.get_task_status"].response.data
+    topology = observations["lts.get_dependency_topology"].response.data
+    bds_status = observations["bds.get_task_status"].response.data
+    table = observations["bds.get_table_info"].response.data
+    delay = observations["flashsync.get_sync_delay"].response.data
+    sync_log = observations["flashsync.get_sync_log"].response.data
+    assert lts_status["local_execution_started"] is False
+    assert topology["upstream_task"] == "bds_settlement_aggregate_hourly"
+    assert topology["source_sync_task"] == "flashsync_settlement_delta"
+    assert bds_status["cpu_percent"] < 80
+    assert bds_status["memory_percent"] < 80
+    assert table["latest_partition"] == table["expected_partition"]
+    assert table["schema_compatible"] is True
+    assert delay["source_read_healthy"] is False
+    assert delay["target_write_healthy"] is True
+    assert delay["throughput_rows_per_second"] == 0
+    assert sync_log["component_error_code"] == "SOURCE_AUTHORIZATION_EXPIRED"
+    assert sync_log["authorization_expired"] is True
+    assert sync_log["automatic_authorization_rotation_blocked"] is True
+    assert sync_log["authorization_value_exposed"] is False
+    assert sync_log["authorization_lease_id"].startswith("synthetic_lease_")
+    assert (
+        lts_status["missing_upstream_records"]
+        == bds_status["missing_records"]
+        == bds_status["expected_records"] - bds_status["available_records"]
+        == table["missing_records"]
+        == table["expected_row_count"] - table["row_count"]
+        == delay["backlog_records"]
+        == sync_log["read_rejected_records"]
+        == 1800
+    )
+    assert {
+        observation.response.evidence[0].source_id
+        for observation in observations.values()
+    } == {
+        "lts_status_settlement_source_auth_cross",
+        "lts_topology_settlement_source_auth_cross",
+        "bds_status_settlement_source_auth_cross",
+        "bds_table_settlement_source_auth_cross",
+        "flashsync_delay_settlement_source_auth_cross",
+        "flashsync_log_settlement_source_auth_cross",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "expected_data_key"),
     [

@@ -1,6 +1,6 @@
 {
-  "seed_version": "graph-seed:v9",
-  "source_id": "synthetic_cross_chain_knowledge_v9",
+  "seed_version": "graph-seed:v10",
+  "source_id": "synthetic_cross_chain_knowledge_v10",
   "nodes": [
     {
       "node_id": "component_lts",
@@ -439,6 +439,83 @@
       "aliases": ["controlled target recovery", "目标写入受控恢复"],
       "source_id": "synthetic_cross_chain_knowledge_v9",
       "source_span": "只提供人工复核、限速回放和结果核验建议，不自动修改配额或写入生产目标。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "task_lts_settlement_summary",
+      "node_type": "task",
+      "name": "dws_settlement_summary_daily",
+      "content": "LTS 结算摘要等待 BDS 结算聚合作业完成后才开始本地计算。",
+      "aliases": ["settlement summary daily", "LTS 结算摘要"],
+      "source_id": "synthetic_cross_chain_knowledge_v10",
+      "source_span": "LTS 结算摘要以 BDS 结算聚合作业作为直接上游依赖。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "task_bds_settlement_aggregate",
+      "node_type": "task",
+      "name": "bds_settlement_aggregate_hourly",
+      "content": "BDS 结算聚合作业消费结算增量，输入数量不足时停在源数据校验阶段。",
+      "aliases": ["settlement aggregate hourly", "BDS 结算聚合"],
+      "source_id": "synthetic_cross_chain_knowledge_v10",
+      "source_span": "BDS 结算聚合作业依赖 FlashSync 结算增量任务及其数据集。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "task_flashsync_settlement_delta",
+      "node_type": "task",
+      "name": "flashsync_settlement_delta",
+      "content": "FlashSync 结算增量任务使用受控授权租约读取合成源端并生成 ods_settlement_delta。",
+      "aliases": ["settlement delta delivery", "FlashSync 结算增量"],
+      "source_id": "synthetic_cross_chain_knowledge_v10",
+      "source_span": "FlashSync 结算增量任务为 BDS 结算聚合作业提供输入。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "dataset_ods_settlement_delta",
+      "node_type": "dataset",
+      "name": "ods_settlement_delta",
+      "content": "结算增量数据集由 FlashSync 生成并被 BDS 结算聚合作业消费。",
+      "aliases": ["settlement delta dataset"],
+      "source_id": "synthetic_cross_chain_knowledge_v10",
+      "source_span": "ods_settlement_delta 是 FlashSync 与 BDS 之间的显式数据交付边界。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "symptom_flashsync_source_authorization_rejected",
+      "node_type": "symptom",
+      "name": "FlashSync 源端读取授权被拒绝",
+      "content": "同步协议可用但业务读取被源端拒绝时，目标端仍健康而源端吞吐降为零。",
+      "aliases": ["source authorization rejected", "源端读取拒绝"],
+      "source_id": "synthetic_cross_chain_knowledge_v10",
+      "source_span": "源端读取拒绝与目标端健康共同限定授权故障边界。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "root_cause_flashsync_source_authorization_expired",
+      "node_type": "root_cause",
+      "name": "FlashSync 源端授权租约过期",
+      "content": "源端授权租约到期并返回 SOURCE_AUTHORIZATION_EXPIRED，使 FlashSync 无法读取新增记录。",
+      "aliases": ["SOURCE_AUTHORIZATION_EXPIRED", "源端读取授权失效"],
+      "source_id": "synthetic_cross_chain_knowledge_v10",
+      "source_span": "只记录合成租约状态和稳定错误码，不保存或展示任何授权值。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "solution_secure_flashsync_source_authorization_rotation",
+      "node_type": "solution",
+      "name": "安全轮换 FlashSync 源端授权",
+      "content": "由有权限人员在受控渠道轮换源端授权，先验证最小读取范围，再小批量恢复并撤销旧租约；报告不得展示授权材料。",
+      "aliases": ["secure source authorization rotation", "源端授权安全轮换"],
+      "source_id": "synthetic_cross_chain_knowledge_v10",
+      "source_span": "方案只描述安全流程、验证和回滚边界，不生成、存储或传输授权值。",
       "reliability": 1.0,
       "embedding": null
     }
@@ -902,6 +979,96 @@
       "weight": 1.0,
       "source_id": "synthetic_cross_chain_knowledge_v9",
       "source_span": "目标端限流应先人工核对配额，再执行受控提额或限速分批恢复。"
+    },
+    {
+      "edge_id": "edge_lts_settlement_runs_on",
+      "from_node_id": "task_lts_settlement_summary",
+      "to_node_id": "component_lts",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v10",
+      "source_span": "dws_settlement_summary_daily 由 LTS 调度组件运行。"
+    },
+    {
+      "edge_id": "edge_bds_settlement_runs_on",
+      "from_node_id": "task_bds_settlement_aggregate",
+      "to_node_id": "component_bds",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v10",
+      "source_span": "bds_settlement_aggregate_hourly 由 BDS 计算组件运行。"
+    },
+    {
+      "edge_id": "edge_flashsync_settlement_runs_on",
+      "from_node_id": "task_flashsync_settlement_delta",
+      "to_node_id": "component_flashsync",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v10",
+      "source_span": "flashsync_settlement_delta 由 FlashSync 同步组件运行。"
+    },
+    {
+      "edge_id": "edge_lts_settlement_depends_bds",
+      "from_node_id": "task_lts_settlement_summary",
+      "to_node_id": "task_bds_settlement_aggregate",
+      "relation_type": "DEPENDS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v10",
+      "source_span": "LTS 结算摘要依赖 BDS 结算聚合作业完成。"
+    },
+    {
+      "edge_id": "edge_bds_settlement_depends_flashsync",
+      "from_node_id": "task_bds_settlement_aggregate",
+      "to_node_id": "task_flashsync_settlement_delta",
+      "relation_type": "DEPENDS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v10",
+      "source_span": "BDS 结算聚合作业依赖 FlashSync 结算增量任务完成。"
+    },
+    {
+      "edge_id": "edge_flashsync_settlement_produces_dataset",
+      "from_node_id": "task_flashsync_settlement_delta",
+      "to_node_id": "dataset_ods_settlement_delta",
+      "relation_type": "PRODUCES",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v10",
+      "source_span": "FlashSync 结算增量任务生成 ods_settlement_delta。"
+    },
+    {
+      "edge_id": "edge_bds_settlement_consumes_dataset",
+      "from_node_id": "task_bds_settlement_aggregate",
+      "to_node_id": "dataset_ods_settlement_delta",
+      "relation_type": "CONSUMES",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v10",
+      "source_span": "BDS 结算聚合作业消费 ods_settlement_delta。"
+    },
+    {
+      "edge_id": "edge_flashsync_settlement_manifests_source_auth_rejection",
+      "from_node_id": "task_flashsync_settlement_delta",
+      "to_node_id": "symptom_flashsync_source_authorization_rejected",
+      "relation_type": "MANIFESTS_AS",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v10",
+      "source_span": "结算增量任务的授权过期表现为源端读取被拒绝。"
+    },
+    {
+      "edge_id": "edge_source_auth_rejection_caused_by_expired_lease",
+      "from_node_id": "symptom_flashsync_source_authorization_rejected",
+      "to_node_id": "root_cause_flashsync_source_authorization_expired",
+      "relation_type": "CAUSED_BY",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v10",
+      "source_span": "源端读取拒绝由已过期的合成授权租约导致。"
+    },
+    {
+      "edge_id": "edge_source_auth_expired_resolved_by_secure_rotation",
+      "from_node_id": "root_cause_flashsync_source_authorization_expired",
+      "to_node_id": "solution_secure_flashsync_source_authorization_rotation",
+      "relation_type": "RESOLVED_BY",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v10",
+      "source_span": "授权过期必须通过受控渠道安全轮换并验证最小权限和回滚边界。"
     }
   ]
 }

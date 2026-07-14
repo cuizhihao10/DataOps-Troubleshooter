@@ -70,14 +70,14 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
             await session.commit()
 
             node_count, edge_count = await repository.count_graph()
-            assert node_count == 40
-            assert edge_count == 51
+            assert node_count == 47
+            assert edge_count == 61
             assert (
                 await repository.count_embedded_nodes(
                     provider_id=embedding_provider.provider_id,
                     dimensions=embedding_provider.dimensions,
                 )
-                == 40
+                == 47
             )
 
             # 直接绕过 Pydantic 篡改维度，确认数据库 CheckConstraint 仍能拒绝不兼容向量元数据。
@@ -436,6 +436,75 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
                 "RESOLVED_BY",
             ]
             assert target_solution_path.depth == 2
+
+            # v10 从 LTS 结算摘要沿两条 DEPENDS_ON 到达 FlashSync 结算增量任务；任务身份确保授权
+            # 根因属于独立结算事实环境，而不是复用收入链标签虚增 Golden 配额。
+            settlement_dependency_result = await service.retrieve(
+                "dws_settlement_summary_daily",
+                seed_limit=5,
+                max_hops=2,
+            )
+            settlement_dependency_path = next(
+                path
+                for path in settlement_dependency_result.paths
+                if [node.node_id for node in path.nodes]
+                == [
+                    "task_lts_settlement_summary",
+                    "task_bds_settlement_aggregate",
+                    "task_flashsync_settlement_delta",
+                ]
+            )
+            assert [edge.relation_type.value for edge in settlement_dependency_path.edges] == [
+                "DEPENDS_ON",
+                "DEPENDS_ON",
+            ]
+            assert settlement_dependency_path.depth == 2
+
+            # 从同步任务验证授权拒绝症状与根因的显式连接；MCP ``ok=true`` 只表示传输成功，是否
+            # 读取成功仍由实时业务 Observation 判断，图知识不能伪造本次过期事实。
+            source_auth_manifest_result = await service.retrieve(
+                "flashsync_settlement_delta",
+                seed_limit=5,
+                max_hops=2,
+            )
+            source_auth_manifest_path = next(
+                path
+                for path in source_auth_manifest_result.paths
+                if [node.node_id for node in path.nodes]
+                == [
+                    "task_flashsync_settlement_delta",
+                    "symptom_flashsync_source_authorization_rejected",
+                    "root_cause_flashsync_source_authorization_expired",
+                ]
+            )
+            assert [edge.relation_type.value for edge in source_auth_manifest_path.edges] == [
+                "MANIFESTS_AS",
+                "CAUSED_BY",
+            ]
+            assert source_auth_manifest_path.depth == 2
+
+            # 错误码查询必须返回症状→根因→安全轮换方案；方案只描述受控流程且不含授权值，路径
+            # 存在不代表 Agent 获得修改连接或读取授权材料的权限。
+            source_auth_solution_result = await service.retrieve(
+                "SOURCE_AUTHORIZATION_EXPIRED 源端授权过期",
+                seed_limit=5,
+                max_hops=2,
+            )
+            source_auth_solution_path = next(
+                path
+                for path in source_auth_solution_result.paths
+                if [node.node_id for node in path.nodes]
+                == [
+                    "symptom_flashsync_source_authorization_rejected",
+                    "root_cause_flashsync_source_authorization_expired",
+                    "solution_secure_flashsync_source_authorization_rotation",
+                ]
+            )
+            assert [edge.relation_type.value for edge in source_auth_solution_path.edges] == [
+                "CAUSED_BY",
+                "RESOLVED_BY",
+            ]
+            assert source_auth_solution_path.depth == 2
 
             # 使用同一查询和预算运行 vector-only/vector+graph，结构化记录图扩展的实测增益。
             ablation_case = load_graph_ablation_cases(

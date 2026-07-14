@@ -29,9 +29,9 @@ def test_curated_seed_uses_approved_node_and_relation_contracts() -> None:
 
     bundle = load_knowledge_seed(SEED_FILE)
 
-    assert bundle.seed_version == "graph-seed:v9"
-    assert len(bundle.nodes) == 40
-    assert len(bundle.edges) == 51
+    assert bundle.seed_version == "graph-seed:v10"
+    assert len(bundle.nodes) == 47
+    assert len(bundle.edges) == 61
     assert {node.node_type for node in bundle.nodes} <= set(KnowledgeNodeType)
     assert {edge.relation_type for edge in bundle.edges} <= set(KnowledgeRelationType)
     assert all(node.source_span for node in bundle.nodes)
@@ -313,6 +313,70 @@ def test_cross_component_seed_contains_revenue_target_throttle_topology() -> Non
         cause.source_id,
         solution.source_id,
     } == {"synthetic_cross_chain_knowledge_v9"}
+
+
+def test_cross_component_seed_contains_settlement_source_authorization_topology() -> None:
+    """验证 v10 结算链连接三组件任务、授权拒绝根因和安全轮换方案。
+
+    两条 DEPENDS_ON 保留传播方向，PRODUCES/CONSUMES 证明结算数据交付边界；同步任务通过
+    MANIFESTS_AS→CAUSED_BY 接入授权过期根因，再由 RESOLVED_BY 指向不携带授权值的安全轮换流程。
+    该门禁避免把协议 ``ok=true`` 错当成业务读取成功，也防止知识节点保存任何授权材料。
+    """
+
+    bundle = load_knowledge_seed(SEED_FILE)
+    edges = {edge.edge_id: edge for edge in bundle.edges}
+    nodes = {node.node_id: node for node in bundle.nodes}
+
+    lts_dependency = edges["edge_lts_settlement_depends_bds"]
+    bds_dependency = edges["edge_bds_settlement_depends_flashsync"]
+    produces = edges["edge_flashsync_settlement_produces_dataset"]
+    consumes = edges["edge_bds_settlement_consumes_dataset"]
+    manifests = edges["edge_flashsync_settlement_manifests_source_auth_rejection"]
+    cause = edges["edge_source_auth_rejection_caused_by_expired_lease"]
+    solution = edges["edge_source_auth_expired_resolved_by_secure_rotation"]
+    assert lts_dependency.from_node_id == "task_lts_settlement_summary"
+    assert (
+        lts_dependency.to_node_id
+        == bds_dependency.from_node_id
+        == "task_bds_settlement_aggregate"
+    )
+    assert bds_dependency.to_node_id == produces.from_node_id == manifests.from_node_id
+    assert bds_dependency.to_node_id == "task_flashsync_settlement_delta"
+    assert produces.to_node_id == consumes.to_node_id == "dataset_ods_settlement_delta"
+    assert consumes.from_node_id == bds_dependency.from_node_id
+    assert manifests.to_node_id == cause.from_node_id
+    assert cause.to_node_id == solution.from_node_id
+    assert solution.to_node_id == "solution_secure_flashsync_source_authorization_rotation"
+    assert [
+        lts_dependency.relation_type,
+        bds_dependency.relation_type,
+        produces.relation_type,
+        consumes.relation_type,
+        manifests.relation_type,
+        cause.relation_type,
+        solution.relation_type,
+    ] == [
+        KnowledgeRelationType.DEPENDS_ON,
+        KnowledgeRelationType.DEPENDS_ON,
+        KnowledgeRelationType.PRODUCES,
+        KnowledgeRelationType.CONSUMES,
+        KnowledgeRelationType.MANIFESTS_AS,
+        KnowledgeRelationType.CAUSED_BY,
+        KnowledgeRelationType.RESOLVED_BY,
+    ]
+    assert {
+        lts_dependency.source_id,
+        bds_dependency.source_id,
+        produces.source_id,
+        consumes.source_id,
+        manifests.source_id,
+        cause.source_id,
+        solution.source_id,
+    } == {"synthetic_cross_chain_knowledge_v10"}
+    assert "授权值" not in nodes["root_cause_flashsync_source_authorization_expired"].content
+    assert "不生成、存储或传输授权值" in nodes[
+        "solution_secure_flashsync_source_authorization_rotation"
+    ].source_span
 
 
 def test_seed_rejects_dangling_edge_reference() -> None:
