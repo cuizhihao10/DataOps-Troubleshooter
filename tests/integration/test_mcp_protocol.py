@@ -937,6 +937,77 @@ async def test_bds_data_skew_propagates_to_lts_across_real_mcp_protocol() -> Non
 
 
 @pytest.mark.asyncio
+async def test_target_write_throttle_propagates_across_three_components_via_real_mcp() -> None:
+    """验证目标端限流经真实 MCP 形成 FlashSync→BDS→LTS 的三组件数量闭环。
+
+    六项调用恰好使用默认 ReAct Action 预算：LTS 状态/拓扑负责定位传播链，BDS 状态/表信息证明
+    分区存在且资源正常，FlashSync 延迟/日志提供低吞吐、2600 条积压和 TARGET_WRITE_THROTTLED
+    直接根因。所有响应必须 ``ok=true``，避免把业务限流误当作 MCP 协议失败或重试语义。
+    """
+
+    executor = McpToolExecutor(StdioMcpClient(), retry_count=1)
+    calls = (
+        ("lts.get_task_status", "dws_revenue_dashboard_daily"),
+        ("lts.get_dependency_topology", "dws_revenue_dashboard_daily"),
+        ("bds.get_task_status", "bds_revenue_aggregate_hourly"),
+        ("bds.get_table_info", "ods_payment_delta"),
+        ("flashsync.get_sync_delay", "ods_payment_delta"),
+        ("flashsync.get_sync_log", "ods_payment_delta"),
+    )
+    observations = {}
+    for tool_name, resource_id in calls:
+        # 独立 trace 保证每项协议调用均可审计；scenario 只共享确定性事实，不合并 ToolEvent。
+        observations[tool_name] = await executor.execute(
+            _action(
+                "cross_lts_bds_flashsync_target_throttle",
+                resource_id,
+                f"trace_target_throttle_{tool_name.replace('.', '_')}",
+                tool_name=tool_name,
+            )
+        )
+
+    assert all(observation.response.ok for observation in observations.values())
+    lts_status = observations["lts.get_task_status"].response.data
+    topology = observations["lts.get_dependency_topology"].response.data
+    bds_status = observations["bds.get_task_status"].response.data
+    table = observations["bds.get_table_info"].response.data
+    delay = observations["flashsync.get_sync_delay"].response.data
+    sync_log = observations["flashsync.get_sync_log"].response.data
+    assert lts_status["local_execution_started"] is False
+    assert topology["upstream_task"] == "bds_revenue_aggregate_hourly"
+    assert topology["source_sync_task"] == "flashsync_payment_delta"
+    assert bds_status["cpu_percent"] < 80
+    assert bds_status["memory_percent"] < 80
+    assert table["latest_partition"] == table["expected_partition"]
+    assert table["schema_compatible"] is True
+    assert delay["source_read_healthy"] is True
+    assert delay["throughput_rows_per_second"] < delay["baseline_throughput_rows_per_second"]
+    assert sync_log["component_error_code"] == "TARGET_WRITE_THROTTLED"
+    assert sync_log["target_quota_utilization_percent"] == 100
+    assert sync_log["automatic_quota_change_blocked"] is True
+    assert (
+        lts_status["missing_upstream_records"]
+        == bds_status["missing_records"]
+        == bds_status["expected_records"] - bds_status["available_records"]
+        == table["missing_records"]
+        == table["expected_row_count"] - table["row_count"]
+        == delay["backlog_records"]
+        == 2600
+    )
+    assert {
+        observation.response.evidence[0].source_id
+        for observation in observations.values()
+    } == {
+        "lts_status_revenue_target_throttle_cross",
+        "lts_topology_revenue_target_throttle_cross",
+        "bds_status_revenue_target_throttle_cross",
+        "bds_table_revenue_target_throttle_cross",
+        "flashsync_delay_revenue_target_throttle_cross",
+        "flashsync_log_revenue_target_throttle_cross",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "expected_data_key"),
     [

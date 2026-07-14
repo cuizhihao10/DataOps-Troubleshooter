@@ -1,4 +1,4 @@
-"""用二十五条 Golden Cases 验证诊断、数据倾斜传播、降级、路径、冲突、记忆与 25/28 边界。
+"""用二十六条 Golden Cases 验证诊断、写入限流传播、降级、路径、冲突、记忆与 26/28 边界。
 
 测试运行器从合成 Fixture 构造真实 ``ToolEvent``/``Evidence``，再通过生产 Pydantic 顶层结果契约
 进入评测器。Planner、Auditor 和报告文本是确定性脚本，因此这些数字只证明数据流与评分规则可
@@ -152,13 +152,13 @@ class FixtureBackedGoldenRunner:
 
 
 @pytest.mark.asyncio
-async def test_twenty_five_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
-    """验证二十五条案例命中诊断、LTS→BDS 数据倾斜传播与路径契约，并保持 25/28 标记。
+async def test_twenty_six_golden_cases_produce_versioned_measured_diagnosis_baseline() -> None:
+    """验证二十六条案例命中诊断、三组件写入限流传播与路径契约，并保持 26/28 标记。
 
     确定性基线预期意图、必要 Action、允许根因、关键来源、停止原因、引用、风险和安全降级全部
     命中；七个故意失败 Action 使尝试成功率低于一，成功响应冲突案例的三个调用则全部成功。覆盖标记
-    必须保持 false，防止 25 条通过被宣传为 28 条验收完成；新案例必须在六项 Action 中同时证明
-    LTS 等待、BDS 长尾、数据倾斜直接日志和正常输入分区，并引用 v8 传播路径与既有 v3 处置知识。
+    必须保持 false，防止 26 条通过被宣传为 28 条验收完成；新案例必须在六项 Action 中同时证明
+    LTS 等待、BDS 正常资源下的输入缺口、FlashSync 低吞吐与目标限流，并引用 v9 的三条传播/方案路径。
     """
 
     cases = load_golden_cases(GOLDEN_CASE_FILE)
@@ -168,13 +168,13 @@ async def test_twenty_five_golden_cases_produce_versioned_measured_diagnosis_bas
 
     assert report.contract_id == GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID
     assert report.metric_kind == "measured"
-    assert report.case_count == 25
+    assert report.case_count == 26
     assert report.target_case_count == 28
-    assert report.case_coverage_rate == pytest.approx(25 / 28)
+    assert report.case_coverage_rate == pytest.approx(26 / 28)
     assert report.target_coverage_complete is False
     assert report.category_case_counts == {
         GoldenCaseCategory.SINGLE_COMPONENT: 8,
-        GoldenCaseCategory.CROSS_COMPONENT: 7,
+        GoldenCaseCategory.CROSS_COMPONENT: 8,
         GoldenCaseCategory.AMBIGUOUS_OR_INSUFFICIENT: 4,
         GoldenCaseCategory.TOOL_ANOMALY_OR_CONFLICT: 3,
         GoldenCaseCategory.MEMORY_RECALL: 3,
@@ -188,7 +188,7 @@ async def test_twenty_five_golden_cases_produce_versioned_measured_diagnosis_bas
     assert report.citation_completeness == 1
     assert report.unsupported_critical_claim_rate == 0
     assert report.duplicate_action_rate == 0
-    assert report.tool_attempt_success_rate == pytest.approx(74 / 81)
+    assert report.tool_attempt_success_rate == pytest.approx(80 / 87)
     assert report.risk_level_hit_rate == 1
     assert report.safe_degradation_rate == 1
     assert report.evidence_conflict_safe_resolution_rate == 1
@@ -357,6 +357,34 @@ async def test_twenty_five_golden_cases_produce_versioned_measured_diagnosis_bas
         "bds_data_skew_solution_chain",
     ]
     assert propagated_skew_result.actual_risk_level is RiskLevel.MEDIUM
+    target_throttle_result = next(
+        result
+        for result in report.cases
+        if result.case_id == "golden_cross_lts_bds_flashsync_target_write_throttle"
+    )
+    assert target_throttle_result.executed_tools == [
+        "lts.get_task_status",
+        "lts.get_dependency_topology",
+        "bds.get_task_status",
+        "bds.get_table_info",
+        "flashsync.get_sync_delay",
+        "flashsync.get_sync_log",
+    ]
+    assert target_throttle_result.observed_evidence_sources == [
+        "lts_status_revenue_target_throttle_cross",
+        "lts_topology_revenue_target_throttle_cross",
+        "bds_status_revenue_target_throttle_cross",
+        "bds_table_revenue_target_throttle_cross",
+        "flashsync_delay_revenue_target_throttle_cross",
+        "flashsync_log_revenue_target_throttle_cross",
+    ]
+    assert target_throttle_result.actual_top1_root_cause == "FlashSync 目标端写入限流"
+    assert target_throttle_result.matched_fault_path_labels == [
+        "revenue_task_dependency_chain",
+        "payment_target_throttle_manifest_chain",
+        "flashsync_target_throttle_solution_chain",
+    ]
+    assert target_throttle_result.actual_risk_level is RiskLevel.MEDIUM
     checkpoint_result = next(
         result
         for result in report.cases
@@ -977,6 +1005,15 @@ def _build_retrieved_paths(case: GoldenCaseSpec) -> list[RetrievedPath]:
                     ),
                     "customer_segment_skew_manifest_chain": (
                         "synthetic_cross_chain_knowledge_v8"
+                    ),
+                    "revenue_task_dependency_chain": (
+                        "synthetic_cross_chain_knowledge_v9"
+                    ),
+                    "payment_target_throttle_manifest_chain": (
+                        "synthetic_cross_chain_knowledge_v9"
+                    ),
+                    "flashsync_target_throttle_solution_chain": (
+                        "synthetic_cross_chain_knowledge_v9"
                     ),
                 }.get(requirement.path_label, "synthetic_cross_chain_knowledge_v1")
             ],

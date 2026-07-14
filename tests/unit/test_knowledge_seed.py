@@ -29,9 +29,9 @@ def test_curated_seed_uses_approved_node_and_relation_contracts() -> None:
 
     bundle = load_knowledge_seed(SEED_FILE)
 
-    assert bundle.seed_version == "graph-seed:v8"
-    assert len(bundle.nodes) == 33
-    assert len(bundle.edges) == 41
+    assert bundle.seed_version == "graph-seed:v9"
+    assert len(bundle.nodes) == 40
+    assert len(bundle.edges) == 51
     assert {node.node_type for node in bundle.nodes} <= set(KnowledgeNodeType)
     assert {edge.relation_type for edge in bundle.edges} <= set(KnowledgeRelationType)
     assert all(node.source_span for node in bundle.nodes)
@@ -254,6 +254,65 @@ def test_cross_component_seed_contains_customer_segment_skew_topology() -> None:
         consumes.source_id,
         manifests.source_id,
     } == {"synthetic_cross_chain_knowledge_v8"}
+
+
+def test_cross_component_seed_contains_revenue_target_throttle_topology() -> None:
+    """验证 v9 收入链把三组件任务依赖、目标限流根因和受控方案连成显式路径。
+
+    LTS→BDS→FlashSync 必须使用两条同向 DEPENDS_ON；同步任务再以 MANIFESTS_AS 接入新症状，
+    症状经 CAUSED_BY 指向写配额根因，根因经 RESOLVED_BY 指向只读受控恢复建议。数据集的
+    PRODUCES/CONSUMES 边独立保留交付事实，避免仅靠任务依赖推断数据已经写入。
+    """
+
+    bundle = load_knowledge_seed(SEED_FILE)
+    edges = {edge.edge_id: edge for edge in bundle.edges}
+
+    lts_dependency = edges["edge_lts_revenue_depends_bds"]
+    bds_dependency = edges["edge_bds_revenue_depends_flashsync"]
+    produces = edges["edge_flashsync_payment_produces_dataset"]
+    consumes = edges["edge_bds_revenue_consumes_dataset"]
+    manifests = edges["edge_flashsync_payment_manifests_target_throttle"]
+    cause = edges["edge_target_write_throttling_caused_by_quota"]
+    solution = edges["edge_target_write_throttle_resolved_by_controlled_recovery"]
+    assert lts_dependency.from_node_id == "task_lts_revenue_dashboard"
+    assert (
+        lts_dependency.to_node_id
+        == bds_dependency.from_node_id
+        == "task_bds_revenue_aggregate"
+    )
+    assert bds_dependency.to_node_id == produces.from_node_id == manifests.from_node_id
+    assert bds_dependency.to_node_id == "task_flashsync_payment_delta"
+    assert produces.to_node_id == consumes.to_node_id == "dataset_ods_payment_delta"
+    assert consumes.from_node_id == bds_dependency.from_node_id
+    assert manifests.to_node_id == cause.from_node_id
+    assert cause.to_node_id == solution.from_node_id
+    assert solution.to_node_id == "solution_controlled_flashsync_target_recovery"
+    assert [
+        lts_dependency.relation_type,
+        bds_dependency.relation_type,
+        produces.relation_type,
+        consumes.relation_type,
+        manifests.relation_type,
+        cause.relation_type,
+        solution.relation_type,
+    ] == [
+        KnowledgeRelationType.DEPENDS_ON,
+        KnowledgeRelationType.DEPENDS_ON,
+        KnowledgeRelationType.PRODUCES,
+        KnowledgeRelationType.CONSUMES,
+        KnowledgeRelationType.MANIFESTS_AS,
+        KnowledgeRelationType.CAUSED_BY,
+        KnowledgeRelationType.RESOLVED_BY,
+    ]
+    assert {
+        lts_dependency.source_id,
+        bds_dependency.source_id,
+        produces.source_id,
+        consumes.source_id,
+        manifests.source_id,
+        cause.source_id,
+        solution.source_id,
+    } == {"synthetic_cross_chain_knowledge_v9"}
 
 
 def test_seed_rejects_dangling_edge_reference() -> None:

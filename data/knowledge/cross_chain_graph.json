@@ -1,6 +1,6 @@
 {
-  "seed_version": "graph-seed:v8",
-  "source_id": "synthetic_cross_chain_knowledge_v8",
+  "seed_version": "graph-seed:v9",
+  "source_id": "synthetic_cross_chain_knowledge_v9",
   "nodes": [
     {
       "node_id": "component_lts",
@@ -362,6 +362,83 @@
       "aliases": ["customer segment hourly dataset"],
       "source_id": "synthetic_cross_chain_knowledge_v8",
       "source_span": "dws_customer_segment_hourly 是 BDS 与 LTS 之间的显式数据交付边界。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "task_lts_revenue_dashboard",
+      "node_type": "task",
+      "name": "dws_revenue_dashboard_daily",
+      "content": "LTS 收入日报等待 BDS 收入聚合作业完成后才开始本地报表计算。",
+      "aliases": ["revenue dashboard daily", "LTS 收入日报"],
+      "source_id": "synthetic_cross_chain_knowledge_v9",
+      "source_span": "LTS 收入日报以 BDS 收入聚合作业作为直接上游依赖。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "task_bds_revenue_aggregate",
+      "node_type": "task",
+      "name": "bds_revenue_aggregate_hourly",
+      "content": "BDS 收入聚合作业消费支付增量数据，输入数量不足时停在源数据校验阶段。",
+      "aliases": ["revenue aggregate hourly", "BDS 收入聚合"],
+      "source_id": "synthetic_cross_chain_knowledge_v9",
+      "source_span": "BDS 收入聚合作业依赖 FlashSync 支付增量任务及其数据集。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "task_flashsync_payment_delta",
+      "node_type": "task",
+      "name": "flashsync_payment_delta",
+      "content": "FlashSync 支付增量任务从健康源端读取记录，并受目标端写配额约束生成 ods_payment_delta。",
+      "aliases": ["payment delta delivery", "FlashSync 支付增量"],
+      "source_id": "synthetic_cross_chain_knowledge_v9",
+      "source_span": "FlashSync 支付增量任务为 BDS 收入聚合作业提供输入。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "dataset_ods_payment_delta",
+      "node_type": "dataset",
+      "name": "ods_payment_delta",
+      "content": "支付增量数据集由 FlashSync 生成并被 BDS 收入聚合作业消费。",
+      "aliases": ["payment delta dataset"],
+      "source_id": "synthetic_cross_chain_knowledge_v9",
+      "source_span": "ods_payment_delta 是 FlashSync 与 BDS 之间的显式数据交付边界。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "symptom_flashsync_target_write_throttling",
+      "node_type": "symptom",
+      "name": "FlashSync 目标端写入受限",
+      "content": "源端读取正常但目标端连续返回限流响应时，同步吞吐显著低于基线并持续累积待写记录。",
+      "aliases": ["target write throttle", "目标写入受限"],
+      "source_id": "synthetic_cross_chain_knowledge_v9",
+      "source_span": "目标端连续限流表现为低吞吐和持续待写记录。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "root_cause_flashsync_target_write_throttling",
+      "node_type": "root_cause",
+      "name": "FlashSync 目标端写入限流",
+      "content": "目标端写配额达到上限并连续返回 TARGET_WRITE_THROTTLED，使 FlashSync 无法按基线吞吐提交记录。",
+      "aliases": ["TARGET_WRITE_THROTTLED", "目标端写配额耗尽"],
+      "source_id": "synthetic_cross_chain_knowledge_v9",
+      "source_span": "持续限流、配额满载和健康源端共同定位目标端写配额问题。",
+      "reliability": 1.0,
+      "embedding": null
+    },
+    {
+      "node_id": "solution_controlled_flashsync_target_recovery",
+      "node_type": "solution",
+      "name": "受控恢复 FlashSync 目标端写入",
+      "content": "先确认目标端配额与写入健康度，再由有权限人员评估临时提额或降速分批回放，并核对差异和回滚边界。",
+      "aliases": ["controlled target recovery", "目标写入受控恢复"],
+      "source_id": "synthetic_cross_chain_knowledge_v9",
+      "source_span": "只提供人工复核、限速回放和结果核验建议，不自动修改配额或写入生产目标。",
       "reliability": 1.0,
       "embedding": null
     }
@@ -735,6 +812,96 @@
       "weight": 1.0,
       "source_id": "synthetic_cross_chain_knowledge_v8",
       "source_span": "客户分群聚合中的热点分桶表现为 BDS 执行阶段长尾。"
+    },
+    {
+      "edge_id": "edge_lts_revenue_runs_on",
+      "from_node_id": "task_lts_revenue_dashboard",
+      "to_node_id": "component_lts",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v9",
+      "source_span": "dws_revenue_dashboard_daily 由 LTS 调度组件运行。"
+    },
+    {
+      "edge_id": "edge_bds_revenue_runs_on",
+      "from_node_id": "task_bds_revenue_aggregate",
+      "to_node_id": "component_bds",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v9",
+      "source_span": "bds_revenue_aggregate_hourly 由 BDS 计算组件运行。"
+    },
+    {
+      "edge_id": "edge_flashsync_payment_runs_on",
+      "from_node_id": "task_flashsync_payment_delta",
+      "to_node_id": "component_flashsync",
+      "relation_type": "RUNS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v9",
+      "source_span": "flashsync_payment_delta 由 FlashSync 同步组件运行。"
+    },
+    {
+      "edge_id": "edge_lts_revenue_depends_bds",
+      "from_node_id": "task_lts_revenue_dashboard",
+      "to_node_id": "task_bds_revenue_aggregate",
+      "relation_type": "DEPENDS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v9",
+      "source_span": "LTS 收入日报依赖 BDS 收入聚合作业完成。"
+    },
+    {
+      "edge_id": "edge_bds_revenue_depends_flashsync",
+      "from_node_id": "task_bds_revenue_aggregate",
+      "to_node_id": "task_flashsync_payment_delta",
+      "relation_type": "DEPENDS_ON",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v9",
+      "source_span": "BDS 收入聚合作业依赖 FlashSync 支付增量任务完成。"
+    },
+    {
+      "edge_id": "edge_flashsync_payment_produces_dataset",
+      "from_node_id": "task_flashsync_payment_delta",
+      "to_node_id": "dataset_ods_payment_delta",
+      "relation_type": "PRODUCES",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v9",
+      "source_span": "FlashSync 支付增量任务生成 ods_payment_delta。"
+    },
+    {
+      "edge_id": "edge_bds_revenue_consumes_dataset",
+      "from_node_id": "task_bds_revenue_aggregate",
+      "to_node_id": "dataset_ods_payment_delta",
+      "relation_type": "CONSUMES",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v9",
+      "source_span": "BDS 收入聚合作业消费 ods_payment_delta。"
+    },
+    {
+      "edge_id": "edge_flashsync_payment_manifests_target_throttle",
+      "from_node_id": "task_flashsync_payment_delta",
+      "to_node_id": "symptom_flashsync_target_write_throttling",
+      "relation_type": "MANIFESTS_AS",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v9",
+      "source_span": "支付增量任务遇到目标端限流时表现为写入吞吐显著下降。"
+    },
+    {
+      "edge_id": "edge_target_write_throttling_caused_by_quota",
+      "from_node_id": "symptom_flashsync_target_write_throttling",
+      "to_node_id": "root_cause_flashsync_target_write_throttling",
+      "relation_type": "CAUSED_BY",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v9",
+      "source_span": "健康源端下持续低吞吐由目标端写配额限流导致。"
+    },
+    {
+      "edge_id": "edge_target_write_throttle_resolved_by_controlled_recovery",
+      "from_node_id": "root_cause_flashsync_target_write_throttling",
+      "to_node_id": "solution_controlled_flashsync_target_recovery",
+      "relation_type": "RESOLVED_BY",
+      "weight": 1.0,
+      "source_id": "synthetic_cross_chain_knowledge_v9",
+      "source_span": "目标端限流应先人工核对配额，再执行受控提额或限速分批恢复。"
     }
   ]
 }

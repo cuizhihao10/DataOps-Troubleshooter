@@ -70,14 +70,14 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
             await session.commit()
 
             node_count, edge_count = await repository.count_graph()
-            assert node_count == 33
-            assert edge_count == 41
+            assert node_count == 40
+            assert edge_count == 51
             assert (
                 await repository.count_embedded_nodes(
                     provider_id=embedding_provider.provider_id,
                     dimensions=embedding_provider.dimensions,
                 )
-                == 33
+                == 40
             )
 
             # 直接绕过 Pydantic 篡改维度，确认数据库 CheckConstraint 仍能拒绝不兼容向量元数据。
@@ -368,6 +368,75 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
             ]
             assert skew_manifest_path.depth == 2
 
+            # v9 的 LTS 收入日报必须沿两条 DEPENDS_ON 到达 FlashSync 支付增量任务；相比通用组件
+            # 关系，这条任务级路径证明 2600 条缺口属于同一收入事实环境。
+            revenue_dependency_result = await service.retrieve(
+                "dws_revenue_dashboard_daily",
+                seed_limit=5,
+                max_hops=2,
+            )
+            revenue_dependency_path = next(
+                path
+                for path in revenue_dependency_result.paths
+                if [node.node_id for node in path.nodes]
+                == [
+                    "task_lts_revenue_dashboard",
+                    "task_bds_revenue_aggregate",
+                    "task_flashsync_payment_delta",
+                ]
+            )
+            assert [edge.relation_type.value for edge in revenue_dependency_path.edges] == [
+                "DEPENDS_ON",
+                "DEPENDS_ON",
+            ]
+            assert revenue_dependency_path.depth == 2
+
+            # 从同步任务验证 MANIFESTS_AS→CAUSED_BY，使任务拓扑接入目标端限流根因；实时配额和
+            # 吞吐事实仍来自 MCP，图知识只解释稳定因果结构。
+            target_manifest_result = await service.retrieve(
+                "flashsync_payment_delta",
+                seed_limit=5,
+                max_hops=2,
+            )
+            target_manifest_path = next(
+                path
+                for path in target_manifest_result.paths
+                if [node.node_id for node in path.nodes]
+                == [
+                    "task_flashsync_payment_delta",
+                    "symptom_flashsync_target_write_throttling",
+                    "root_cause_flashsync_target_write_throttling",
+                ]
+            )
+            assert [edge.relation_type.value for edge in target_manifest_path.edges] == [
+                "MANIFESTS_AS",
+                "CAUSED_BY",
+            ]
+            assert target_manifest_path.depth == 2
+
+            # 用错误码命中症状/根因后再验证 CAUSED_BY→RESOLVED_BY，确保新方案是显式路径且不
+            # 需要越过两跳预算；方案文本只建议人工受控恢复，不代表写操作授权。
+            target_solution_result = await service.retrieve(
+                "TARGET_WRITE_THROTTLED 目标端写入限流",
+                seed_limit=5,
+                max_hops=2,
+            )
+            target_solution_path = next(
+                path
+                for path in target_solution_result.paths
+                if [node.node_id for node in path.nodes]
+                == [
+                    "symptom_flashsync_target_write_throttling",
+                    "root_cause_flashsync_target_write_throttling",
+                    "solution_controlled_flashsync_target_recovery",
+                ]
+            )
+            assert [edge.relation_type.value for edge in target_solution_path.edges] == [
+                "CAUSED_BY",
+                "RESOLVED_BY",
+            ]
+            assert target_solution_path.depth == 2
+
             # 使用同一查询和预算运行 vector-only/vector+graph，结构化记录图扩展的实测增益。
             ablation_case = load_graph_ablation_cases(
                 Path("data/evals/graphrag_ablation_cases.json")
@@ -409,10 +478,11 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
             assert causal_path.evidence_id == causal_path.path_id
             # 固定 Provider/seed/预算下锁定当前实测快照，使文档中的字节数和省略数量不能在图扩展后
             # 静默漂移；若知识内容合理变化，应重跑本测试并同步解释新候选排序，而不是放宽断言。
-            assert evidence_bundle.used_bytes == 5881
-            assert len(evidence_bundle.selected_nodes) == 8
+            assert evidence_bundle.used_bytes == 5634
+            assert len(evidence_bundle.selected_nodes) == 7
             assert len(evidence_bundle.selected_paths) == 4
-            assert len(evidence_bundle.omitted_path_ids) == 6
+            assert len(evidence_bundle.omitted_node_ids) == 5
+            assert len(evidence_bundle.omitted_path_ids) == 4
             assert evidence_bundle.used_bytes <= evidence_bundle.budget.max_bytes
             assert set(causal_path.node_ids) <= {
                 node.node_id for node in evidence_bundle.selected_nodes

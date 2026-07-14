@@ -61,7 +61,7 @@ class RecordingPytestExecutor:
 
 
 def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -> None:
-    """确认 v19 manifest 精确覆盖五层、十九个指标，并拒绝任意 pytest flag/命令目标。
+    """确认 v20 manifest 精确覆盖五层、十九个指标，并拒绝任意 pytest flag/命令目标。
 
     复制 payload 后把第一 target 改为 ``--collect-only``；Pydantic 必须在执行器之前失败，证明 JSON
     不能把受限 test target 字段变成自由命令入口。
@@ -69,7 +69,7 @@ def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -
 
     manifest = load_portfolio_eval_manifest(MANIFEST_PATH)
 
-    assert manifest.contract_id == "portfolio-eval-manifest:v19"
+    assert manifest.contract_id == "portfolio-eval-manifest:v20"
     assert len(manifest.suites) == 5
     assert sum(len(suite.metrics) for suite in manifest.suites) == 19
     assert sum(suite.requires_postgres for suite in manifest.suites) == 2
@@ -81,7 +81,7 @@ def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -
 
 
 def test_portfolio_manifest_v1_remains_readable_with_exact_legacy_four_suites() -> None:
-    """验证升级默认 v19 后仍可读取精确四层的历史 v1 manifest。
+    """验证升级默认 v20 后仍可读取精确四层的历史 v1 manifest。
 
     测试从当前 JSON 删除 Golden 层并回写 v1 contract；兼容只允许旧精确集合，不能让任意缺层 v2
     借用 v1 标签通过。该能力用于解释旧结果，不会使默认 CLI 回退到四层。
@@ -267,7 +267,7 @@ def test_portfolio_manifest_v5_preserves_eleven_case_memory_snapshot() -> None:
 def test_portfolio_manifest_v6_preserves_twelve_case_conflict_snapshot() -> None:
     """验证历史 v6 绑定 Golden v5、12/28 覆盖和首条成功响应冲突指标。
 
-    v6 与当前 v19 的指标集合相同，但 Golden 来源和覆盖快照不同；测试先回写 12 条版本并确认可读，
+    v6 与当前 v20 的指标集合相同，但 Golden 来源和覆盖快照不同；测试先回写 12 条版本并确认可读，
     再改用 13/28 覆盖值，要求版本门禁失败，防止旧报告被解释成已包含第二条跨组件链路。
     """
 
@@ -298,7 +298,7 @@ def test_portfolio_manifest_v6_preserves_twelve_case_conflict_snapshot() -> None
 def test_portfolio_manifest_v7_preserves_thirteen_case_lts_bds_snapshot() -> None:
     """验证历史 v7 绑定 Golden v6 与 13/28 的 LTS→BDS 跨组件快照。
 
-    v7 与当前 v19 共享指标集合和 Golden Case Schema，但来源评测版本及覆盖率不同；回写 13 条快照
+    v7 与当前 v20 共享指标集合和 Golden Case Schema，但来源评测版本及覆盖率不同；回写 13 条快照
     后应可读取，若使用 14/28 当前覆盖则必须失败，防止旧报告被解释成已包含 BDS→FlashSync 案例。
     """
 
@@ -587,7 +587,7 @@ def test_portfolio_manifest_v15_preserves_twenty_one_case_checkpoint_snapshot() 
 def test_portfolio_manifest_v16_preserves_twenty_two_case_schema_snapshot() -> None:
     """验证历史 v16 绑定 Golden v15 与 22/28 的单组件 Schema 映射快照。
 
-    当前 v19 JSON 回写 v16 后必须可读；若注入 v17 的 23/28 覆盖也必须失败。这个版本门禁让
+    当前 v20 JSON 回写 v16 后必须可读；若注入 v17 的 23/28 覆盖也必须失败。这个版本门禁让
     “补齐单组件 8/8”和随后新增的三组件传播案例保持独立，旧报告不会被误解为已含 v6 任务拓扑。
     """
 
@@ -619,7 +619,7 @@ def test_portfolio_manifest_v16_preserves_twenty_two_case_schema_snapshot() -> N
 def test_portfolio_manifest_v17_preserves_twenty_three_case_schema_propagation_snapshot() -> None:
     """验证历史 v17 绑定 Golden v16 与 23/28 的三组件 Schema 传播快照。
 
-    当前 v19 JSON 回写 v17、Golden v16 和 23 条覆盖后必须可读；若仍使用 v18 的 24/28 快照则必须
+    当前 v20 JSON 回写 v17、Golden v16 和 23 条覆盖后必须可读；若仍使用 v18 的 24/28 快照则必须
     失败。这个门禁把 medium 风险 Schema 传播和 high 风险检查点传播拆成两个可审计版本。
     """
 
@@ -651,7 +651,7 @@ def test_portfolio_manifest_v17_preserves_twenty_three_case_schema_propagation_s
 def test_portfolio_manifest_v18_preserves_twenty_four_case_checkpoint_snapshot() -> None:
     """验证历史 v18 绑定 Golden v17 与 24/28 的检查点传播快照。
 
-    当前 v19 JSON 回写 v18、Golden v17 和 24 条覆盖后必须可读；随后注入 v19 的 25/28 覆盖必须
+    当前 v20 JSON 回写 v18、Golden v17 和 24 条覆盖后必须可读；随后注入 v19 的 25/28 覆盖必须
     失败。该门禁把 BDS→FlashSync 检查点传播与本切片的 LTS→BDS 数据倾斜传播分成两个可追溯版本。
     """
 
@@ -676,6 +676,38 @@ def test_portfolio_manifest_v18_preserves_twenty_four_case_checkpoint_snapshot()
     # v18 不能接受第 25 条案例的覆盖值，避免旧报告无版本地获得数据倾斜传播语义。
     coverage["treatment_value"] = 0.8929
     coverage["delta"] = -0.1071
+    with pytest.raises(ValidationError, match="requires Golden coverage snapshot"):
+        PortfolioEvalManifest.model_validate(payload)
+
+
+def test_portfolio_manifest_v19_preserves_twenty_five_case_skew_snapshot() -> None:
+    """验证历史 v19 绑定 Golden v18 与 25/28 的数据倾斜传播快照。
+
+    当前 v20 JSON 回写 v19、Golden v18 和 25 条覆盖后必须可读；再注入 v20 的 26/28 覆盖必须
+    失败。该门禁阻止旧报告无版本地获得三组件目标端写入限流案例及 graph-seed:v9 语义。
+    """
+
+    payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    payload["contract_id"] = "portfolio-eval-manifest:v19"
+    golden_suite = next(
+        suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
+    )
+    golden_suite["source_contract_id"] = "golden-diagnosis-eval:v18"
+    coverage = next(
+        metric
+        for metric in golden_suite["metrics"]
+        if metric["metric_id"] == "golden_case_coverage"
+    )
+    coverage["treatment_label"] = "measured_scripted_25_cases"
+    coverage["treatment_value"] = 0.8929
+    coverage["delta"] = -0.1071
+
+    manifest = PortfolioEvalManifest.model_validate(payload)
+    assert manifest.contract_id == "portfolio-eval-manifest:v19"
+
+    # v19 只能解释 25 条案例；第 26 条写入限流传播必须使用新的 v20 契约。
+    coverage["treatment_value"] = 0.9286
+    coverage["delta"] = -0.0714
     with pytest.raises(ValidationError, match="requires Golden coverage snapshot"):
         PortfolioEvalManifest.model_validate(payload)
 
