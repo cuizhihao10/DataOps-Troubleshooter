@@ -53,7 +53,7 @@ async def test_health_reports_validated_contract_baseline() -> None:
         "react_loop": "langgraph-react-loop:v2",
         "audited_report_workflow": "audited-report-workflow:v2",
         "diagnosis_workflow": "audited-diagnosis-workflow:v2",
-        "diagnosis_api": "diagnosis-resources:v3",
+        "diagnosis_api": "diagnosis-resources:v4",
         "session_checkpoint": "session-checkpoint:v1",
         "case_memory": "case-memory:v2",
         "graph_retrieval": "graphrag-retrieval:v2",
@@ -95,7 +95,7 @@ async def test_health_reports_validated_contract_baseline() -> None:
     }
     assert payload["diagnosis_api"] == {
         "status": "disabled",
-        "contract_id": "diagnosis-resources:v3",
+        "contract_id": "diagnosis-resources:v4",
         "checkpoint_contract_id": "session-checkpoint:v1",
         "execution_mode": "postgres-worker",
         "worker_status": "disabled",

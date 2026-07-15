@@ -115,6 +115,23 @@ class PostgresMemoryRuntime:
                 await registrar.remove(memory_id)
             return memory
 
+    async def delete(self, memory_id: str) -> CaseMemory | None:
+        """在单一事务内永久删除案例、证据关联和动态案例图节点。
+
+        先锁定并读取 embedding 所在的持久化行，再调用图注册器清理节点，最后删除
+        主记录；任一步失败都会回滚，避免出现“数据库已删但图仍可召回”的分裂状态。
+        该能力只用于用户明确请求的清理，不会被诊断流程自动调用。
+        """
+
+        async with self._session_factory.begin() as session:
+            repository = PostgresCaseMemoryRepository(session)
+            stored = await repository.get_stored(memory_id, for_update=True)
+            if stored is None:
+                return None
+            # Graph registrar 的 remove 对不存在节点保持幂等，兼容历史数据只写入主表的情况。
+            await self._graph_registrar(session).remove(memory_id)
+            return await repository.delete(memory_id)
+
     async def search(
         self,
         query: str,

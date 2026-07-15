@@ -48,6 +48,7 @@ from app.orchestration.run_models import (
     ActiveRunConflictError,
     AgentRunStatus,
     RunEventPhase,
+    RunResumeConflictError,
 )
 from app.persistence.database import create_database_engine, create_session_factory
 from app.persistence.models import DiagnosisSessionRecord, SessionCheckpointRecord
@@ -436,6 +437,59 @@ async def test_postgres_diagnosis_resources_persist_success_failure_and_events()
             await session.rollback()
     finally:
         # 任一断言失败后仍反序清理资源并释放 asyncpg 池，避免污染其他 postgres marker。
+        async with factory.begin() as session:
+            await session.execute(text("DELETE FROM session_checkpoints"))
+            await session.execute(text("DELETE FROM run_events"))
+            await session.execute(text("DELETE FROM agent_runs"))
+            await session.execute(text("DELETE FROM diagnosis_sessions"))
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_postgres_cancel_and_resume_preserve_auditable_run_lifecycle() -> None:
+    """在真实 PostgreSQL 约束下验证 queued 取消、事件写入和 checkpoint 恢复。
+
+    测试不执行模型或 MCP，只使用已经验证的工作流替身；它重点覆盖新 migration 的
+    cancelled payload/check 约束、取消 system event 的连续序列、恢复新 run 以及非取消
+    来源的 409 语义，确保 API 替身测试不会掩盖数据库边界错误。
+    """
+
+    if DATABASE_URL is None:
+        pytest.fail("DATAOPS_TEST_DATABASE_URL is required for postgres tests")
+    engine = create_database_engine(DATABASE_URL)
+    factory = create_session_factory(engine)
+    runtime = DiagnosisApplicationRuntime(
+        factory,
+        retriever=EmptyGraphRetriever(),
+        workflow=SuccessfulTwiceThenFailingWorkflow(),
+        now_factory=IncrementingClock(datetime.now(UTC) - timedelta(hours=1)),
+        id_factory=PrefixIdSequence(),
+    )
+    try:
+        async with factory.begin() as session:
+            await session.execute(text("DELETE FROM session_checkpoints"))
+            await session.execute(text("DELETE FROM run_events"))
+            await session.execute(text("DELETE FROM agent_runs"))
+            await session.execute(text("DELETE FROM diagnosis_sessions"))
+
+        session = await runtime.create_session(title="cancel resume synthetic session")
+        queued = await runtime.submit_message(session.session_id, _message())
+        assert queued is not None and queued.status is AgentRunStatus.QUEUED
+
+        cancelled = await runtime.cancel_run(queued.run_id)
+        assert cancelled is not None
+        assert cancelled.status is AgentRunStatus.CANCELLED
+        assert cancelled.started_at is None and cancelled.attempt_count == 0
+        events = await runtime.get_events(queued.run_id)
+        assert events is not None and events.events[0].event_type == "run_cancelled"
+
+        resumed = await runtime.resume_run(queued.run_id)
+        assert resumed is not None and resumed.status is AgentRunStatus.QUEUED
+        assert resumed.run_id != queued.run_id
+        with pytest.raises(RunResumeConflictError):
+            await runtime.resume_run(resumed.run_id)
+    finally:
         async with factory.begin() as session:
             await session.execute(text("DELETE FROM session_checkpoints"))
             await session.execute(text("DELETE FROM run_events"))

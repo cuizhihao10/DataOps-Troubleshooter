@@ -187,7 +187,7 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
     assert "54 节点/71 边" in guide
     assert "authorization_value_exposed=false" in guide
     assert "WATERMARK_TIMEZONE_MISMATCH" in guide
-    assert "尚未完成" in guide
+    assert "明确保留为接入点" in guide
     assert "代码注释的强制粒度" in guide
     assert "callable 级 docstring" in guide
 
@@ -223,8 +223,8 @@ def test_frontend_design_is_mandatory_and_defines_safe_async_demo_acceptance() -
     design = Path("docs/frontend-design.md").read_text(encoding="utf-8")
 
     assert "必需交付项" in design
-    assert "当前仓库尚未包含前端实现" in design
-    assert "queued/running/cancelled" in design
+    assert "当前仓库已经包含同源静态 Demo" in design
+    assert "queued -> running -> completed|failed|cancelled" in design
     assert "FastAPI 静态托管" in design
     assert "Action/Observation 时间线" in design
     assert "GraphRAG 路径" in design
@@ -546,13 +546,13 @@ def test_diagnosis_resource_contract_documents_persistence_events_and_failure_se
 
     prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
 
-    assert "diagnosis-resources:v3" in prompt_contract
+    assert "diagnosis-resources:v4" in prompt_contract
     assert "diagnosis_sessions" in prompt_contract
     assert "agent_runs" in prompt_contract
     assert "run_events" in prompt_contract
     assert "session_checkpoints" in prompt_contract
     assert "session-checkpoint:v1" in prompt_contract
-    assert "失败 run 不覆盖旧快照" in prompt_contract
+    assert "失败或取消的 run 不覆盖旧快照" in prompt_contract
     assert "postgres-worker" in prompt_contract
     assert "queued | running | completed | failed" in prompt_contract
     assert "FOR UPDATE SKIP LOCKED" in prompt_contract

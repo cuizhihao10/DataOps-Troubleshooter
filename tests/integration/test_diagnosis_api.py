@@ -25,6 +25,7 @@ from app.orchestration.run_models import (
     RunEventList,
     RunEventPhase,
     RunPublicEvent,
+    RunResumeConflictError,
 )
 
 NOW = datetime(2026, 7, 15, 9, 0, tzinfo=UTC)
@@ -139,6 +140,52 @@ class FakeDiagnosisRuntime:
         self.event_queries.append(run_id)
         return self.events if run_id == self.run.run_id else None
 
+    async def cancel_run(self, run_id: str) -> AgentRunSnapshot | None:
+        """模拟服务端原子取消，验证 HTTP 层只暴露 cancelled 快照。
+
+        测试替身只改变已验证的 Pydantic 快照，不执行数据库或 Worker I/O；真实的
+        行锁和事件写入由 PostgreSQL 集成测试覆盖，避免 API 测试伪造底层语义。
+        """
+
+        if run_id != self.run.run_id:
+            return None
+        if self.run.status in {AgentRunStatus.QUEUED, AgentRunStatus.RUNNING}:
+            self.run = self.run.model_copy(
+                update={
+                    "status": AgentRunStatus.CANCELLED,
+                    "error_code": "user_cancelled",
+                    "error_message": "诊断任务已由用户取消，可从会话检查点恢复。",
+                    "completed_at": NOW,
+                    "updated_at": NOW,
+                }
+            )
+        return self.run
+
+    async def resume_run(self, run_id: str) -> AgentRunSnapshot | None:
+        """模拟只允许 cancelled 来源恢复，并返回新的 queued run。
+
+        该替身复用原始输入但替换 run ID 与生命周期字段，专门验证 HTTP 202/409
+        映射；它不声称实现真正的 checkpoint 恢复，真实恢复由 runtime 测试负责。
+        """
+
+        if run_id != self.run.run_id:
+            return None
+        if self.run.status is not AgentRunStatus.CANCELLED:
+            raise RunResumeConflictError(run_id, self.run.status)
+        self.run = self.run.model_copy(
+            update={
+                "run_id": "run_4444444444444444",
+                "status": AgentRunStatus.QUEUED,
+                "error_code": None,
+                "error_message": None,
+                "started_at": None,
+                "completed_at": None,
+                "attempt_count": 0,
+                "updated_at": NOW,
+            }
+        )
+        return self.run
+
 
 @pytest.mark.asyncio
 async def test_diagnosis_resource_routes_return_503_when_runtime_is_disabled() -> None:
@@ -171,7 +218,7 @@ async def test_diagnosis_resource_routes_return_503_when_runtime_is_disabled() -
 async def test_diagnosis_resource_routes_create_submit_read_and_return_404() -> None:
     """验证会话创建、消息校验、run/event 读取和未知资源 404 的完整 HTTP Schema。
 
-        成功响应均携带 `diagnosis-resources:v2`；消息 intent/components/history trigger 被解析为
+        成功响应均携带 `diagnosis-resources:v4`；消息 intent/components/history trigger 被解析为
     生产枚举，未知 session/run 不调用伪默认对象。响应不包含 reasoning_process 或 Thought 字段。
     """
 
@@ -206,7 +253,7 @@ async def test_diagnosis_resource_routes_create_submit_read_and_return_404() -> 
             missing_run = await client.get("/api/v1/runs/run_aaaaaaaaaaaaaaaa")
 
     assert created.status_code == 201
-    assert created.json()["contract_id"] == "diagnosis-resources:v3"
+    assert created.json()["contract_id"] == "diagnosis-resources:v4"
     assert submitted.status_code == 202
     assert submitted.json()["run"]["status"] == "running"
     assert run.status_code == 200
@@ -277,3 +324,29 @@ async def test_message_conflict_returns_active_run_id_for_client_polling() -> No
         "active_run_id": runtime.run.run_id,
         "message": "session has an active run",
     }
+
+
+@pytest.mark.asyncio
+async def test_cancel_and_resume_routes_keep_cancelled_run_auditable() -> None:
+    """验证 cancel 进入独立终态、resume 创建新 queued run 且未知 ID 返回 404。
+
+    测试同时检查公开 error_code 和 HTTP 状态，确保浏览器能区分用户取消、恢复提交
+    以及未知资源，而不会看到内部异常链或部分模型输出。
+    """
+
+    runtime = FakeDiagnosisRuntime()
+    async with app.router.lifespan_context(app):
+        app.state.diagnosis_runtime = runtime
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            cancelled = await client.post(f"/api/v1/runs/{runtime.run.run_id}/cancel")
+            resumed = await client.post(f"/api/v1/runs/{runtime.run.run_id}/resume")
+            missing = await client.post("/api/v1/runs/run_aaaaaaaaaaaaaaaa/cancel")
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["run"]["status"] == "cancelled"
+    assert cancelled.json()["run"]["error_code"] == "user_cancelled"
+    assert resumed.status_code == 202
+    assert resumed.json()["run"]["status"] == "queued"
+    assert resumed.json()["run"]["run_id"] == "run_4444444444444444"
+    assert missing.status_code == 404

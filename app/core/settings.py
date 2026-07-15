@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     react_loop_contract_id: str = "langgraph-react-loop:v2"
     audited_report_workflow_contract_id: str = "audited-report-workflow:v2"
     diagnosis_workflow_contract_id: str = "audited-diagnosis-workflow:v2"
-    diagnosis_api_contract_id: str = "diagnosis-resources:v3"
+    diagnosis_api_contract_id: str = "diagnosis-resources:v4"
     session_checkpoint_contract_id: str = "session-checkpoint:v1"
     case_memory_contract_id: str = "case-memory:v2"
     graphrag_retrieval_contract_id: str = "graphrag-retrieval:v2"

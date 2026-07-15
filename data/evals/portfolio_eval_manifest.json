@@ -50,22 +50,22 @@
           "label": "Macro Recall@K",
           "control_label": "vector_only",
           "treatment_label": "vector_graph",
-          "control_value": 0.8333,
+          "control_value": 0.9167,
           "treatment_value": 1.0,
-          "delta": 0.1667,
+          "delta": 0.0833,
           "direction": "higher_is_better",
-          "note": "三条确定性角度查询的小样本实测，不能外推到通用语义模型。"
+          "note": "六条确定性角度查询的小样本实测，不能外推到通用语义模型。"
         },
         {
           "metric_id": "memory_macro_precision_at_k",
           "label": "Macro Precision@K",
           "control_label": "vector_only",
           "treatment_label": "vector_graph",
-          "control_value": 0.8333,
+          "control_value": 0.9167,
           "treatment_value": 1.0,
-          "delta": 0.1667,
+          "delta": 0.0833,
           "direction": "higher_is_better",
-          "note": "rejected 案例禁止命中保持为零，增益只来自固定图救回案例。"
+          "note": "rejected 案例禁止命中保持为零，增益只来自固定图救回案例，其余直接案例用于检查无回退损坏。"
         }
       ]
     },

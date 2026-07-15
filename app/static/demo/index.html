@@ -100,6 +100,10 @@
             <div><dt>错误</dt><dd id="run-error">—</dd></div>
           </dl>
           <div class="progress-track" aria-hidden="true"><span id="run-progress"></span></div>
+          <div class="run-actions" aria-label="run control">
+            <button class="quiet-button" id="cancel-run" type="button" hidden>取消任务</button>
+            <button class="primary-button" id="resume-run" type="button" hidden>从检查点恢复</button>
+          </div>
           <p class="muted" id="poll-message">提交后将按退避间隔轮询终态。</p>
         </section>
       </section>
@@ -146,6 +150,7 @@
           <div class="memory-actions" id="memory-actions" hidden>
             <button class="primary-button memory-action" id="confirm-memory" type="button">确认记忆</button>
             <button class="quiet-button memory-action" id="reject-memory" type="button">拒绝记忆</button>
+            <button class="quiet-button memory-action" id="delete-memory" type="button">永久删除</button>
           </div>
           <p class="error-message" id="memory-error" role="alert" hidden></p>
         </section>

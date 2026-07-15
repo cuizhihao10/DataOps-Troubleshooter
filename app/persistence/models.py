@@ -308,7 +308,7 @@ class AgentRunRecord(Base):
     __tablename__ = "agent_runs"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('queued','running','completed','failed')",
+            "status IN ('queued','running','completed','failed','cancelled')",
             name="ck_agent_runs_status",
         ),
         CheckConstraint(
@@ -337,7 +337,12 @@ class AgentRunRecord(Base):
             "AND attempt_count >= 1 AND lease_owner IS NULL AND lease_expires_at IS NULL) OR "
             "(status = 'failed' AND result IS NULL AND error_code IS NOT NULL "
             "AND error_message IS NOT NULL AND started_at IS NOT NULL AND completed_at IS NOT NULL "
-            "AND attempt_count >= 1 AND lease_owner IS NULL AND lease_expires_at IS NULL)",
+            "AND attempt_count >= 1 AND lease_owner IS NULL AND lease_expires_at IS NULL) OR "
+            "(status = 'cancelled' AND result IS NULL AND error_code IS NOT NULL "
+            "AND error_message IS NOT NULL AND completed_at IS NOT NULL "
+            "AND lease_owner IS NULL AND lease_expires_at IS NULL "
+            "AND ((started_at IS NULL AND attempt_count = 0) OR "
+            "(started_at IS NOT NULL AND attempt_count >= 1)))",
             name="ck_agent_runs_terminal_payload",
         ),
         Index("ix_agent_runs_session_created", "session_id", "created_at"),

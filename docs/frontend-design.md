@@ -2,13 +2,11 @@
 
 ## 1. 交付地位与当前状态
 
-前端是产品设计 M4 和最终验收的**必需交付项**，不是可选美化。本文件先固定信息架构、API 依赖、
-安全边界和验收口径；当前仓库尚未包含前端实现，因此不能声称单页 Demo 已完成。实现安排在可靠
-后台 Worker 与轮询状态契约稳定之后，避免先按当前同步 POST 绑定 UI，再为 queued/running/cancelled
-状态重写请求和错误处理。
+前端是产品设计 M4 和最终验收的**必需交付项**，不是可选美化。本文件固定信息架构、API 依赖、
+安全边界和验收口径；当前仓库已经包含同源静态 Demo，并与 PostgreSQL Worker、取消/恢复和记忆管理
+接口保持同一契约。
 
-该顺序不改变前端范围：Worker 切片完成后必须立即实现本文件定义的单页 Demo，并在 Docker 中由同一
-FastAPI 服务托管。若异步接口契约发生变化，本文件与前端测试必须在同一切片同步更新。
+页面由同一 FastAPI 服务在 Docker 中托管；异步接口契约变化时，本文件与前端测试在同一切片同步更新。
 
 ## 2. 技术选择
 
@@ -97,18 +95,19 @@ idle
 - README、实现指南、演示脚本和 Docker 验证同步更新，并保存至少一个三组件合成场景的演示截图。
 
 完成定义：上述两步、详细 JSDoc/注释、前端单元/浏览器测试、FastAPI 静态托管集成测试和 Docker 实机
-验证全部通过，才可以把“单页 Demo”从尚未完成改为已完成。
+验证全部通过后，单页 Demo 才能作为已完成的学习型交付；当前仓库已满足这些运行时条件。
 ### Worker 契约已稳定（前端实现前置条件）
 
-后端现在提供 `diagnosis-resources:v3`：提交 message 返回 HTTP 202 与 `queued` run，前端必须用 run_id 轮询 GET run/events，展示 `queued -> running -> completed|failed`，并把 HTTP 409 的 `active_run_id` 显示为“当前 session 已有任务”。本切片尚未加入 `cancelled`，浏览器 AbortController 只取消客户端请求。前端实现仍待下一切片，必须保留本文件定义的 Evidence、Action/Observation、Auditor、uncertainty、memory confirm/reject 和 Thought 禁止边界。
-## 7. Demo 前端已经落地（diagnosis-resources:v3）
+后端现在提供 `diagnosis-resources:v4`：提交 message 返回 HTTP 202 与 `queued` run，前端必须用 run_id 轮询 GET run/events，展示 `queued -> running -> completed|failed|cancelled`，并把 HTTP 409 的 `active_run_id` 显示为“当前 session 已有任务”。`POST /runs/{run_id}/cancel` 和 `/resume` 分别提供用户取消与从最新 checkpoint 重试；浏览器不会把断开请求伪装成服务端取消。前端保留 Evidence、Action/Observation、Auditor、uncertainty、memory confirm/reject/delete 和 Thought 禁止边界。
+## 7. Demo 前端已经落地（diagnosis-resources:v4）
 
 `/demo` 已由 FastAPI 同源托管，使用原生 HTML/CSS/ES Module，不引入额外 Node 服务。页面当前完整覆盖：
 
 - `/health` 依赖、Worker 配置、契约版本与数据规模摘要。
-- 创建 session、选择单个或多个组件、提交 message，并轮询 `queued -> running -> completed|failed`。
+- 创建 session、选择单个或多个组件、提交 message，并轮询 `queued -> running -> completed|failed|cancelled`。
+- queued/running 显示取消按钮；cancelled 显示“从检查点恢复”，恢复后用新 run_id 继续轮询，避免覆盖旧审计时间线。
 - 按 `RunPublicEvent.sequence` 展示公开 Action/Observation 时间线；所有文本写入 DOM 使用 `textContent`，避免合成 Evidence 被当成 HTML 执行。
 - 报告 summary、root cause、risk 和 uncertainty 摘要；不展示 Prompt、Thought、embedding 或 Provider 原始响应。
-- `memory_stage.memory` 的 pending 候选显示 confirm/reject；按钮调用 `POST /api/v1/memories/{memory_id}/confirm`，以服务端返回状态为准，confirmed/rejected 后自动隐藏操作按钮。
+- `memory_stage.memory` 的 pending/rejected 候选显示 confirm/reject/delete；按钮调用对应服务端 API，以服务端返回状态为准，删除成功后隐藏卡片。
 
-这段实现对应学习型验收闭环：浏览器只保存 `sessionId/runId/memoryId` 等可恢复标识，后端 PostgreSQL Worker 才是队列和记忆状态真相；网络失败只显示错误，不伪造 completed 或自动确认案例记忆。`tests/integration/test_demo_frontend.py` 覆盖静态资源、路径穿越防护、409 错误提示和记忆决策入口。
+这段实现对应学习型验收闭环：浏览器只保存 `sessionId/runId/memoryId` 等可恢复标识，后端 PostgreSQL Worker 才是队列和记忆状态真相；网络失败只显示错误，不伪造 completed、cancelled 或自动确认案例记忆。`tests/integration/test_demo_frontend.py` 覆盖静态资源、路径穿越防护、409 错误提示、取消/恢复和记忆决策入口。

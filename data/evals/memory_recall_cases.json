@@ -64,6 +64,33 @@
       "expected_labels": ["memory_case_c"],
       "forbidden_labels": ["memory_case_e"],
       "expected_graph_only_labels": []
+    },
+    {
+      "case_id": "memory_recall_direct_case_a",
+      "query": "记忆召回查询：记忆评测 A：上游分区延迟",
+      "query_embedding_key": "angle_30",
+      "limit": 1,
+      "expected_labels": ["memory_case_a"],
+      "forbidden_labels": ["memory_case_e"],
+      "expected_graph_only_labels": []
+    },
+    {
+      "case_id": "memory_recall_direct_case_b",
+      "query": "记忆召回查询：记忆评测 B：调度资源排队",
+      "query_embedding_key": "angle_315",
+      "limit": 1,
+      "expected_labels": ["memory_case_b"],
+      "forbidden_labels": ["memory_case_e"],
+      "expected_graph_only_labels": []
+    },
+    {
+      "case_id": "memory_recall_direct_case_c",
+      "query": "记忆召回查询：记忆评测 C：关联依赖未就绪",
+      "query_embedding_key": "angle_60",
+      "limit": 1,
+      "expected_labels": ["memory_case_c"],
+      "forbidden_labels": ["memory_case_e"],
+      "expected_graph_only_labels": []
     }
   ]
 }

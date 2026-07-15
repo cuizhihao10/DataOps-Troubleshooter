@@ -1,7 +1,7 @@
 """在真实 PostgreSQL/pgvector 上运行长期记忆 vector-only 与 vector+graph 召回评测。
 
 测试从版本化 JSON 建立五条合成案例，通过生产仓储写入并用 runtime confirm/reject 注册图状态，
-再运行 ``memory-recall-eval:v1`` 三条查询。确定性角度 Provider 只控制可复现几何，不替代真实
+再运行 ``memory-recall-eval:v1`` 六条查询。确定性角度 Provider 只控制可复现几何，不替代真实
 pgvector cosine、SQL join、SIMILAR_TO 边、confirmed 过滤或最终合并排序。
 """
 
@@ -184,10 +184,10 @@ async def _insert_eval_corpus(
 @pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_postgres_memory_recall_ablation_matches_versioned_measured_report() -> None:
-    """运行三条真实召回案例并验证图增益、基线持平、reject 隔离和图存储事实。
+    """运行六条真实召回案例并验证图增益、基线持平、reject 隔离和图存储事实。
 
-    vector-only macro Recall/Precision 应为 5/6，vector+graph 为 1，差值 1/6；graph rescue 中 C 必须
-    graph-only，三个案例两模式均不得命中 rejected E。数据库应仅有 A↔C 两条动态相似边，E 没有
+    vector-only macro Recall/Precision 应为 11/12，vector+graph 为 1，差值 1/12；graph rescue 中
+    C 必须 graph-only，六个案例两模式均不得命中 rejected E。数据库应仅有 A↔C 两条动态相似边，E 没有
     case 节点。所有断言仅适用于固定合成 suite 与角度 Provider。
     """
 
@@ -219,12 +219,12 @@ async def test_postgres_memory_recall_ablation_matches_versioned_measured_report
         report = await evaluate_memory_recall(suite, runtime)
 
         assert report.metric_kind == "measured"
-        assert report.vector_only_macro_recall == pytest.approx(5 / 6)
+        assert report.vector_only_macro_recall == pytest.approx(11 / 12)
         assert report.vector_graph_macro_recall == 1
-        assert report.recall_delta == pytest.approx(1 / 6)
-        assert report.vector_only_macro_precision == pytest.approx(5 / 6)
+        assert report.recall_delta == pytest.approx(1 / 12)
+        assert report.vector_only_macro_precision == pytest.approx(11 / 12)
         assert report.vector_graph_macro_precision == 1
-        assert report.precision_delta == pytest.approx(1 / 6)
+        assert report.precision_delta == pytest.approx(1 / 12)
         assert report.forbidden_hit_count == 0
         assert report.case_reports[0].graph_rescued_labels == ["memory_case_c"]
         assert report.case_reports[0].vector_graph.graph_only_hits == ["memory_case_c"]

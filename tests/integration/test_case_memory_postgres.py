@@ -675,3 +675,76 @@ async def test_memory_search_merges_graph_neighbor_and_reject_removes_it() -> No
             await session.execute(text("DELETE FROM memory_evidence"))
             await session.execute(text("DELETE FROM case_memories"))
         await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_memory_delete_removes_case_evidence_and_graph_node_atomically() -> None:
+    """验证永久删除在真实 PostgreSQL 中清理案例主表、证据关联和动态 GraphRAG 节点。
+
+    案例先经过 stage/confirm，确保确实存在可删除的 case 节点；随后 runtime.delete
+    在单一事务内清理全部资源，最终通过独立只读会话确认三个表都不存在该 memory_id。
+    """
+
+    if DATABASE_URL is None:
+        pytest.fail("DATAOPS_TEST_DATABASE_URL is required for postgres tests")
+    engine = create_database_engine(DATABASE_URL)
+    factory = create_session_factory(engine)
+    runtime = PostgresMemoryRuntime(
+        factory,
+        ConstantEmbeddingProvider(),
+        dedup_similarity_threshold=0.99,
+        graph_similarity_threshold=0.8,
+        default_search_limit=5,
+    )
+    try:
+        async with factory.begin() as session:
+            await session.execute(
+                text(
+                    "DELETE FROM knowledge_nodes "
+                    "WHERE node_type = 'case' AND source_id LIKE 'mem_%'"
+                )
+            )
+            await session.execute(text("DELETE FROM memory_evidence"))
+            await session.execute(text("DELETE FROM case_memories"))
+
+        staged = await runtime.stage(
+            _accepted_result(
+                run_id="run_memory_delete_pg_001",
+                evidence_id="ev_memory_delete_pg_001",
+                root_cause="永久删除合成案例",
+                component=Component.LTS,
+                observed_at=NOW,
+            )
+        )
+        assert staged.memory is not None
+        confirmed = await runtime.decide(staged.memory.memory_id, MemoryDecision.CONFIRM)
+        assert confirmed is not None and confirmed.status is MemoryStatus.CONFIRMED
+
+        deleted = await runtime.delete(staged.memory.memory_id)
+        assert deleted is not None and deleted.memory_id == staged.memory.memory_id
+        async with factory() as session:
+            assert await session.get(CaseMemoryRecord, staged.memory.memory_id) is None
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(MemoryEvidenceRecord)
+                    .where(MemoryEvidenceRecord.memory_id == staged.memory.memory_id)
+                )
+                == 0
+            )
+            assert (
+                await session.get(KnowledgeNodeRecord, case_graph_node_id(staged.memory.memory_id))
+                is None
+            )
+    finally:
+        async with factory.begin() as session:
+            await session.execute(
+                text(
+                    "DELETE FROM knowledge_nodes "
+                    "WHERE node_type = 'case' AND source_id LIKE 'mem_%'"
+                )
+            )
+            await session.execute(text("DELETE FROM memory_evidence"))
+            await session.execute(text("DELETE FROM case_memories"))
+        await engine.dispose()

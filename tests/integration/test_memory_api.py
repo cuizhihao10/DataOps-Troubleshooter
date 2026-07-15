@@ -104,6 +104,19 @@ class FakeMemoryRuntime:
             rejected=int(self.memory.status is MemoryStatus.REJECTED),
         )
 
+    async def delete(self, memory_id: str) -> CaseMemory | None:
+        """模拟事务删除并返回删除前快照，覆盖 DELETE API 的 404/200 映射。
+
+        替身把当前内存对象替换为脱敏占位，避免测试误以为客户端仍能读取已删除
+        embedding；真实主表、证据外键和图节点删除由 PostgreSQL 集成测试覆盖。
+        """
+
+        if memory_id != self.memory.memory_id:
+            return None
+        deleted = self.memory
+        self.memory = self.memory.model_copy(update={"memory_id": "mem_deleted"})
+        return deleted
+
 
 @pytest.mark.asyncio
 async def test_memory_api_returns_503_when_postgres_is_disabled() -> None:
@@ -195,3 +208,29 @@ async def test_memory_search_rejects_whitespace_query_before_runtime_call() -> N
 
     assert response.status_code == 422
     assert runtime.searches == []
+
+
+@pytest.mark.asyncio
+async def test_memory_delete_route_returns_safe_deletion_contract() -> None:
+    """验证永久删除只返回 memory_id/deleted，不回显 embedding 或 ORM 字段。
+
+    成功请求必须返回 case-memory contract 与布尔结果，未知 ID 必须是 404；响应
+    文本不能包含向量或持久化实现细节，保持前端契约最小且可审计。
+    """
+
+    runtime = FakeMemoryRuntime()
+    async with app.router.lifespan_context(app):
+        app.state.memory_runtime = runtime
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            deleted = await client.delete("/api/v1/memories/mem_api_001")
+            missing = await client.delete("/api/v1/memories/missing")
+
+    assert deleted.status_code == 200
+    assert deleted.json() == {
+        "contract_id": "case-memory:v2",
+        "memory_id": "mem_api_001",
+        "deleted": True,
+    }
+    assert missing.status_code == 404
+    assert "embedding" not in deleted.text

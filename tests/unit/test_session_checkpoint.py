@@ -10,7 +10,11 @@ import pytest
 
 from app.domain.models import DiagnosisReport, RootCauseConclusion
 from app.memory.checkpoint import (
+    CHECKPOINT_MAX_EVIDENCE,
+    CHECKPOINT_MAX_OBSERVATION_REFS,
     SessionCheckpoint,
+    _bounded_tail,
+    _bounded_unique_tail,
     build_checkpoint_retrieval_query,
     restore_agent_state,
 )
@@ -103,3 +107,22 @@ def test_checkpoint_retrieval_query_prioritizes_followup_and_adds_report_context
     assert "上一问题: 为什么 LTS 合成任务失败？" in query
     assert "上一报告摘要: 上一轮确认合成上游数据尚未就绪。" in query
     assert "上一轮根因: 合成上游数据未就绪" in query
+
+
+def test_checkpoint_rolling_window_bounds_latest_items_and_deduplicates_refs() -> None:
+    """验证长会话检查点只保留最新窗口，且引用去重后仍保持时间顺序。
+
+    测试使用超过上限的合成序列，断言最旧元素被确定性淘汰、最新元素保留，且
+    重复 observation 引用不会突破 Pydantic 的唯一性约束或 JSONB 预算。
+    """
+
+    evidence = _bounded_tail(list(range(CHECKPOINT_MAX_EVIDENCE + 5)), CHECKPOINT_MAX_EVIDENCE)
+    refs = _bounded_unique_tail(
+        tuple(f"ev_{index % 3}" for index in range(CHECKPOINT_MAX_OBSERVATION_REFS + 10)),
+        CHECKPOINT_MAX_OBSERVATION_REFS,
+    )
+
+    assert len(evidence) == CHECKPOINT_MAX_EVIDENCE
+    assert evidence[0] == 5
+    assert evidence[-1] == CHECKPOINT_MAX_EVIDENCE + 4
+    assert refs == ("ev_0", "ev_1", "ev_2")

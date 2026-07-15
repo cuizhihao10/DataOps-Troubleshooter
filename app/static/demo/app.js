@@ -46,14 +46,14 @@ function setText(id, value) {
 
 /**
  * 根据后端状态更新状态徽章和进度条。
- * @param {string} status - queued、running、completed、failed 或 idle。
+ * @param {string} status - queued、running、completed、failed、cancelled 或 idle。
  */
 function setRunState(status) {
   const stateElement = document.getElementById("run-state");
   const progress = document.getElementById("run-progress");
   stateElement.textContent = status;
   stateElement.dataset.state = status;
-  const widths = { idle: "3%", queued: "24%", running: "58%", completed: "100%", failed: "100%" };
+  const widths = { idle: "3%", queued: "24%", running: "58%", completed: "100%", failed: "100%", cancelled: "100%" };
   progress.style.width = widths[status] || "3%";
 }
 
@@ -115,6 +115,10 @@ function renderRun(run) {
   setText("run-error", run.error_code ? `${run.error_code}: ${run.error_message}` : "—");
   document.getElementById("refresh-events").disabled = false;
   if (run.result) renderReport(run.result);
+  const cancelButton = document.getElementById("cancel-run");
+  const resumeButton = document.getElementById("resume-run");
+  if (cancelButton) cancelButton.hidden = !["queued", "running"].includes(run.status);
+  if (resumeButton) resumeButton.hidden = run.status !== "cancelled";
 }
 
 /**
@@ -197,7 +201,7 @@ function renderMemoryCandidate(memory) {
   status.textContent = memory.status || "pending";
   status.dataset.state = memory.status || "pending";
   // 只有 pending 可改变；confirmed/rejected 是服务端终态，按钮隐藏防止误导用户重复提交。
-  actions.hidden = memory.status !== "pending";
+  actions.hidden = !["pending", "rejected"].includes(memory.status);
   [...actions.querySelectorAll("button")].forEach((button) => { button.disabled = false; });
 }
 
@@ -228,6 +232,60 @@ async function decideMemory(decision) {
 }
 
 /**
+ * 向服务端发送取消请求并刷新公开事件；取消是幂等的，失败时保留当前 run 供用户重试。
+ * @returns {Promise<void>} 请求完成后的 UI 状态更新。
+ */
+async function cancelRun() {
+  if (!state.runId) return;
+  const button = document.getElementById("cancel-run");
+  if (button) button.disabled = true;
+  try {
+    const { payload } = await requestJson(`/api/v1/runs/${encodeURIComponent(state.runId)}/cancel`, { method: "POST" });
+    renderRun(payload.run);
+    await refreshRun(state.runId);
+  } catch (error) {
+    document.getElementById("poll-message").textContent = `取消失败：${error.message}`;
+    if (button) button.disabled = false;
+  }
+}
+
+/**
+ * 从 cancelled run 创建新的 queued run；新 run ID 会替换当前轮询目标。
+ * @returns {Promise<void>} 新 run 已提交并开始轮询时完成。
+ */
+async function resumeRun() {
+  if (!state.runId) return;
+  const button = document.getElementById("resume-run");
+  if (button) button.disabled = true;
+  try {
+    const { payload } = await requestJson(`/api/v1/runs/${encodeURIComponent(state.runId)}/resume`, { method: "POST" });
+    state.runId = payload.run.run_id;
+    state.pollAttempt = 0;
+    renderRun(payload.run);
+    await pollRun(state.runId);
+  } catch (error) {
+    document.getElementById("poll-message").textContent = `恢复失败：${error.message}`;
+    if (button) button.disabled = false;
+  }
+}
+
+/**
+ * 永久删除当前案例记忆并隐藏卡片；后端事务负责证据和图节点级联清理。
+ * @returns {Promise<void>} 删除完成后清空本地 memory ID。
+ */
+async function deleteMemory() {
+  if (!state.memoryId) return;
+  const error = document.getElementById("memory-error");
+  try {
+    await requestJson(`/api/v1/memories/${encodeURIComponent(state.memoryId)}`, { method: "DELETE" });
+    renderMemoryCandidate(null);
+  } catch (requestError) {
+    error.textContent = `删除记忆失败：${requestError.message}`;
+    error.hidden = false;
+  }
+}
+
+/**
  * 读取 run 和 events；两者分开请求，保持状态快照与时间线的独立缓存边界。
  * @param {string} runId - 要读取的持久化 run ID。
  */
@@ -250,7 +308,7 @@ async function pollRun(runId) {
   try {
     const run = await refreshRun(runId);
     document.getElementById("poll-message").textContent = `已同步 · 第 ${state.pollAttempt + 1} 次`;
-    if (!["completed", "failed"].includes(run.status)) {
+    if (!["completed", "failed", "cancelled"].includes(run.status)) {
       state.pollAttempt += 1;
       const delay = Math.min(4000, 600 + state.pollAttempt * 250);
       state.pollTimer = setTimeout(() => pollRun(runId), delay);
@@ -308,6 +366,9 @@ function init() {
   document.getElementById("refresh-events").addEventListener("click", () => state.runId && refreshRun(state.runId));
   document.getElementById("confirm-memory").addEventListener("click", () => decideMemory("confirm"));
   document.getElementById("reject-memory").addEventListener("click", () => decideMemory("reject"));
+  document.getElementById("cancel-run").addEventListener("click", cancelRun);
+  document.getElementById("resume-run").addEventListener("click", resumeRun);
+  document.getElementById("delete-memory").addEventListener("click", deleteMemory);
   document.getElementById("diagnosis-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const button = document.getElementById("submit-diagnosis");

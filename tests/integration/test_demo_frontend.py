@@ -43,6 +43,11 @@ async def test_demo_page_serves_static_assets_and_documents_safe_async_flow() ->
     assert 'body: JSON.stringify({ decision })' in script.text
     assert "confirm-memory" in page.text
     assert "reject-memory" in page.text
+    assert "cancel-run" in page.text
+    assert "resume-run" in page.text
+    assert "delete-memory" in page.text
+    assert "/api/v1/runs/" in script.text and "/cancel" in script.text and "/resume" in script.text
+    assert "DELETE" in script.text
 
 
 @pytest.mark.asyncio

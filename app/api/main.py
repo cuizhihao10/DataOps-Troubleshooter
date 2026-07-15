@@ -45,6 +45,7 @@ from app.orchestration import (
     DIAGNOSIS_WORKFLOW_CONTRACT_ID,
     REACT_LOOP_CONTRACT_ID,
     AgentRunSnapshot,
+    AgentRunStatus,
     AuditedDiagnosisWorkflow,
     AuditedReportWorkflow,
     BoundedReactLoop,
@@ -61,7 +62,7 @@ from app.orchestration.diagnosis_runtime import (
     DiagnosisExecutionFailed,
     PostgresGraphContextRetriever,
 )
-from app.orchestration.run_models import ActiveRunConflictError
+from app.orchestration.run_models import ActiveRunConflictError, RunResumeConflictError
 from app.persistence.database import (
     check_database_connection,
     create_database_engine,
@@ -327,6 +328,20 @@ class MemorySearchResponse(BaseModel):
     contract_id: str
     query: str = Field(min_length=1, max_length=2000)
     matches: list[CaseMemoryMatch]
+
+
+class MemoryDeletionResponse(BaseModel):
+    """返回永久删除操作的契约与删除结果。
+
+    删除会同时移除 ``case_memories`` 行及其证据关联，并清理动态案例图节点；
+    响应只暴露布尔结果，不把 embedding 或 ORM 内部字段泄露给浏览器。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    contract_id: str
+    memory_id: str
+    deleted: bool
 
 
 @asynccontextmanager
@@ -788,6 +803,63 @@ async def get_diagnosis_run_events(run_id: str, request: Request) -> RunEventLis
     return events
 
 
+@app.post("/api/v1/runs/{run_id}/cancel", response_model=RunResponse)
+async def cancel_diagnosis_run(run_id: str, request: Request) -> RunResponse:
+    """取消 queued/running run，并返回服务端最终快照。
+
+    已取消请求幂等返回 200；completed/failed 不允许被改写，返回 409 并携带当前
+    状态。这样前端可以区分“用户停止”与“系统已完成”，也不会丢失审计时间线。
+    """
+
+    runtime = _require_diagnosis_runtime(request)
+    run = await runtime.cancel_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="diagnosis run not found")
+    if run.status not in {AgentRunStatus.CANCELLED} and run.status not in {
+        AgentRunStatus.QUEUED,
+        AgentRunStatus.RUNNING,
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"status": run.status.value, "message": "terminal run cannot be cancelled"},
+        )
+    return RunResponse(contract_id=DIAGNOSIS_API_CONTRACT_ID, run=run)
+
+
+@app.post(
+    "/api/v1/runs/{run_id}/resume",
+    response_model=MessageSubmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def resume_diagnosis_run(run_id: str, request: Request) -> MessageSubmissionResponse:
+    """从 cancelled run 的 session checkpoint 创建新的 queued run。
+
+    恢复不复制旧 run 的结果或事件，也不在 HTTP 请求内执行 Planner/MCP；新 run 仍由
+    PostgreSQL Worker 领取。来源不存在返回 404，来源状态不允许恢复返回 409。
+    """
+
+    runtime = _require_diagnosis_runtime(request)
+    try:
+        run = await runtime.resume_run(run_id)
+    except RunResumeConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "run_id": exc.run_id,
+                "status": exc.current_status.value,
+                "message": "only cancelled runs can be resumed",
+            },
+        ) from exc
+    except ActiveRunConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"active_run_id": exc.active_run_id, "message": "session has an active run"},
+        ) from exc
+    if run is None:
+        raise HTTPException(status_code=404, detail="diagnosis run not found")
+    return MessageSubmissionResponse(contract_id=DIAGNOSIS_API_CONTRACT_ID, run=run)
+
+
 @app.post(
     "/api/v1/memories/{memory_id}/confirm",
     response_model=MemoryDecisionResponse,
@@ -812,6 +884,29 @@ async def decide_memory(
     return MemoryDecisionResponse(
         contract_id=CASE_MEMORY_CONTRACT_ID,
         memory=memory,
+    )
+
+
+@app.delete(
+    "/api/v1/memories/{memory_id}",
+    response_model=MemoryDeletionResponse,
+)
+async def delete_memory(memory_id: str, request: Request) -> MemoryDeletionResponse:
+    """永久删除案例记忆及其图关系，供用户清理错误或过期候选。
+
+    真实删除由 memory runtime 在单一事务内完成，未知 ID 返回 404；API 不直接操作
+    ORM，确保 evidence 外键级联和 GraphRAG 节点清理不会被前端绕过。
+    """
+
+    runtime = _require_memory_runtime(request)
+    deleted = await runtime.delete(memory_id)
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="case memory not found")
+    request.app.state.memory_counts = await runtime.counts()
+    return MemoryDeletionResponse(
+        contract_id=CASE_MEMORY_CONTRACT_ID,
+        memory_id=memory_id,
+        deleted=True,
     )
 
 

@@ -24,12 +24,14 @@ from app.orchestration.diagnosis_models import DiagnosisRunRequest, DiagnosisRun
 from app.orchestration.run_models import (
     DIAGNOSIS_API_CONTRACT_ID,
     AgentRunSnapshot,
+    AgentRunStatus,
     ClaimedDiagnosisRun,
     DiagnosisMessage,
     DiagnosisSession,
     RunEventList,
     RunEventPhase,
     RunPublicEvent,
+    RunResumeConflictError,
 )
 from app.persistence.run_repository import PostgresDiagnosisRunRepository
 from app.retrieval.budget import build_evidence_bundle
@@ -224,6 +226,56 @@ class DiagnosisApplicationRuntime:
             )
         return queued
 
+    async def cancel_run(
+        self,
+        run_id: str,
+        *,
+        reason: str = "user_requested",
+    ) -> AgentRunSnapshot | None:
+        """取消一个尚未完成的 run，并以事务快照形式返回结果。
+
+        取消只改变 run 状态与公开系统事件，不删除 session checkpoint 或历史记忆；
+        因而用户可以稍后通过 resume 创建新的 queued run。Repository 的行锁保证
+        它与 Worker 的完成提交互斥，重复请求返回同一 cancelled 快照。
+        """
+
+        now = self._now_factory()
+        async with self._session_factory.begin() as session:
+            return await PostgresDiagnosisRunRepository(session).cancel_run(
+                run_id,
+                now=now,
+                reason=reason,
+            )
+
+    async def resume_run(self, run_id: str) -> AgentRunSnapshot | None:
+        """从 cancelled run 的原始输入创建一个新的 queued run。
+
+        这是可靠的 run-level resume：它复用同一 session 的最新 checkpoint，而不是
+        声称实现 LangGraph 内部节点级恢复。只有 cancelled 来源可恢复；completed、
+        failed、queued 或 running 都返回明确冲突，避免用户误触发重复诊断。
+        """
+
+        new_run_id = self._id_factory("run")
+        now = self._now_factory()
+        async with self._session_factory.begin() as session:
+            repository = PostgresDiagnosisRunRepository(session)
+            source = await repository.lock_run(run_id)
+            if source is None:
+                return None
+            if source.status is not AgentRunStatus.CANCELLED:
+                raise RunResumeConflictError(run_id, source.status)
+            return await repository.create_run(
+                run_id=new_run_id,
+                session_id=source.session_id,
+                message=DiagnosisMessage(
+                    content=source.user_query,
+                    intent=source.intent,
+                    components=source.components,
+                    history_trigger=source.history_trigger,
+                ),
+                now=now,
+            )
+
     async def execute_claimed_run(self, claim: ClaimedDiagnosisRun) -> AgentRunSnapshot:
         """在 Worker 已取得有效租约后执行完整 workflow，并原子提交终态/事件/checkpoint。
 
@@ -285,6 +337,12 @@ class DiagnosisApplicationRuntime:
                     now=completed_at,
                 )
         except Exception as exc:
+            # 用户取消可能在 GraphRAG/MCP I/O 期间发生；完成提交会因 lease/state
+            # 不再属于 Worker 而失败。此时读取公开快照并正常返回 cancelled，避免
+            # 把预期控制流记录成 diagnosis_execution_failed。
+            current = await self.get_run(run_id)
+            if current is not None and current.status is AgentRunStatus.CANCELLED:
+                return current
             failed_at = self._now_factory()
             public_message = "诊断执行失败；请使用 run_id 查询安全失败事件。"
             failure = RunPublicEvent(
@@ -298,16 +356,24 @@ class DiagnosisApplicationRuntime:
                 created_at=failed_at,
             )
             # 失败持久化使用新事务；若该事务也失败，数据库异常应替代安全包装向上暴露，而非吞掉。
-            async with self._session_factory.begin() as session:
-                repository = PostgresDiagnosisRunRepository(session)
-                await repository.fail_run(
-                    run_id,
-                    error_code="diagnosis_execution_failed",
-                    error_message=public_message,
-                    event=failure,
-                    worker_id=claim.worker_id,
-                    now=failed_at,
-                )
+            try:
+                async with self._session_factory.begin() as session:
+                    repository = PostgresDiagnosisRunRepository(session)
+                    await repository.fail_run(
+                        run_id,
+                        error_code="diagnosis_execution_failed",
+                        error_message=public_message,
+                        event=failure,
+                        worker_id=claim.worker_id,
+                        now=failed_at,
+                    )
+            except LookupError:
+                # Worker 失去 lease 或用户先取消时，失败写入会被并发保护拒绝；
+                # 只有确认当前状态为 cancelled 才吞掉该异常，其余情况继续暴露。
+                current = await self.get_run(run_id)
+                if current is not None and current.status is AgentRunStatus.CANCELLED:
+                    return current
+                raise
             raise DiagnosisExecutionFailed(
                 run_id=run_id,
                 error_code="diagnosis_execution_failed",

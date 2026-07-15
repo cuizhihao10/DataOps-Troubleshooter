@@ -19,7 +19,7 @@ from app.capabilities import (
 from app.domain.models import Component
 from app.orchestration.diagnosis_models import DiagnosisRunResult
 
-DIAGNOSIS_API_CONTRACT_ID = "diagnosis-resources:v3"
+DIAGNOSIS_API_CONTRACT_ID = "diagnosis-resources:v4"
 
 
 class AgentRunStatus(StrEnum):
@@ -33,6 +33,7 @@ class AgentRunStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class ActiveRunConflictError(RuntimeError):
@@ -50,6 +51,26 @@ class ActiveRunConflictError(RuntimeError):
 
         self.active_run_id = active_run_id
         super().__init__(f"diagnosis session already has active run: {active_run_id}")
+
+
+class RunResumeConflictError(RuntimeError):
+    """表示恢复请求指向的 run 不是可恢复的 cancelled 终态。
+
+    恢复不是任意 run 的隐式重试：只有明确取消的任务才允许从 session checkpoint
+    创建新 run。异常携带当前状态，API 可以稳定返回 409，而不会暴露 SQLAlchemy
+    或并发锁细节。
+    """
+
+    def __init__(self, run_id: str, current_status: AgentRunStatus) -> None:
+        """保存 run 标识和当前状态，供 HTTP 层构造可操作的冲突响应。
+
+        构造函数不访问数据库、不修改 run；它只把领域冲突转换成稳定的异常属性，
+        让 API 可以返回 409、前端可以提示当前状态，而不会暴露底层 SQL 异常。
+        """
+
+        self.run_id = run_id
+        self.current_status = current_status
+        super().__init__(f"run {run_id} cannot be resumed from {current_status.value}")
 
 
 class RunEventPhase(StrEnum):
@@ -224,8 +245,17 @@ class AgentRunSnapshot(BaseModel):
         if (
             self.completed_at is not None
             and (
-                self.started_at is None
-                or not self.started_at <= self.completed_at <= self.updated_at
+                (
+                    self.started_at is None
+                    and (
+                        self.status is not AgentRunStatus.CANCELLED
+                        or not self.created_at <= self.completed_at <= self.updated_at
+                    )
+                )
+                or (
+                    self.started_at is not None
+                    and not self.started_at <= self.completed_at <= self.updated_at
+                )
             )
         ):
             raise ValueError("agent run completion timestamp must be within run lifetime")
@@ -235,6 +265,18 @@ class AgentRunSnapshot(BaseModel):
                 raise ValueError("queued run cannot be started or attempted")
             if any((self.result, self.error_code, self.error_message, self.completed_at)):
                 raise ValueError("queued run cannot contain result, error, or completion time")
+            return self
+        if self.status is AgentRunStatus.CANCELLED:
+            # 取消可以发生在 queued 或 running 两个阶段，但都必须是完整终态；
+            # 不允许保存半成品 result，恢复时会从最新 session checkpoint 重跑。
+            if self.completed_at is None or self.error_code is None or self.error_message is None:
+                raise ValueError("cancelled run requires completion and cancellation details")
+            if self.result is not None:
+                raise ValueError("cancelled run cannot contain a partial result")
+            if self.started_at is None and self.attempt_count != 0:
+                raise ValueError("queued cancellation cannot have attempts")
+            if self.started_at is not None and self.attempt_count < 1:
+                raise ValueError("running cancellation requires a worker attempt")
             return self
         if self.status is AgentRunStatus.RUNNING:
             if self.started_at is None or self.attempt_count < 1:

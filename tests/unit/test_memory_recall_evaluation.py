@@ -81,6 +81,12 @@ class ScriptedMemoryRecallSearcher:
                 ]
         elif case.case_id == "memory_recall_direct_baseline":
             matches = [self._vector_match("memory_case_d", 1.0)]
+        elif case.case_id == "memory_recall_direct_case_a":
+            matches = [self._vector_match("memory_case_a", 1.0)]
+        elif case.case_id == "memory_recall_direct_case_b":
+            matches = [self._vector_match("memory_case_b", 1.0)]
+        elif case.case_id == "memory_recall_direct_case_c":
+            matches = [self._vector_match("memory_case_c", 1.0)]
         else:
             matches = [self._vector_match("memory_case_c", 0.77)]
         return matches[:limit]
@@ -134,10 +140,10 @@ class ScriptedMemoryRecallSearcher:
         )
 
 
-def test_memory_recall_suite_loads_three_cases_and_validates_cross_references() -> None:
+def test_memory_recall_suite_loads_six_cases_and_validates_cross_references() -> None:
     """确认标准 JSON 加载为 v1 suite，并拒绝 corpus 悬空标签引用。
 
-    正常 fixture 包含五个合成案例和三条查询；随后复制 payload 注入 unknown expected label，必须在
+    正常 fixture 包含五个合成案例和六条查询；随后复制 payload 注入 unknown expected label，必须在
     数据库/Provider 之前由 suite validator 失败。
     """
 
@@ -145,7 +151,7 @@ def test_memory_recall_suite_loads_three_cases_and_validates_cross_references() 
 
     assert suite.contract_id == "memory-recall-eval:v1"
     assert len(suite.corpus) == 5
-    assert len(suite.cases) == 3
+    assert len(suite.cases) == 6
     assert any(item.status is MemoryStatus.REJECTED for item in suite.corpus)
 
     payload = json.loads(SUITE_PATH.read_text(encoding="utf-8"))
@@ -159,7 +165,7 @@ async def test_memory_recall_report_measures_graph_gain_and_zero_forbidden_hits(
     """验证三案例 macro 指标、graph-only 救回和禁止案例安全计数。
 
     图救回案例让 vector-only 的 recall/precision 为 0.5、图模式为 1；另外两例两模式均为 1，因此
-    macro 从 5/6 提升到 1，禁止命中为零。所有数字是固定小样本实测，不代表模型准确率。
+    macro 从 11/12 提升到 1，禁止命中为零。所有数字是固定小样本实测，不代表模型准确率。
     """
 
     suite = load_memory_recall_eval_suite(SUITE_PATH)
@@ -168,18 +174,18 @@ async def test_memory_recall_report_measures_graph_gain_and_zero_forbidden_hits(
     report = await evaluate_memory_recall(suite, searcher)
 
     assert report.metric_kind == "measured"
-    assert report.vector_only_macro_recall == pytest.approx(5 / 6)
+    assert report.vector_only_macro_recall == pytest.approx(11 / 12)
     assert report.vector_graph_macro_recall == 1
-    assert report.recall_delta == pytest.approx(1 / 6)
-    assert report.vector_only_macro_precision == pytest.approx(5 / 6)
+    assert report.recall_delta == pytest.approx(1 / 12)
+    assert report.vector_only_macro_precision == pytest.approx(11 / 12)
     assert report.vector_graph_macro_precision == 1
-    assert report.precision_delta == pytest.approx(1 / 6)
+    assert report.precision_delta == pytest.approx(1 / 12)
     assert report.forbidden_hit_count == 0
     graph_case = report.case_reports[0]
     assert graph_case.graph_rescued_labels == ["memory_case_c"]
     assert graph_case.vector_graph.graph_only_hits == ["memory_case_c"]
     assert graph_case.regressed_labels == []
-    assert len(searcher.calls) == 6
+    assert len(searcher.calls) == 12
 
 
 @pytest.mark.asyncio

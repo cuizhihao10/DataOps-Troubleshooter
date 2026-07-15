@@ -351,6 +351,80 @@ class PostgresDiagnosisRunRepository:
         await self._session.flush()
         return _run_from_record(record)
 
+    async def cancel_run(
+        self,
+        run_id: str,
+        *,
+        now: datetime,
+        reason: str = "user_requested",
+    ) -> AgentRunSnapshot | None:
+        """原子取消 queued/running run，并记录不含内部细节的系统事件。
+
+        ``FOR UPDATE`` 让取消与 Worker 的完成/失败提交互斥：如果 Worker 已先提交，
+        调用返回 completed/failed 快照，API 再把它解释为不可取消；如果取消先提交，
+        Worker 后续的 lease 校验会失败，因此不会覆盖 cancelled 结果。该方法保持
+        queued 的 ``attempt_count=0`` 和 running 的已开始信息，满足数据库与领域模型
+        的双重状态约束，并且对重复取消保持幂等。
+        """
+
+        if now.tzinfo is None:
+            raise ValueError("run cancellation requires a timezone-aware timestamp")
+        record = await self._session.scalar(
+            select(AgentRunRecord)
+            .where(AgentRunRecord.run_id == run_id)
+            .with_for_update()
+        )
+        if record is None:
+            return None
+        if record.status == AgentRunStatus.CANCELLED.value:
+            return _run_from_record(record)
+        if record.status not in {
+            AgentRunStatus.QUEUED.value,
+            AgentRunStatus.RUNNING.value,
+        }:
+            return _run_from_record(record)
+        record.status = AgentRunStatus.CANCELLED.value
+        record.error_code = "user_cancelled"
+        record.error_message = "诊断任务已由用户取消，可从会话检查点恢复。"
+        record.completed_at = now
+        record.updated_at = now
+        record.lease_owner = None
+        record.lease_expires_at = None
+        last_sequence = await self._session.scalar(
+            select(func.max(RunEventRecord.sequence)).where(RunEventRecord.run_id == run_id)
+        )
+        sequence = (last_sequence or 0) + 1
+        self._session.add(
+            _event_record(
+                RunPublicEvent(
+                    event_id=f"run_evt_{uuid4().hex[:16]}",
+                    run_id=run_id,
+                    sequence=sequence,
+                    phase=RunEventPhase.SYSTEM,
+                    event_type="run_cancelled",
+                    summary="诊断任务已取消；未保存部分诊断结果。",
+                    payload={"reason": reason},
+                    created_at=now,
+                )
+            )
+        )
+        await self._session.flush()
+        return _run_from_record(record)
+
+    async def lock_run(self, run_id: str) -> AgentRunSnapshot | None:
+        """在当前事务内锁定 run 并返回快照，供恢复操作检查不可变来源。
+
+        恢复需要先验证来源确实是 cancelled，再在同一事务创建新 queued run；
+        行锁与 session 的 active 唯一索引共同防止两个请求同时恢复同一个会话。
+        """
+
+        record = await self._session.scalar(
+            select(AgentRunRecord)
+            .where(AgentRunRecord.run_id == run_id)
+            .with_for_update()
+        )
+        return _run_from_record(record) if record is not None else None
+
     async def get_run(self, run_id: str) -> AgentRunSnapshot | None:
         """按 run_id 读取运行快照并恢复版本化 DiagnosisRunResult。
 

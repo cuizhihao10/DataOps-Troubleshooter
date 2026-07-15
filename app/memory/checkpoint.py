@@ -26,6 +26,16 @@ from app.orchestration.report_models import ReportWorkflowOutcome
 
 SESSION_CHECKPOINT_CONTRACT_ID = "session-checkpoint:v1"
 
+# 检查点是“滚动窗口”而不是无限 transcript。保留最近公开状态可以让追问继续使用
+# 最新证据，同时给 JSONB、检索查询和恢复 Pydantic 校验设定确定上限；真正的长期
+# 案例仍由 case_memories 单独保存，因此这里不需要复制整个历史会话。
+CHECKPOINT_MAX_PLAN_ITEMS = 16
+CHECKPOINT_MAX_HYPOTHESES = 16
+CHECKPOINT_MAX_EVIDENCE = 64
+CHECKPOINT_MAX_TOOL_EVENTS = 64
+CHECKPOINT_MAX_PATHS = 32
+CHECKPOINT_MAX_OBSERVATION_REFS = 128
+
 
 class SessionCheckpoint(BaseModel):
     """表示一个 session 最新成功 run 的版本化、可序列化短期状态快照。
@@ -99,17 +109,53 @@ def build_session_checkpoint(
         session_id=state.session_id,
         source_run_id=state.run_id,
         source_user_query=state.user_query,
-        plan=tuple(state.plan),
-        hypotheses=tuple(state.hypotheses),
-        evidence=tuple(state.evidence),
-        tool_events=tuple(state.tool_events),
-        retrieved_paths=tuple(state.retrieved_paths),
-        observation_refs=tuple(state.observation_refs),
+        plan=_bounded_tail(state.plan, CHECKPOINT_MAX_PLAN_ITEMS),
+        hypotheses=_bounded_tail(state.hypotheses, CHECKPOINT_MAX_HYPOTHESES),
+        evidence=_bounded_tail(state.evidence, CHECKPOINT_MAX_EVIDENCE),
+        tool_events=_bounded_tail(state.tool_events, CHECKPOINT_MAX_TOOL_EVENTS),
+        retrieved_paths=_bounded_tail(state.retrieved_paths, CHECKPOINT_MAX_PATHS),
+        observation_refs=_bounded_unique_tail(
+            state.observation_refs,
+            CHECKPOINT_MAX_OBSERVATION_REFS,
+        ),
         report=report,
         report_degraded=result.report.outcome is ReportWorkflowOutcome.DEGRADED,
         created_at=created_at,
         updated_at=updated_at,
     )
+
+
+def _bounded_tail(values: list[object] | tuple[object, ...], limit: int) -> tuple[object, ...]:
+    """保留序列最新元素，并以 tuple 形成不可变 JSON/Pydantic 输入。
+
+    诊断循环按时间追加 plan、Evidence 和 ToolEvent，因此尾部代表最新上下文；
+    ``limit`` 在模块常量中集中定义，避免各调用点散落魔法数字。空序列和恰好
+    达到上限时保持内容不变，超过上限时确定性丢弃最旧元素。
+    """
+
+    if limit < 1:
+        raise ValueError("checkpoint item limit must be positive")
+    return tuple(values[-limit:])
+
+
+def _bounded_unique_tail(values: list[str] | tuple[str, ...], limit: int) -> tuple[str, ...]:
+    """在滚动窗口内保留最新且唯一的 observation 引用。
+
+    从后向前去重能保留最近一次出现的位置；随后反转恢复时间顺序，满足
+    ``SessionCheckpoint`` 的唯一性校验，并避免重复引用浪费 JSONB 预算。
+    """
+
+    if limit < 1:
+        raise ValueError("checkpoint reference limit must be positive")
+    unique_reversed: list[str] = []
+    seen: set[str] = set()
+    for value in reversed(values):
+        if value not in seen:
+            unique_reversed.append(value)
+            seen.add(value)
+        if len(unique_reversed) == limit:
+            break
+    return tuple(reversed(unique_reversed))
 
 
 def restore_agent_state(

@@ -289,6 +289,28 @@ class PostgresCaseMemoryRepository:
             await self._session.refresh(record)
         return _memory_from_record(record)
 
+    async def delete(self, memory_id: str) -> CaseMemory | None:
+        """删除案例主记录并返回删除前的领域快照。
+
+        行先加锁再删除，保证与 confirm/reject 决策串行；``memory_evidence`` 通过
+        外键 ``ON DELETE CASCADE`` 清理，调用方还需在同一事务删除动态 GraphRAG
+        节点。返回快照让 runtime/API 能确认删除对象，但不会在响应中携带 embedding。
+        """
+
+        if not memory_id.strip():
+            raise ValueError("memory_id must not be blank")
+        record = await self._session.scalar(
+            select(CaseMemoryRecord)
+            .where(CaseMemoryRecord.memory_id == memory_id)
+            .with_for_update()
+        )
+        if record is None:
+            return None
+        memory = _memory_from_record(record)
+        await self._session.delete(record)
+        await self._session.flush()
+        return memory
+
     async def search_confirmed(
         self,
         embedding: list[float],
