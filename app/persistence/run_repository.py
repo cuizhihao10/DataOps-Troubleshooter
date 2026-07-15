@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
+from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.capabilities import DiagnosisIntent, HistoryTrigger
@@ -16,8 +17,10 @@ from app.domain.models import Component
 from app.memory.checkpoint import SessionCheckpoint
 from app.orchestration.diagnosis_models import DiagnosisRunResult
 from app.orchestration.run_models import (
+    ActiveRunConflictError,
     AgentRunSnapshot,
     AgentRunStatus,
+    ClaimedDiagnosisRun,
     DiagnosisMessage,
     DiagnosisSession,
     RunEventPhase,
@@ -88,10 +91,11 @@ class PostgresDiagnosisRunRepository:
         message: DiagnosisMessage,
         now: datetime,
     ) -> AgentRunSnapshot | None:
-        """锁定会话、创建 running run，并刷新最后问题摘要与活动时间。
+        """锁定会话、创建 queued run，并刷新最后问题摘要与活动时间。
 
-        会话不存在返回 None，使 API 可映射 404；存在时 run 与 session touch 在同一事务提交。摘要
-        截断到 500 字符，不复制完整 Prompt 到会话列表字段，完整用户文本只保存在 run 行。
+        会话不存在返回 None，使 API 可映射 404；已有 queued/running run 则抛安全冲突，避免多个
+        Worker 竞争同一 session checkpoint。摘要截断到 500 字符，完整用户文本只保存在 run 行；
+        入队事务不执行 GraphRAG、模型或 MCP，因此 HTTP 响应不会持有长事务。
         """
 
         # 锁定 session 可把“刷新最后问题摘要”和“创建 run”绑定为同一活动更新，避免并发消息互相覆盖。
@@ -102,23 +106,173 @@ class PostgresDiagnosisRunRepository:
         )
         if session_record is None:
             return None
+        active = await self._session.scalar(
+            select(AgentRunRecord)
+            .where(
+                AgentRunRecord.session_id == session_id,
+                AgentRunRecord.status.in_(
+                    (AgentRunStatus.QUEUED.value, AgentRunStatus.RUNNING.value)
+                ),
+            )
+            .order_by(AgentRunRecord.created_at)
+        )
+        if active is not None:
+            raise ActiveRunConflictError(active.run_id)
         session_record.last_user_query_summary = message.content.strip()[:500]
         session_record.updated_at = now
         record = AgentRunRecord(
             run_id=run_id,
             session_id=session_id,
-            status=AgentRunStatus.RUNNING.value,
+            status=AgentRunStatus.QUEUED.value,
             user_query=message.content.strip(),
             intent=message.intent.value,
             components=[component.value for component in message.components],
             history_trigger=message.history_trigger.value,
             created_at=now,
-            started_at=now,
+            started_at=None,
+            attempt_count=0,
             updated_at=now,
         )
         self._session.add(record)
         await self._session.flush()
         return _run_from_record(record)
+
+    async def claim_next_run(
+        self,
+        *,
+        worker_id: str,
+        now: datetime,
+        lease_seconds: float,
+        max_attempts: int,
+    ) -> ClaimedDiagnosisRun | None:
+        """使用 ``FOR UPDATE SKIP LOCKED`` 原子领取最早 queued 或已过期 running run。
+
+        领取事务只更新状态、attempt_count 和短租约，随后立即提交并释放行锁；真正 GraphRAG/模型/MCP
+        执行发生在事务外。已过期 running 允许有限重试，进程崩溃后新 Worker 可接管，
+        不会永久卡住队列。
+        """
+
+        if now.tzinfo is None or lease_seconds <= 0 or max_attempts < 1:
+            raise ValueError("worker claim requires timezone, positive lease, and attempts")
+        lease_expires_at = now + timedelta(seconds=lease_seconds)
+        eligible = or_(
+            AgentRunRecord.status == AgentRunStatus.QUEUED.value,
+            and_(
+                AgentRunRecord.status == AgentRunStatus.RUNNING.value,
+                AgentRunRecord.lease_expires_at.is_not(None),
+                AgentRunRecord.lease_expires_at <= now,
+                AgentRunRecord.attempt_count < max_attempts,
+            ),
+        )
+        record = await self._session.scalar(
+            select(AgentRunRecord)
+            .where(eligible)
+            .order_by(AgentRunRecord.created_at, AgentRunRecord.run_id)
+            .with_for_update(skip_locked=True)
+        )
+        if record is None:
+            return None
+        if record.status == AgentRunStatus.QUEUED.value:
+            record.started_at = now
+        record.status = AgentRunStatus.RUNNING.value
+        record.attempt_count += 1
+        record.lease_owner = worker_id
+        record.lease_expires_at = lease_expires_at
+        record.updated_at = now
+        await self._session.flush()
+        return ClaimedDiagnosisRun(
+            run=_run_from_record(record),
+            worker_id=worker_id,
+            lease_expires_at=lease_expires_at,
+        )
+
+    async def fail_exhausted_runs(
+        self,
+        *,
+        now: datetime,
+        max_attempts: int,
+    ) -> int:
+        """把已过期且达到最大领取次数的 run 标为安全 failed，并写入 system 事件。
+
+        该清理与领取使用同一 ``SKIP LOCKED`` 思路，避免多个 Worker 重复处理；只有没有任何 Worker
+        能再合法接管的任务才会被终结。事件不包含租约、异常或模型内容，客户端可据此停止轮询。
+        """
+
+        if now.tzinfo is None or max_attempts < 1:
+            raise ValueError("worker reaper requires timezone and positive attempts")
+        records = (
+            await self._session.scalars(
+                select(AgentRunRecord)
+                .where(
+                    AgentRunRecord.status == AgentRunStatus.RUNNING.value,
+                    AgentRunRecord.lease_expires_at.is_not(None),
+                    AgentRunRecord.lease_expires_at <= now,
+                    AgentRunRecord.attempt_count >= max_attempts,
+                )
+                .with_for_update(skip_locked=True)
+            )
+        ).all()
+        for record in records:
+            record.status = AgentRunStatus.FAILED.value
+            record.error_code = "worker_attempts_exhausted"
+            record.error_message = "诊断 Worker 重试次数已耗尽；请重新提交问题。"
+            record.completed_at = now
+            record.updated_at = now
+            record.lease_owner = None
+            record.lease_expires_at = None
+            last_sequence = await self._session.scalar(
+                select(func.max(RunEventRecord.sequence)).where(
+                    RunEventRecord.run_id == record.run_id
+                )
+            )
+            sequence = (last_sequence or 0) + 1
+            self._session.add(
+                _event_record(
+                    RunPublicEvent(
+                        event_id=f"run_evt_{uuid4().hex[:16]}",
+                        run_id=record.run_id,
+                        sequence=sequence,
+                        phase=RunEventPhase.SYSTEM,
+                        event_type="worker_attempts_exhausted",
+                        summary="诊断 Worker 重试次数已耗尽；请重新提交问题。",
+                        payload={"error_code": "worker_attempts_exhausted"},
+                        created_at=now,
+                    )
+                )
+            )
+        await self._session.flush()
+        return len(records)
+
+    async def renew_lease(
+        self,
+        run_id: str,
+        *,
+        worker_id: str,
+        now: datetime,
+        lease_seconds: float,
+    ) -> bool:
+        """在 workflow 仍运行且 owner 未过期时延长租约，并返回是否仍拥有该 run。
+
+        条件更新而非先读后写避免两个 Worker 之间的竞态；rowcount 为零表示任务已被别的 Worker 接管
+        或已终态，执行方必须停止继续提交结果。该方法不保存 heartbeat 事件，避免时间线噪声。
+        """
+
+        if now.tzinfo is None or lease_seconds <= 0:
+            raise ValueError("worker lease renewal requires timezone and positive lease")
+        result = await self._session.execute(
+            update(AgentRunRecord)
+            .where(
+                AgentRunRecord.run_id == run_id,
+                AgentRunRecord.status == AgentRunStatus.RUNNING.value,
+                AgentRunRecord.lease_owner == worker_id,
+                AgentRunRecord.lease_expires_at > now,
+            )
+            .values(
+                lease_expires_at=now + timedelta(seconds=lease_seconds),
+                updated_at=now,
+            )
+        )
+        return result.rowcount == 1
 
     async def complete_run(
         self,
@@ -127,6 +281,7 @@ class PostgresDiagnosisRunRepository:
         result: DiagnosisRunResult,
         events: tuple[RunPublicEvent, ...],
         checkpoint: SessionCheckpoint,
+        worker_id: str,
         now: datetime,
     ) -> AgentRunSnapshot:
         """把 running run 原子转换为 completed，并写事件与最新会话 checkpoint。
@@ -137,7 +292,7 @@ class PostgresDiagnosisRunRepository:
         """
 
         # 先锁定并验证 running，再批量加入事件；外层事务让终态与时间线一起 commit/rollback。
-        record = await self._lock_running_run(run_id)
+        record = await self._lock_owned_running_run(run_id, worker_id=worker_id, now=now)
         _validate_events(run_id, events)
         if checkpoint.source_run_id != run_id or checkpoint.session_id != record.session_id:
             raise ValueError("checkpoint must belong to the completed run and session")
@@ -145,6 +300,8 @@ class PostgresDiagnosisRunRepository:
         record.result = result.model_dump(mode="json")
         record.completed_at = now
         record.updated_at = now
+        record.lease_owner = None
+        record.lease_expires_at = None
         self._session.add_all([_event_record(event) for event in events])
         await self._save_checkpoint(checkpoint)
         await self._session.flush()
@@ -169,6 +326,7 @@ class PostgresDiagnosisRunRepository:
         error_code: str,
         error_message: str,
         event: RunPublicEvent,
+        worker_id: str,
         now: datetime,
     ) -> AgentRunSnapshot:
         """把 running run 原子转换为 failed，并保存一条净化 system 事件。
@@ -181,12 +339,14 @@ class PostgresDiagnosisRunRepository:
             raise ValueError("failed run requires public error code and message")
         if event.run_id != run_id or event.sequence != 1 or event.phase is not RunEventPhase.SYSTEM:
             raise ValueError("failed run requires a first system event for the same run")
-        record = await self._lock_running_run(run_id)
+        record = await self._lock_owned_running_run(run_id, worker_id=worker_id, now=now)
         record.status = AgentRunStatus.FAILED.value
         record.error_code = error_code
         record.error_message = error_message
         record.completed_at = now
         record.updated_at = now
+        record.lease_owner = None
+        record.lease_expires_at = None
         self._session.add(_event_record(event))
         await self._session.flush()
         return _run_from_record(record)
@@ -220,11 +380,17 @@ class PostgresDiagnosisRunRepository:
         ).all()
         return tuple(_event_from_record(record) for record in records)
 
-    async def _lock_running_run(self, run_id: str) -> AgentRunRecord:
-        """获取 run 行锁并要求当前状态仍为 running。
+    async def _lock_owned_running_run(
+        self,
+        run_id: str,
+        *,
+        worker_id: str,
+        now: datetime,
+    ) -> AgentRunRecord:
+        """获取 run 行锁并要求当前状态、owner 和租约仍然有效。
 
-        行锁把完成/失败竞争串行化；缺失或已终态统一抛 LookupError，由应用 runtime 视为编程/重放
-        冲突而不是重新创建事件。锁随外层事务 commit/rollback 释放。
+        行锁把完成/失败竞争串行化；租约过期后旧 Worker 即使完成模型调用也不能覆盖新 Worker 的
+        结果。缺失、已终态或 owner 不匹配统一抛 LookupError，锁随外层事务释放。
         """
 
         record = await self._session.scalar(
@@ -232,8 +398,13 @@ class PostgresDiagnosisRunRepository:
         )
         if record is None:
             raise LookupError(f"agent run not found: {run_id}")
-        if record.status != AgentRunStatus.RUNNING.value:
-            raise LookupError(f"agent run is already terminal: {run_id}")
+        if (
+            record.status != AgentRunStatus.RUNNING.value
+            or record.lease_owner != worker_id
+            or record.lease_expires_at is None
+            or record.lease_expires_at <= now
+        ):
+            raise LookupError(f"agent run lease is no longer owned: {run_id}")
         return record
 
     async def _save_checkpoint(self, checkpoint: SessionCheckpoint) -> None:
@@ -310,6 +481,7 @@ def _run_from_record(record: AgentRunRecord) -> AgentRunSnapshot:
         error_message=record.error_message,
         created_at=record.created_at,
         started_at=record.started_at,
+        attempt_count=record.attempt_count,
         completed_at=record.completed_at,
         updated_at=record.updated_at,
     )

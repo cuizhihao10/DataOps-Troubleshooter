@@ -1,0 +1,138 @@
+<!doctype html>
+<!--
+  DataOps Troubleshooter 学习型单页 Demo。
+
+  这个 HTML 只负责声明可访问的页面结构；业务状态、HTTP 调用和安全文本渲染放在 app.js，
+  这样可以把“数据流”和“视觉布局”分开学习。页面不内嵌真实日志、凭据、Prompt 或 Thought，
+  只展示后端允许公开的 run/event/evidence 摘要。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="DataOps Troubleshooter 学习型排障演示" />
+    <title>DataOps Troubleshooter · Diagnosis Demo</title>
+    <link rel="stylesheet" href="/demo/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">DATAOPS / EVIDENCE-FIRST DIAGNOSIS</p>
+          <h1 id="page-title">排障工作台</h1>
+          <p class="hero-copy">
+            观察从消息入队到公开证据时间线的完整链路。页面不会显示 Thought、Prompt 或凭据。
+          </p>
+        </div>
+        <div class="status-chip" id="service-status" data-state="unknown" aria-live="polite">
+          检查服务中…
+        </div>
+      </header>
+
+      <section class="panel health-panel" aria-labelledby="health-title">
+        <div class="panel-heading">
+          <div>
+            <p class="section-kicker">01 / SERVICE</p>
+            <h2 id="health-title">服务状态</h2>
+          </div>
+          <button class="quiet-button" id="refresh-health" type="button">刷新</button>
+        </div>
+        <div class="health-grid" id="health-grid" aria-live="polite">
+          <p class="muted">正在读取 /health…</p>
+        </div>
+      </section>
+
+      <section class="workspace-grid" aria-label="诊断操作与运行状态">
+        <section class="panel input-panel" aria-labelledby="input-title">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker">02 / INPUT</p>
+              <h2 id="input-title">创建诊断</h2>
+            </div>
+          </div>
+          <form id="diagnosis-form">
+            <label for="session-title">Session 标题</label>
+            <input id="session-title" name="title" value="学习型排障演示" maxlength="200" required />
+
+            <label for="question">问题描述</label>
+            <textarea id="question" name="question" rows="5" maxlength="4000" required>请检查 LTS 合成任务的状态与日志</textarea>
+
+            <div class="form-row">
+              <div>
+                <label for="intent">诊断意图</label>
+                <select id="intent" name="intent">
+                  <option value="single_component_diagnosis">单组件诊断</option>
+                  <option value="cross_component_diagnosis">跨组件链路</option>
+                </select>
+              </div>
+              <div>
+                <label for="component">组件</label>
+                <select id="component" name="component" multiple size="3" aria-describedby="component-help">
+                  <option value="lts" selected>LTS</option>
+                  <option value="bds">BDS</option>
+                  <option value="flashsync">FlashSync</option>
+                </select>
+                <p class="form-note" id="component-help">按 Ctrl/⌘ 可选择多个组件，用于跨组件链路。</p>
+              </div>
+            </div>
+
+            <p class="form-note">
+              首次提交会创建 session；同一 session 在 queued/running 期间再次提交会得到 409，
+              页面将提示旧 run_id。
+            </p>
+            <button class="primary-button" type="submit" id="submit-diagnosis">提交诊断</button>
+          </form>
+          <p class="error-message" id="form-error" role="alert" hidden></p>
+        </section>
+
+        <section class="panel run-panel" aria-labelledby="run-title">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker">03 / RUN</p>
+              <h2 id="run-title">运行状态</h2>
+            </div>
+            <span class="run-state" id="run-state" data-state="idle">idle</span>
+          </div>
+          <dl class="run-facts">
+            <div><dt>Session</dt><dd id="session-id">—</dd></div>
+            <div><dt>Run</dt><dd id="run-id">—</dd></div>
+            <div><dt>尝试次数</dt><dd id="attempt-count">—</dd></div>
+            <div><dt>错误</dt><dd id="run-error">—</dd></div>
+          </dl>
+          <div class="progress-track" aria-hidden="true"><span id="run-progress"></span></div>
+          <p class="muted" id="poll-message">提交后将按退避间隔轮询终态。</p>
+        </section>
+      </section>
+
+      <section class="panel timeline-panel" aria-labelledby="timeline-title">
+        <div class="panel-heading">
+          <div>
+            <p class="section-kicker">04 / EVIDENCE</p>
+            <h2 id="timeline-title">Action / Observation 时间线</h2>
+          </div>
+          <button class="quiet-button" id="refresh-events" type="button" disabled>刷新事件</button>
+        </div>
+        <ol class="timeline" id="timeline" aria-live="polite">
+          <li class="empty-state">提交诊断后，公开事件会按 sequence 出现在这里。</li>
+        </ol>
+      </section>
+
+      <section class="panel report-panel" aria-labelledby="report-title">
+        <div class="panel-heading">
+          <div>
+            <p class="section-kicker">05 / REPORT</p>
+            <h2 id="report-title">审计报告</h2>
+          </div>
+        </div>
+        <div class="report-grid" id="report-grid">
+          <p class="empty-state">完成 run 后展示 summary、根因引用、风险与不确定性。</p>
+        </div>
+      </section>
+
+      <footer class="footer-note">
+        合成/Mock 数据 · evidence-first · 不展示模型原始思维链
+      </footer>
+    </main>
+    <script type="module" src="/demo/static/app.js"></script>
+  </body>
+</html>

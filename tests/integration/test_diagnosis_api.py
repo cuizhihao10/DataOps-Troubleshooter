@@ -17,6 +17,7 @@ from app.domain.models import Component
 from app.orchestration.diagnosis_runtime import DiagnosisExecutionFailed
 from app.orchestration.run_models import (
     DIAGNOSIS_API_CONTRACT_ID,
+    ActiveRunConflictError,
     AgentRunSnapshot,
     AgentRunStatus,
     DiagnosisMessage,
@@ -36,7 +37,7 @@ class FakeDiagnosisRuntime:
     run_id/稳定错误码，不泄露底层异常文本。
     """
 
-    def __init__(self, *, fail_submit: bool = False) -> None:
+    def __init__(self, *, fail_submit: bool = False, conflict_submit: bool = False) -> None:
         """初始化固定 session/running run/event 资源和空调用记录。
 
         ``fail_submit`` 只在 message 路由触发 DiagnosisExecutionFailed；构造不执行 I/O。固定 ID 满足
@@ -44,6 +45,7 @@ class FakeDiagnosisRuntime:
         """
 
         self.fail_submit = fail_submit
+        self.conflict_submit = conflict_submit
         self.session = DiagnosisSession(
             session_id="session_1111111111111111",
             title="合成排障会话",
@@ -60,6 +62,7 @@ class FakeDiagnosisRuntime:
             history_trigger=HistoryTrigger.NOT_REQUESTED,
             created_at=NOW,
             started_at=NOW,
+            attempt_count=1,
             updated_at=NOW,
         )
         self.events = RunEventList(
@@ -107,6 +110,8 @@ class FakeDiagnosisRuntime:
         self.messages.append((session_id, message))
         if session_id != self.session.session_id:
             return None
+        if self.conflict_submit:
+            raise ActiveRunConflictError(self.run.run_id)
         if self.fail_submit:
             raise DiagnosisExecutionFailed(
                 run_id=self.run.run_id,
@@ -201,8 +206,8 @@ async def test_diagnosis_resource_routes_create_submit_read_and_return_404() -> 
             missing_run = await client.get("/api/v1/runs/run_aaaaaaaaaaaaaaaa")
 
     assert created.status_code == 201
-    assert created.json()["contract_id"] == "diagnosis-resources:v2"
-    assert submitted.status_code == 201
+    assert created.json()["contract_id"] == "diagnosis-resources:v3"
+    assert submitted.status_code == 202
     assert submitted.json()["run"]["status"] == "running"
     assert run.status_code == 200
     assert events.status_code == 200
@@ -243,3 +248,32 @@ async def test_message_failure_returns_safe_run_id_without_internal_exception_te
     assert detail["error_code"] == "diagnosis_execution_failed"
     assert detail["message"] == "合成安全失败摘要。"
     assert "traceback" not in str(detail).lower()
+
+
+@pytest.mark.asyncio
+async def test_message_conflict_returns_active_run_id_for_client_polling() -> None:
+    """验证 queued/running session 冲突映射为 409，而不是重复创建并发 run。
+
+    替身直接抛出仓储层 ActiveRunConflictError，路由应只公开 active_run_id 和稳定提示；客户端
+    可以据此继续轮询旧 run。测试不访问数据库，专注检查 HTTP 错误边界和不泄漏异常文本。
+    """
+
+    runtime = FakeDiagnosisRuntime(conflict_submit=True)
+    async with app.router.lifespan_context(app):
+        app.state.diagnosis_runtime = runtime
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                f"/api/v1/sessions/{runtime.session.session_id}/messages",
+                json={
+                    "content": "检查 LTS 合成任务",
+                    "intent": "single_component_diagnosis",
+                    "components": ["lts"],
+                },
+            )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "active_run_id": runtime.run.run_id,
+        "message": "session has an active run",
+    }

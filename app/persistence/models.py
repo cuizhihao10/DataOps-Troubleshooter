@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     CheckConstraint,
@@ -297,16 +298,17 @@ class SessionCheckpointRecord(Base):
 
 
 class AgentRunRecord(Base):
-    """映射一次诊断运行的输入路由、终态结果和安全失败摘要。
+    """映射一次诊断运行的输入路由、队列租约、终态结果和安全失败摘要。
 
-    JSONB result 保存版本化 DiagnosisRunResult，便于首版轮询读取；状态 CheckConstraint 防止
-    running、completed、failed 的结果/错误字段组合互相矛盾。原异常和 Thought 不进入表。
+    JSONB result 保存版本化 DiagnosisRunResult；queued/running 的状态 CheckConstraint、租约字段和
+    部分唯一索引共同保证数据库队列不会同 session 并发执行。原异常、worker 身份和 Thought 不进入
+    公开模型；worker 身份只用于领取所有权校验。
     """
 
     __tablename__ = "agent_runs"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('running','completed','failed')",
+            "status IN ('queued','running','completed','failed')",
             name="ck_agent_runs_status",
         ),
         CheckConstraint(
@@ -323,16 +325,29 @@ class AgentRunRecord(Base):
             name="ck_agent_runs_components",
         ),
         CheckConstraint(
+            "(status = 'queued' AND result IS NULL AND error_code IS NULL "
+            "AND error_message IS NULL AND started_at IS NULL AND completed_at IS NULL "
+            "AND attempt_count = 0 AND lease_owner IS NULL AND lease_expires_at IS NULL) OR "
             "(status = 'running' AND result IS NULL AND error_code IS NULL "
-            "AND error_message IS NULL AND completed_at IS NULL) OR "
+            "AND error_message IS NULL AND started_at IS NOT NULL AND completed_at IS NULL "
+            "AND attempt_count >= 1 AND lease_owner IS NOT NULL "
+            "AND lease_expires_at IS NOT NULL) OR "
             "(status = 'completed' AND result IS NOT NULL AND error_code IS NULL "
-            "AND error_message IS NULL AND completed_at IS NOT NULL) OR "
+            "AND error_message IS NULL AND started_at IS NOT NULL AND completed_at IS NOT NULL "
+            "AND attempt_count >= 1 AND lease_owner IS NULL AND lease_expires_at IS NULL) OR "
             "(status = 'failed' AND result IS NULL AND error_code IS NOT NULL "
-            "AND error_message IS NOT NULL AND completed_at IS NOT NULL)",
+            "AND error_message IS NOT NULL AND started_at IS NOT NULL AND completed_at IS NOT NULL "
+            "AND attempt_count >= 1 AND lease_owner IS NULL AND lease_expires_at IS NULL)",
             name="ck_agent_runs_terminal_payload",
         ),
         Index("ix_agent_runs_session_created", "session_id", "created_at"),
-        Index("ix_agent_runs_status", "status"),
+        Index("ix_agent_runs_queue", "status", "created_at"),
+        Index(
+            "uq_agent_runs_active_session",
+            "session_id",
+            unique=True,
+            postgresql_where=sa.text("status IN ('queued','running')"),
+        ),
     )
 
     run_id: Mapped[str] = mapped_column(String(100), primary_key=True)
@@ -353,12 +368,16 @@ class AgentRunRecord(Base):
         nullable=False,
         server_default=func.now(),
     )
-    started_at: Mapped[datetime] = mapped_column(
+    started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
+        nullable=True,
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

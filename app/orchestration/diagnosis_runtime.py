@@ -1,7 +1,7 @@
 """协调 GraphRAG、顶层诊断 workflow 与 PostgreSQL session/run/event 资源持久化。
 
-首版在提交 message 的 HTTP 请求内同步执行，但先创建 running run，完成后原子写终态、公开事件和
-版本化 session checkpoint；失败只写安全终态，不覆盖上一快照。可靠后台 worker 仍是后续演进。
+资源 runtime 只负责入队、读取和在 Worker 租约内执行；长耗时 GraphRAG、模型和 MCP I/O 不占用
+HTTP 请求或数据库事务。终态、公开事件和版本化 session checkpoint 仍原子提交，失败不覆盖上一快照。
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from app.orchestration.diagnosis_models import DiagnosisRunRequest, DiagnosisRun
 from app.orchestration.run_models import (
     DIAGNOSIS_API_CONTRACT_ID,
     AgentRunSnapshot,
+    ClaimedDiagnosisRun,
     DiagnosisMessage,
     DiagnosisSession,
     RunEventList,
@@ -204,28 +205,37 @@ class DiagnosisApplicationRuntime:
         session_id: str,
         message: DiagnosisMessage,
     ) -> AgentRunSnapshot | None:
-        """创建 running run，执行 GraphRAG/顶层 workflow，并原子保存终态事件。
+        """创建 queued run 并立即返回，绝不在 HTTP 请求内执行 GraphRAG、模型或 MCP。
 
-        会话不存在返回 None。执行失败先把 run 标记 failed 和写安全 system 事件，再抛
-        DiagnosisExecutionFailed；成功则一次事务写 completed result 与全部公开事件。长耗时外部 I/O
-        位于事务之间，避免持有数据库锁。
+        会话不存在返回 None；同 session 已有 queued/running run 时仓储抛 ActiveRunConflictError。
+        PostgreSQL 事务只写入用户输入和队列状态，Worker 随后通过租约领取并调用
+        ``execute_claimed_run``，因此客户端可以用 GET run/events 轮询而不会占用请求连接。
         """
 
         run_id = self._id_factory("run")
-        started_at = self._now_factory()
+        queued_at = self._now_factory()
         async with self._session_factory.begin() as session:
             repository = PostgresDiagnosisRunRepository(session)
-            running = await repository.create_run(
+            queued = await repository.create_run(
                 run_id=run_id,
                 session_id=session_id,
                 message=message,
-                now=started_at,
+                now=queued_at,
             )
-            checkpoint = (
-                await repository.get_checkpoint(session_id) if running is not None else None
-            )
-        if running is None:
-            return None
+        return queued
+
+    async def execute_claimed_run(self, claim: ClaimedDiagnosisRun) -> AgentRunSnapshot:
+        """在 Worker 已取得有效租约后执行完整 workflow，并原子提交终态/事件/checkpoint。
+
+        领取事务与外部 I/O 分离；执行开始时重新读取 checkpoint，随后 GraphRAG、LangGraph 和 MCP
+        都在事务外运行。成功或失败最终事务都带 worker_id，过期/被接管的旧 Worker 无法覆盖新结果。
+        """
+
+        run_id = claim.run.run_id
+        session_id = claim.run.session_id
+        message = claim.message()
+        async with self._session_factory() as session:
+            checkpoint = await PostgresDiagnosisRunRepository(session).get_checkpoint(session_id)
 
         try:
             # 当前追问排在检索查询首位，上一轮公开报告只负责补全省略主题，不注入隐藏模型输出。
@@ -271,6 +281,7 @@ class DiagnosisApplicationRuntime:
                     result=result,
                     events=events,
                     checkpoint=next_checkpoint,
+                    worker_id=claim.worker_id,
                     now=completed_at,
                 )
         except Exception as exc:
@@ -294,6 +305,7 @@ class DiagnosisApplicationRuntime:
                     error_code="diagnosis_execution_failed",
                     error_message=public_message,
                     event=failure,
+                    worker_id=claim.worker_id,
                     now=failed_at,
                 )
             raise DiagnosisExecutionFailed(

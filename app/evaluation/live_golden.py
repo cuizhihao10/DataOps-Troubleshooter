@@ -34,6 +34,7 @@ from app.observability import (
     reset_model_call_recorder,
 )
 from app.orchestration.diagnosis_models import DiagnosisRunResult
+from app.orchestration.diagnosis_worker import DiagnosisRunWorker
 from app.orchestration.run_models import (
     AgentRunSnapshot,
     AgentRunStatus,
@@ -82,6 +83,15 @@ class LiveDiagnosisRuntime(Protocol):
 
         v1 生产 runtime 同步执行，因此成功必须返回 completed；``None`` 表示会话身份异常。未来改为
         Worker 后 runner 应轮询 GET/仓储契约，而不是把 running 当成零分结果。
+        """
+
+        ...
+
+    async def get_run(self, run_id: str) -> AgentRunSnapshot | None:
+        """读取已持久化的 run 快照，供真实后台 Worker 完成后轮询终态。
+
+        实现必须按 run_id 返回 queued/running/terminal 快照或 ``None``；调用方不会重新执行
+        workflow。测试替身可以直接返回固定快照，但生产实现必须经过 PostgreSQL/Pydantic 边界。
         """
 
         ...
@@ -166,6 +176,10 @@ class LiveGoldenRunner:
         self,
         runtime: LiveDiagnosisRuntime,
         fixture_registry: FixtureRegistry,
+        *,
+        worker: DiagnosisRunWorker | None = None,
+        poll_interval_seconds: float = 0.05,
+        timeout_seconds: float = 300.0,
     ) -> None:
         """注入已由 lifespan 验证的生产 runtime 和同版本 Fixture 注册表。
 
@@ -175,6 +189,9 @@ class LiveGoldenRunner:
 
         self._runtime = runtime
         self._fixture_registry = fixture_registry
+        self._worker = worker
+        self._poll_interval_seconds = poll_interval_seconds
+        self._timeout_seconds = timeout_seconds
 
     async def run(self, case: GoldenCaseSpec) -> DiagnosisRunResult:
         """为单条案例创建隔离 session，提交消息并返回 completed 诊断结果。
@@ -189,6 +206,21 @@ class LiveGoldenRunner:
         snapshot = await self._runtime.submit_message(session.session_id, message)
         if snapshot is None:
             raise RuntimeError(f"live Golden session disappeared: {case.case_id}")
+        # 生产 runtime 只返回 queued；评测显式驱动一个 Worker 轮次，保证 recorder ContextVar
+        # 继承到执行 task，同时仍然复用真实的 claim/lease/完成事务路径。
+        if self._worker is not None:
+            await self._worker.run_once()
+            deadline = perf_counter() + self._timeout_seconds
+            while snapshot.status not in {
+                AgentRunStatus.COMPLETED,
+                AgentRunStatus.FAILED,
+            }:
+                if perf_counter() >= deadline:
+                    raise TimeoutError(f"live Golden run timed out: {case.case_id}")
+                await asyncio.sleep(self._poll_interval_seconds)
+                snapshot = await self._runtime.get_run(snapshot.run_id)
+                if snapshot is None:
+                    raise RuntimeError(f"live Golden run disappeared: {case.case_id}")
         if snapshot.status is not AgentRunStatus.COMPLETED or snapshot.result is None:
             raise RuntimeError(
                 f"live Golden run did not complete: {case.case_id} status={snapshot.status.value}"
@@ -334,9 +366,15 @@ async def run_live_golden_evaluation(
     async with app.router.lifespan_context(app):
         runtime = app.state.diagnosis_runtime
         fixture_registry = app.state.fixture_registry
+        worker = getattr(app.state, "diagnosis_worker", None)
         if runtime is None:
             raise RuntimeError("live Golden diagnosis runtime was not configured")
-        runner = LiveGoldenRunner(runtime, fixture_registry)
+        if worker is None:
+            raise RuntimeError("live Golden diagnosis worker was not configured")
+        # lifespan 默认已启动后台循环；评测在当前 task 中绑定 recorder，因此先停掉循环，
+        # 再由 runner.run_once() 驱动同一 claim 路径，避免 ContextVar 只绑定到错误的 task。
+        await worker.stop()
+        runner = LiveGoldenRunner(runtime, fixture_registry, worker=worker)
         started_at = datetime.now(UTC)
         started_clock = perf_counter()
         token = bind_model_call_recorder(recorder)

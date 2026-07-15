@@ -21,6 +21,7 @@ from app.orchestration.diagnosis_models import (
     DiagnosisRunResult,
     DiagnosisWorkflowConfig,
 )
+from app.orchestration.diagnosis_worker import DiagnosisRunWorker
 from app.orchestration.diagnosis_workflow import AuditedDiagnosisWorkflow
 from app.orchestration.history_evaluation import (
     HISTORY_IMPACT_EVAL_CONTRACT_ID,
@@ -70,6 +71,7 @@ __all__ = [
     "REACT_LOOP_CONTRACT_ID",
     "AUDITED_REPORT_WORKFLOW_CONTRACT_ID",
     "AuditedDiagnosisWorkflow",
+    "DiagnosisRunWorker",
     "AuditedReportWorkflow",
     "AuditorDefectType",
     "AuditorImpactEvalCase",

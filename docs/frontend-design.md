@@ -98,3 +98,6 @@ idle
 
 完成定义：上述两步、详细 JSDoc/注释、前端单元/浏览器测试、FastAPI 静态托管集成测试和 Docker 实机
 验证全部通过，才可以把“单页 Demo”从尚未完成改为已完成。
+### Worker 契约已稳定（前端实现前置条件）
+
+后端现在提供 `diagnosis-resources:v3`：提交 message 返回 HTTP 202 与 `queued` run，前端必须用 run_id 轮询 GET run/events，展示 `queued -> running -> completed|failed`，并把 HTTP 409 的 `active_run_id` 显示为“当前 session 已有任务”。本切片尚未加入 `cancelled`，浏览器 AbortController 只取消客户端请求。前端实现仍待下一切片，必须保留本文件定义的 Evidence、Action/Observation、Auditor、uncertainty、memory confirm/reject 和 Thought 禁止边界。

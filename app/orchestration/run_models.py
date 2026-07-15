@@ -19,19 +19,37 @@ from app.capabilities import (
 from app.domain.models import Component
 from app.orchestration.diagnosis_models import DiagnosisRunResult
 
-DIAGNOSIS_API_CONTRACT_ID = "diagnosis-resources:v2"
+DIAGNOSIS_API_CONTRACT_ID = "diagnosis-resources:v3"
 
 
 class AgentRunStatus(StrEnum):
-    """限定同步首版诊断 run 的运行中、完成和失败三种持久化状态。
+    """限定数据库队列 run 的等待、执行中、完成和失败四种持久化状态。
 
-    当前 POST 在同一请求内执行 workflow，因此不声明尚未实现的 queued/cancelled；未来引入可靠
-    后台执行时必须升级契约和迁移，而不是复用字符串暗改状态机。
+    POST 只创建 queued，Worker 领取后转 running，最终只能进入 completed 或 failed。枚举暂不声明
+    cancelled，因为安全取消仍需独立协作协议；前端不能把浏览器 AbortController 冒充服务端取消。
     """
 
+    QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class ActiveRunConflictError(RuntimeError):
+    """表示同一 session 已有 queued/running run，新的消息不能并发入队。
+
+    单 session 串行化保护 checkpoint 的单调版本和追问顺序；异常只携带公开 active run ID，API 可
+    安全映射 409。它不包含 SQL、会话行、用户问题、模型输出或数据库连接信息。
+    """
+
+    def __init__(self, active_run_id: str) -> None:
+        """保存可供客户端轮询的活跃 run ID，并构造不泄露内部状态的错误消息。
+
+        ID 由已持久化行产生；调用方不应使用异常创建新 run 或自动重试，而应先读取该资源终态。
+        """
+
+        self.active_run_id = active_run_id
+        super().__init__(f"diagnosis session already has active run: {active_run_id}")
 
 
 class RunEventPhase(StrEnum):
@@ -153,10 +171,10 @@ class RunPublicEvent(BaseModel):
 
 
 class AgentRunSnapshot(BaseModel):
-    """保存一个诊断 run 的输入路由、终态结果或安全失败信息。
+    """保存数据库队列中一次诊断 run 的输入路由、进度、结果或安全失败信息。
 
-    running 不含结果/错误；completed 必须携带完整 DiagnosisRunResult；failed 只保存稳定错误码和
-    公开摘要。原异常和 traceback 不进入模型，避免 GET run 泄露 URL、凭据或模型响应体。
+    queued 尚无 started_at 且 attempt_count=0；running 已被 Worker 至少领取一次但不含结果/错误；
+    completed 必须携带结果；failed 只保存稳定错误码和公开摘要。租约身份不进入公开快照。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -172,16 +190,17 @@ class AgentRunSnapshot(BaseModel):
     error_code: str | None = Field(default=None, min_length=1, max_length=100)
     error_message: str | None = Field(default=None, min_length=1, max_length=500)
     created_at: datetime
-    started_at: datetime
+    started_at: datetime | None = None
     completed_at: datetime | None = None
     updated_at: datetime
+    attempt_count: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def validate_run_state(self) -> AgentRunSnapshot:
         """绑定 status 与结果/错误/完成时间，并校验 workflow 身份和时间单调性。
 
-        completed 结果必须与行的 run/session 相同；failed 不允许保留部分结果；running 不得提前有
-        completed_at。所有时间带时区且 created ≤ started ≤ updated，终态还要求 completed ≤ updated。
+        queued 必须没有执行时间且尝试数为零；running/终态必须有 started_at 和正尝试数。completed
+        结果必须与 run/session 相同；failed 不允许部分结果。所有存在的时间带时区并保持单调。
         """
 
         CapabilitySelectionRequest(
@@ -189,20 +208,37 @@ class AgentRunSnapshot(BaseModel):
             components=self.components,
             history_trigger=self.history_trigger,
         )
-        timestamps = [self.created_at, self.started_at, self.updated_at]
+        timestamps = [self.created_at, self.updated_at]
+        if self.started_at is not None:
+            timestamps.append(self.started_at)
         if self.completed_at is not None:
             timestamps.append(self.completed_at)
         if any(value.tzinfo is None for value in timestamps):
             raise ValueError("agent run timestamps must include a timezone")
-        if not self.created_at <= self.started_at <= self.updated_at:
+        if self.updated_at < self.created_at:
+            raise ValueError("agent run timestamps must be monotonic")
+        if self.started_at is not None and not (
+            self.created_at <= self.started_at <= self.updated_at
+        ):
             raise ValueError("agent run timestamps must be monotonic")
         if (
             self.completed_at is not None
-            and not self.started_at <= self.completed_at <= self.updated_at
+            and (
+                self.started_at is None
+                or not self.started_at <= self.completed_at <= self.updated_at
+            )
         ):
             raise ValueError("agent run completion timestamp must be within run lifetime")
 
+        if self.status is AgentRunStatus.QUEUED:
+            if self.started_at is not None or self.attempt_count != 0:
+                raise ValueError("queued run cannot be started or attempted")
+            if any((self.result, self.error_code, self.error_message, self.completed_at)):
+                raise ValueError("queued run cannot contain result, error, or completion time")
+            return self
         if self.status is AgentRunStatus.RUNNING:
+            if self.started_at is None or self.attempt_count < 1:
+                raise ValueError("running run requires a start time and worker attempt")
             if (
                 self.result is not None
                 or self.error_code is not None
@@ -214,6 +250,8 @@ class AgentRunSnapshot(BaseModel):
             return self
         if self.completed_at is None:
             raise ValueError("terminal run requires completed_at")
+        if self.started_at is None or self.attempt_count < 1:
+            raise ValueError("terminal run requires a start time and worker attempt")
         if self.status is AgentRunStatus.COMPLETED:
             if self.result is None or self.error_code is not None or self.error_message is not None:
                 raise ValueError("completed run requires result and no error")
@@ -224,6 +262,50 @@ class AgentRunSnapshot(BaseModel):
         elif self.result is not None or self.error_code is None or self.error_message is None:
             raise ValueError("failed run requires error details and no result")
         return self
+
+
+class ClaimedDiagnosisRun(BaseModel):
+    """保存 Worker 领取后执行所需的公开 run 快照与私有租约身份。
+
+    模型只在应用进程内部流转，不由 API 返回。worker_id 与 lease expiry 让完成、失败和心跳更新都能
+    验证所有权；用户输入继续复用 AgentRunSnapshot，不复制为松散队列 payload。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run: AgentRunSnapshot
+    worker_id: str = Field(pattern=r"^worker_[a-f0-9]{16}$")
+    lease_expires_at: datetime
+
+    @model_validator(mode="after")
+    def validate_claim(self) -> ClaimedDiagnosisRun:
+        """要求领取结果处于 running，租约带时区且晚于本次状态更新时间。
+
+        queued 或终态快照不能驱动 workflow；已过期/零长度租约也不能在进程内被误认为有效所有权。
+        数据库仍以 owner 条件更新作为并发最终防线。
+        """
+
+        if self.run.status is not AgentRunStatus.RUNNING:
+            raise ValueError("claimed diagnosis run must be running")
+        if self.lease_expires_at.tzinfo is None:
+            raise ValueError("claimed diagnosis lease must include a timezone")
+        if self.lease_expires_at <= self.run.updated_at:
+            raise ValueError("claimed diagnosis lease must expire after claim update")
+        return self
+
+    def message(self) -> DiagnosisMessage:
+        """把持久化 run 输入恢复为 workflow 使用的冻结 DiagnosisMessage。
+
+        转换不解析自然语言、不改变 history trigger，也不包含租约字段；Pydantic 会再次校验 capability
+        组件边界，使损坏数据库行在模型或 MCP 调用前失败。
+        """
+
+        return DiagnosisMessage(
+            content=self.run.user_query,
+            intent=self.run.intent,
+            components=self.run.components,
+            history_trigger=self.run.history_trigger,
+        )
 
 
 class RunEventList(BaseModel):

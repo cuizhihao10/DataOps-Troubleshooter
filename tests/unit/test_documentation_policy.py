@@ -26,6 +26,7 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/orchestration/report_workflow.py"),
     Path("app/orchestration/diagnosis_workflow.py"),
     Path("app/orchestration/diagnosis_runtime.py"),
+    Path("app/orchestration/diagnosis_worker.py"),
     Path("app/orchestration/auditor_evaluation.py"),
     Path("app/orchestration/history_evaluation.py"),
     Path("app/evaluation/portfolio.py"),
@@ -53,6 +54,7 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/memory/evaluation.py"),
     Path("app/persistence/migrations/versions/20260713_0003_case_memories.py"),
     Path("app/persistence/migrations/versions/20260715_0004_diagnosis_resources.py"),
+    Path("app/persistence/migrations/versions/20260716_0005_diagnosis_worker.py"),
     Path("app/persistence/run_repository.py"),
     Path("mcp_server/repository.py"),
 )
@@ -544,15 +546,17 @@ def test_diagnosis_resource_contract_documents_persistence_events_and_failure_se
 
     prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
 
-    assert "diagnosis-resources:v2" in prompt_contract
+    assert "diagnosis-resources:v3" in prompt_contract
     assert "diagnosis_sessions" in prompt_contract
     assert "agent_runs" in prompt_contract
     assert "run_events" in prompt_contract
     assert "session_checkpoints" in prompt_contract
     assert "session-checkpoint:v1" in prompt_contract
     assert "失败 run 不覆盖旧快照" in prompt_contract
-    assert "synchronous" in prompt_contract
-    assert "running | completed | failed" in prompt_contract
+    assert "postgres-worker" in prompt_contract
+    assert "queued | running | completed | failed" in prompt_contract
+    assert "FOR UPDATE SKIP LOCKED" in prompt_contract
+    assert "HTTP 409" in prompt_contract
     assert "不保存 Thought" in prompt_contract
     assert "portfolio-eval-manifest:v22" in prompt_contract
     assert "portfolio-eval-run:v22" in prompt_contract

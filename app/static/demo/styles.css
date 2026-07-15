@@ -1,0 +1,78 @@
+/*
+  Demo 的视觉样式保持无框架、可读和可访问。
+
+  颜色变量把“状态语义”集中管理：queued/running 使用暖色提醒等待，completed 使用绿色，
+  failed 使用红色。布局采用 CSS Grid，在窄屏自动变为单列，确保键盘和屏幕阅读顺序不依赖视觉位置。
+*/
+:root {
+  color-scheme: light;
+  --ink: #17202a;
+  --muted: #687480;
+  --line: #d8e0e6;
+  --surface: #ffffff;
+  --surface-soft: #f5f8fa;
+  --accent: #1f6f78;
+  --accent-dark: #15535a;
+  --queued: #aa6d12;
+  --running: #2364aa;
+  --completed: #287453;
+  --failed: #ad3b44;
+  --shadow: 0 18px 50px rgb(24 47 61 / 9%);
+  font-family: "Segoe UI", "Noto Sans SC", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: #edf2f4; color: var(--ink); }
+button, input, textarea, select { font: inherit; }
+button { cursor: pointer; }
+.shell { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 42px 0 28px; }
+.hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
+.eyebrow, .section-kicker { color: var(--accent); font-size: .72rem; font-weight: 800; letter-spacing: .14em; margin: 0 0 8px; }
+h1, h2, p { margin-top: 0; }
+h1 { font-size: clamp(2.1rem, 6vw, 4.6rem); letter-spacing: -.06em; line-height: .95; margin-bottom: 14px; }
+h2 { font-size: 1.2rem; letter-spacing: -.02em; margin-bottom: 0; }
+.hero-copy { color: var(--muted); max-width: 580px; margin-bottom: 0; }
+.status-chip, .run-state { border-radius: 999px; padding: 8px 13px; background: var(--surface); border: 1px solid var(--line); font-size: .78rem; font-weight: 700; white-space: nowrap; }
+.status-chip[data-state="ok"], .run-state[data-state="completed"] { color: var(--completed); border-color: #a8d7bd; background: #edf9f1; }
+.status-chip[data-state="error"], .run-state[data-state="failed"] { color: var(--failed); border-color: #e7b6bb; background: #fff2f3; }
+.run-state[data-state="queued"] { color: var(--queued); border-color: #e7c991; background: #fff8e9; }
+.run-state[data-state="running"] { color: var(--running); border-color: #b5cde9; background: #eef6ff; }
+.panel { background: var(--surface); border: 1px solid rgb(216 224 230 / 80%); border-radius: 18px; box-shadow: var(--shadow); padding: 24px; }
+.health-panel, .timeline-panel, .report-panel { margin-bottom: 18px; }
+.panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+.workspace-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; margin-bottom: 18px; }
+.health-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.health-card { background: var(--surface-soft); border-radius: 12px; padding: 14px; }
+.health-card dt { color: var(--muted); font-size: .75rem; margin-bottom: 6px; }
+.health-card dd { margin: 0; font-size: .92rem; font-weight: 700; overflow-wrap: anywhere; }
+label { display: block; color: var(--muted); font-size: .8rem; font-weight: 700; margin: 0 0 7px; }
+input, textarea, select { width: 100%; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfd; color: var(--ink); padding: 11px 12px; margin-bottom: 15px; }
+textarea { resize: vertical; min-height: 112px; }
+input:focus, textarea:focus, select:focus, button:focus-visible { outline: 3px solid rgb(31 111 120 / 24%); outline-offset: 2px; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.form-note, .muted, .footer-note { color: var(--muted); font-size: .82rem; line-height: 1.6; }
+.primary-button, .quiet-button { border-radius: 10px; border: 1px solid var(--accent); padding: 10px 15px; font-weight: 800; }
+.primary-button { color: #fff; background: var(--accent); width: 100%; }
+.primary-button:hover { background: var(--accent-dark); }
+.quiet-button { color: var(--accent-dark); background: #fff; font-size: .78rem; }
+.quiet-button:disabled { cursor: not-allowed; opacity: .45; }
+.error-message { color: var(--failed); background: #fff2f3; border-radius: 9px; padding: 10px; margin: 15px 0 0; font-size: .82rem; line-height: 1.5; }
+.run-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 0 0 22px; }
+.run-facts div { border-bottom: 1px solid var(--line); padding-bottom: 10px; min-width: 0; }
+.run-facts dt { color: var(--muted); font-size: .72rem; margin-bottom: 6px; }
+.run-facts dd { font-size: .84rem; font-weight: 700; overflow-wrap: anywhere; margin: 0; }
+.progress-track { background: #e8eef1; border-radius: 99px; height: 8px; overflow: hidden; }
+.progress-track span { display: block; width: 4%; height: 100%; background: var(--accent); border-radius: inherit; transition: width .3s ease; }
+.timeline { display: grid; gap: 10px; list-style: none; margin: 0; padding: 0; }
+.timeline-item { border-left: 3px solid var(--accent); background: var(--surface-soft); padding: 12px 14px; border-radius: 0 10px 10px 0; }
+.timeline-meta { color: var(--accent-dark); font-size: .72rem; font-weight: 800; margin-bottom: 5px; }
+.timeline-summary { font-size: .86rem; line-height: 1.5; margin: 0; }
+.report-grid { display: grid; gap: 12px; }
+.report-card { border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: #fbfcfd; }
+.report-card h3 { font-size: .82rem; margin: 0 0 8px; color: var(--accent-dark); }
+.report-card p, .report-card li { font-size: .86rem; line-height: 1.55; }
+.report-card ul { margin: 0; padding-left: 20px; }
+.empty-state { color: var(--muted); font-size: .84rem; padding: 12px 0; }
+.footer-note { text-align: center; padding: 24px 0 0; }
+@media (max-width: 760px) { .hero { align-items: flex-start; flex-direction: column; } .workspace-grid { grid-template-columns: 1fr; } .health-grid { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 460px) { .shell { width: min(100% - 20px, 1180px); padding-top: 24px; } .panel { padding: 18px; } .health-grid, .form-row, .run-facts { grid-template-columns: 1fr; } }

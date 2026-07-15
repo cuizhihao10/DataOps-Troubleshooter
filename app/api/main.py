@@ -7,9 +7,11 @@ lifespan 会在开放端口前校验 Fixture、Golden Case、Prompt、九个 MCP
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app import __version__
@@ -47,6 +49,7 @@ from app.orchestration import (
     AuditedReportWorkflow,
     BoundedReactLoop,
     DiagnosisMessage,
+    DiagnosisRunWorker,
     DiagnosisSession,
     DiagnosisWorkflowConfig,
     ReactLoopConfig,
@@ -58,6 +61,7 @@ from app.orchestration.diagnosis_runtime import (
     DiagnosisExecutionFailed,
     PostgresGraphContextRetriever,
 )
+from app.orchestration.run_models import ActiveRunConflictError
 from app.persistence.database import (
     check_database_connection,
     create_database_engine,
@@ -197,7 +201,12 @@ class DiagnosisApiConfiguration(BaseModel):
     status: Literal["disabled", "configured"]
     contract_id: str
     checkpoint_contract_id: str
-    execution_mode: Literal["synchronous"]
+    execution_mode: Literal["postgres-worker"]
+    worker_status: Literal["disabled", "running"]
+    worker_poll_seconds: float
+    worker_lease_seconds: float
+    worker_heartbeat_seconds: float
+    worker_max_attempts: int
     retrieval_seed_limit: int
 
 
@@ -401,6 +410,7 @@ async def lifespan(app: FastAPI):
     auditor_runtime = None
     memory_runtime = None
     diagnosis_runtime = None
+    diagnosis_worker = None
     session_factory = None
     memory_counts = MemoryCounts(pending=0, confirmed=0, rejected=0)
     try:
@@ -480,6 +490,14 @@ async def lifespan(app: FastAPI):
                 retriever=retriever,
                 workflow=diagnosis_workflow,
             )
+            diagnosis_worker = DiagnosisRunWorker(
+                diagnosis_runtime,
+                session_factory,
+                poll_interval_seconds=settings.diagnosis_worker_poll_seconds,
+                lease_seconds=settings.diagnosis_worker_lease_seconds,
+                heartbeat_seconds=settings.diagnosis_worker_heartbeat_seconds,
+                max_attempts=settings.diagnosis_worker_max_attempts,
+            )
 
         # 只有全部检查完成后才发布共享状态，避免路由观察到半初始化的依赖集合。
         app.state.settings = settings
@@ -491,15 +509,22 @@ async def lifespan(app: FastAPI):
         app.state.auditor_runtime = auditor_runtime
         app.state.memory_runtime = memory_runtime
         app.state.diagnosis_runtime = diagnosis_runtime
+        app.state.diagnosis_worker = diagnosis_worker
         app.state.memory_counts = memory_counts
         app.state.database_engine = database_engine
         app.state.database_status = database_status
         app.state.knowledge_nodes_loaded = knowledge_nodes_loaded
         app.state.knowledge_edges_loaded = knowledge_edges_loaded
         app.state.knowledge_nodes_embedded = knowledge_nodes_embedded
+        if diagnosis_worker is not None:
+            # Worker 在所有 app.state 依赖发布后再启动，避免后台 task 观察到半初始化的 runtime。
+            diagnosis_worker.start()
         yield
     finally:
         # 先按角色关闭模型 HTTP 池，再释放数据库池；均不吞异常，避免测试重启后遗留资源。
+        if diagnosis_worker is not None:
+            # 先停止领取新任务；未完成 run 的 lease 会自然过期并由新 Worker 接管。
+            await diagnosis_worker.stop()
         if auditor_runtime is not None:
             await auditor_runtime.aclose()
         if planner_runtime is not None:
@@ -513,6 +538,59 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
+
+DEMO_ASSET_ROOT = (Path(__file__).resolve().parent.parent / "static" / "demo").resolve()
+DEMO_INDEX_PATH = DEMO_ASSET_ROOT / "index.html"
+
+
+def _resolve_demo_asset(asset_name: str) -> Path:
+    """解析 Demo 静态资源并执行目录边界检查。
+
+    该同步 helper 集中处理 pathlib 文件系统操作，避免在 async 路由中阻塞式遍历路径；调用方
+    只接收 demo 目录内的普通文件。返回不存在路径仍由调用方映射为明确的 404/503，而不会
+    隐式回退到仓库根目录或操作系统当前目录。
+    """
+
+    candidate = (DEMO_ASSET_ROOT / asset_name).resolve()
+    if DEMO_ASSET_ROOT not in candidate.parents or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="demo asset not found")
+    return candidate
+
+
+def _demo_index_available() -> bool:
+    """同步检查入口 HTML 是否是可服务的普通文件，供异步路由读取布尔结果。
+
+    返回值只表达资产是否存在且为普通文件；它不读取文件内容，也不把异常细节暴露给浏览器。
+    单独抽成同步 helper 是为了让 Ruff 的异步阻塞检查可验证，同时让 `/demo` 缺失资源时明确
+    返回 503，而不是让 FileResponse 在响应流阶段才失败。
+    """
+
+    return DEMO_INDEX_PATH.is_file()
+
+
+@app.get("/demo", include_in_schema=False)
+async def demo_page() -> FileResponse:
+    """返回学习型单页 Demo 的静态入口，而不把前端状态混入诊断 API。
+
+    路由只解析仓库内固定路径并返回 HTML；CSS/JavaScript 由 HTML 通过同源 `/demo/static/`
+    引用。文件不存在时让 FastAPI 抛出显式错误，避免返回一张看似可用却没有交互能力的空页面。
+    页面本身只调用公开资源 API，不读取服务端日志、Prompt、凭据或模型原始输出。
+    """
+
+    if not _demo_index_available():
+        raise HTTPException(status_code=503, detail="diagnosis demo assets are unavailable")
+    return FileResponse(DEMO_INDEX_PATH, media_type="text/html; charset=utf-8")
+
+
+@app.get("/demo/static/{asset_name:path}", include_in_schema=False)
+async def demo_asset(asset_name: str) -> FileResponse:
+    """返回 Demo 的白名单静态资源，并阻止路径穿越访问仓库其它文件。
+
+    ``Path.resolve`` 后必须仍位于 demo 目录内；这样即使浏览器请求 `../`，也不会把配置、
+    源码或凭据路径当成静态文件。只允许文件存在且为普通文件，未知资源返回 404。
+    """
+
+    return FileResponse(_resolve_demo_asset(asset_name))
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -600,7 +678,16 @@ async def health(request: Request) -> HealthResponse:
             status=("disabled" if request.app.state.diagnosis_runtime is None else "configured"),
             contract_id=settings.diagnosis_api_contract_id,
             checkpoint_contract_id=settings.session_checkpoint_contract_id,
-            execution_mode="synchronous",
+            execution_mode="postgres-worker",
+            worker_status=(
+                "running"
+                if getattr(request.app.state, "diagnosis_worker", None) is not None
+                else "disabled"
+            ),
+            worker_poll_seconds=settings.diagnosis_worker_poll_seconds,
+            worker_lease_seconds=settings.diagnosis_worker_lease_seconds,
+            worker_heartbeat_seconds=settings.diagnosis_worker_heartbeat_seconds,
+            worker_max_attempts=settings.diagnosis_worker_max_attempts,
             retrieval_seed_limit=settings.diagnosis_retrieval_seed_limit,
         ),
         retrieval=RetrievalConfiguration(
@@ -635,7 +722,7 @@ async def create_diagnosis_session(
 @app.post(
     "/api/v1/sessions/{session_id}/messages",
     response_model=MessageSubmissionResponse,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def submit_diagnosis_message(
     session_id: str,
@@ -651,6 +738,12 @@ async def submit_diagnosis_message(
     runtime = _require_diagnosis_runtime(request)
     try:
         run = await runtime.submit_message(session_id, payload)
+    except ActiveRunConflictError as exc:
+        # 同一 session 只允许一个 queued/running run，客户端应轮询旧 run 后再提交追问。
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"active_run_id": exc.active_run_id, "message": "session has an active run"},
+        ) from exc
     except DiagnosisExecutionFailed as exc:
         raise HTTPException(
             status_code=500,

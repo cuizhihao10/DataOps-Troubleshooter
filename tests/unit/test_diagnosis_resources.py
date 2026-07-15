@@ -41,6 +41,7 @@ def _running_snapshot() -> AgentRunSnapshot:
         history_trigger=HistoryTrigger.NOT_REQUESTED,
         created_at=NOW,
         started_at=NOW,
+        attempt_count=1,
         updated_at=NOW,
     )
 

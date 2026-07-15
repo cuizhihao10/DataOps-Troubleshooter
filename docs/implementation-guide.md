@@ -1382,3 +1382,12 @@ README 必须继续标明“单页前端尚未完成”。
 - 模型级复杂历史语义对比。
 - 删除案例 API、更大规模长期记忆召回评测集，以及固定真实模型/Prompt 的 28 条端到端评测快照。
 - 产品 M4 必需的单页前端 Demo；将在可靠后台 Worker 与轮询资源契约稳定后按 `docs/frontend-design.md` 连续实现。
+### diagnosis-resources:v3：PostgreSQL Worker 队列（本切片）
+
+本切片把 message API 从同步执行升级为可靠的异步资源契约：POST `/api/v1/sessions/{session_id}/messages` 只在短事务中创建 `queued` run，并返回 HTTP 202；客户端通过 GET `/api/v1/runs/{run_id}` 轮询 `queued -> running -> completed|failed`，GET events 读取公开时间线。当前模型没有伪造 `cancelled` 状态，浏览器取消只取消 HTTP 请求，不会误写服务端任务。
+
+Worker 不引入 Redis/Kafka，也不创建第三个 Agent。它使用 PostgreSQL `FOR UPDATE SKIP LOCKED` 领取最早任务，在事务内递增 `attempt_count`、写入 `lease_owner/lease_expires_at`，提交后才运行 GraphRAG、Planner、Auditor、MCP 和 memory。心跳以条件 UPDATE 延长租约；进程崩溃或超时后，其他 Worker 只会在租约过期且未达到最大次数时接管，达到上限则写入安全 `worker_attempts_exhausted` system event。完成、失败、事件和 checkpoint 仍然在一个事务内提交，因此不会出现“状态 completed 但时间线/上下文缺失”。
+
+数据库同时使用 `(status, created_at)` 队列索引和 `session_id WHERE status IN ('queued','running')` 部分唯一索引：前者让领取按 FIFO 近似有界扫描，后者把同一 session 的并发追问转成 HTTP 409，而不是让两个 workflow 竞争同一个 checkpoint。旧版本遗留的 running 行在 Alembic `20260716_0006` 中安全标记为 failed，因为它们没有可验证的 owner/lease，继续执行会重复调用外部工具。
+
+学习型验证顺序是：先运行 `ruff` 与非 PostgreSQL 单元/路由测试，再运行真实 PostgreSQL 迁移和 Worker 集成测试，最后通过 Docker `/health` 检查 `execution_mode=postgres-worker`、Worker 参数和契约版本。所有测试数据仍为合成/Mock，不接入生产系统。

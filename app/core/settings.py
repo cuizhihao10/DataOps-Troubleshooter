@@ -68,6 +68,12 @@ class Settings(BaseSettings):
     memory_search_limit: int = Field(default=5, ge=1, le=20)
     memory_query_max_chars: int = Field(default=4000, ge=256, le=20_000)
 
+    # Worker 的短轮询、租约和心跳都集中配置，避免队列恢复边界散落在 API/数据库代码中。
+    diagnosis_worker_poll_seconds: float = Field(default=0.25, gt=0, le=10)
+    diagnosis_worker_lease_seconds: float = Field(default=180, gt=1, le=3600)
+    diagnosis_worker_heartbeat_seconds: float = Field(default=30, gt=0, le=600)
+    diagnosis_worker_max_attempts: int = Field(default=2, ge=1, le=5)
+
     fixture_directory: Path = Path("data/fixtures/scenarios")
     golden_case_file: Path = Path("data/fixtures/golden_cases.json")
     knowledge_seed_file: Path = Path("data/knowledge/cross_chain_graph.json")
@@ -83,7 +89,7 @@ class Settings(BaseSettings):
     react_loop_contract_id: str = "langgraph-react-loop:v2"
     audited_report_workflow_contract_id: str = "audited-report-workflow:v2"
     diagnosis_workflow_contract_id: str = "audited-diagnosis-workflow:v2"
-    diagnosis_api_contract_id: str = "diagnosis-resources:v2"
+    diagnosis_api_contract_id: str = "diagnosis-resources:v3"
     session_checkpoint_contract_id: str = "session-checkpoint:v1"
     case_memory_contract_id: str = "case-memory:v2"
     graphrag_retrieval_contract_id: str = "graphrag-retrieval:v2"
@@ -110,6 +116,10 @@ class Settings(BaseSettings):
             raise ValueError("chat_base_url must not include user information")
         if self.chat_provider != "disabled" and self.chat_api_key is None:
             raise ValueError("chat_api_key is required when chat_provider is enabled")
+        if self.diagnosis_worker_heartbeat_seconds >= self.diagnosis_worker_lease_seconds / 2:
+            raise ValueError(
+                "diagnosis_worker_heartbeat_seconds must be less than half the worker lease"
+            )
         return self
 
     def hybrid_scoring_weights(self) -> HybridScoringWeights:

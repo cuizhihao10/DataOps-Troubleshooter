@@ -30,6 +30,7 @@ from app.orchestration import (
     REACT_LOOP_CONTRACT_ID,
     DiagnosisMessage,
     DiagnosisRunResult,
+    DiagnosisRunWorker,
     ReactEventType,
     ReactPublicEvent,
     ReactRunResult,
@@ -43,7 +44,11 @@ from app.orchestration.diagnosis_runtime import (
     DiagnosisExecutionFailed,
     PostgresGraphContextRetriever,
 )
-from app.orchestration.run_models import AgentRunStatus, RunEventPhase
+from app.orchestration.run_models import (
+    ActiveRunConflictError,
+    AgentRunStatus,
+    RunEventPhase,
+)
 from app.persistence.database import create_database_engine, create_session_factory
 from app.persistence.models import DiagnosisSessionRecord, SessionCheckpointRecord
 from app.retrieval.embeddings import DeterministicHashEmbeddingProvider
@@ -105,6 +110,7 @@ class PrefixIdSequence:
                 "run_2222222222222222",
                 "run_3333333333333333",
                 "run_4444444444444444",
+                "run_5555555555555555",
             ],
         }
 
@@ -277,11 +283,12 @@ async def test_postgres_diagnosis_resources_persist_success_failure_and_events()
     factory = create_session_factory(engine)
     retriever = EmptyGraphRetriever()
     workflow = SuccessfulTwiceThenFailingWorkflow()
+    clock = IncrementingClock(datetime.now(UTC) - timedelta(hours=1))
     runtime = DiagnosisApplicationRuntime(
         factory,
         retriever=retriever,
         workflow=workflow,
-        now_factory=IncrementingClock(NOW),
+        now_factory=clock,
         id_factory=PrefixIdSequence(),
     )
 
@@ -306,9 +313,23 @@ async def test_postgres_diagnosis_resources_persist_success_failure_and_events()
 
         created = await runtime.create_session(title="  PostgreSQL 合成会话  ")
         assert created.title == "PostgreSQL 合成会话"
-        completed = await runtime.submit_message(created.session_id, _message())
+        queued = await runtime.submit_message(created.session_id, _message())
+        assert queued is not None and queued.status is AgentRunStatus.QUEUED
+        with pytest.raises(ActiveRunConflictError):
+            await runtime.submit_message(created.session_id, _message("并发追问应该被拒绝"))
+        worker = DiagnosisRunWorker(
+            runtime,
+            factory,
+            worker_id="worker_aaaaaaaaaaaaaaaa",
+            now_factory=clock,
+            lease_seconds=120,
+            heartbeat_seconds=30,
+        )
+        assert await worker.run_once() is True
+        completed = await runtime.get_run(queued.run_id)
         assert completed is not None
         assert completed.status is AgentRunStatus.COMPLETED
+        assert completed.attempt_count == 1
         assert completed.result is not None
         assert completed.result.react.state.run_id == completed.run_id
         assert retriever.queries == ["当前问题: 检查 LTS 合成任务"]
@@ -330,10 +351,13 @@ async def test_postgres_diagnosis_resources_persist_success_failure_and_events()
         assert events.events[-1].event_type == "session_checkpoint_saved"
         assert events.events[-1].payload["checkpoint_version"] == 1
 
-        followup = await runtime.submit_message(
+        followup_queued = await runtime.submit_message(
             created.session_id,
             _message("这个恢复操作风险高吗？"),
         )
+        assert followup_queued is not None and followup_queued.status is AgentRunStatus.QUEUED
+        assert await worker.run_once() is True
+        followup = await runtime.get_run(followup_queued.run_id)
         assert followup is not None and followup.status is AgentRunStatus.COMPLETED
         assert len(workflow.requests) == 2
         restored_state = workflow.requests[1].state
@@ -369,8 +393,10 @@ async def test_postgres_diagnosis_resources_persist_success_failure_and_events()
                 await session.flush()
             await session.rollback()
 
+        failed_queued = await runtime.submit_message(created.session_id, _message())
+        assert failed_queued is not None and failed_queued.status is AgentRunStatus.QUEUED
         with pytest.raises(DiagnosisExecutionFailed) as captured:
-            await runtime.submit_message(created.session_id, _message())
+            await worker.run_once()
         failed_id = captured.value.run_id
         failed = await runtime.get_run(failed_id)
         assert failed is not None and failed.status is AgentRunStatus.FAILED
