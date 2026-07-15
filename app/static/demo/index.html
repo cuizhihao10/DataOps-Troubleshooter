@@ -127,6 +127,28 @@
         <div class="report-grid" id="report-grid">
           <p class="empty-state">完成 run 后展示 summary、根因引用、风险与不确定性。</p>
         </div>
+        <section class="memory-card" id="memory-card" aria-labelledby="memory-title" hidden>
+          <div class="memory-heading">
+            <div>
+              <p class="section-kicker">MEMORY / REVIEW</p>
+              <h3 id="memory-title">案例记忆候选</h3>
+            </div>
+            <span class="memory-status" id="memory-status">pending</span>
+          </div>
+          <dl class="memory-facts">
+            <div><dt>Memory ID</dt><dd id="memory-id">—</dd></div>
+            <div><dt>Root cause</dt><dd id="memory-root-cause">—</dd></div>
+            <div><dt>Components</dt><dd id="memory-components">—</dd></div>
+          </dl>
+          <p class="form-note" id="memory-help">
+            该候选只会在 Auditor 接受报告后暂存；确认后才允许后续历史案例召回，拒绝则不会进入召回集合。
+          </p>
+          <div class="memory-actions" id="memory-actions" hidden>
+            <button class="primary-button memory-action" id="confirm-memory" type="button">确认记忆</button>
+            <button class="quiet-button memory-action" id="reject-memory" type="button">拒绝记忆</button>
+          </div>
+          <p class="error-message" id="memory-error" role="alert" hidden></p>
+        </section>
       </section>
 
       <footer class="footer-note">

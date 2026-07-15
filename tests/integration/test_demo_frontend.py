@@ -39,6 +39,10 @@ async def test_demo_page_serves_static_assets_and_documents_safe_async_flow() ->
     assert "async function pollRun" in script.text
     assert "textContent" in script.text
     assert "error.status === 409" in script.text
+    assert "/api/v1/memories/" in script.text
+    assert 'body: JSON.stringify({ decision })' in script.text
+    assert "confirm-memory" in page.text
+    assert "reject-memory" in page.text
 
 
 @pytest.mark.asyncio

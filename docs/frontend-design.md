@@ -101,3 +101,14 @@ idle
 ### Worker 契约已稳定（前端实现前置条件）
 
 后端现在提供 `diagnosis-resources:v3`：提交 message 返回 HTTP 202 与 `queued` run，前端必须用 run_id 轮询 GET run/events，展示 `queued -> running -> completed|failed`，并把 HTTP 409 的 `active_run_id` 显示为“当前 session 已有任务”。本切片尚未加入 `cancelled`，浏览器 AbortController 只取消客户端请求。前端实现仍待下一切片，必须保留本文件定义的 Evidence、Action/Observation、Auditor、uncertainty、memory confirm/reject 和 Thought 禁止边界。
+## 7. Demo 前端已经落地（diagnosis-resources:v3）
+
+`/demo` 已由 FastAPI 同源托管，使用原生 HTML/CSS/ES Module，不引入额外 Node 服务。页面当前完整覆盖：
+
+- `/health` 依赖、Worker 配置、契约版本与数据规模摘要。
+- 创建 session、选择单个或多个组件、提交 message，并轮询 `queued -> running -> completed|failed`。
+- 按 `RunPublicEvent.sequence` 展示公开 Action/Observation 时间线；所有文本写入 DOM 使用 `textContent`，避免合成 Evidence 被当成 HTML 执行。
+- 报告 summary、root cause、risk 和 uncertainty 摘要；不展示 Prompt、Thought、embedding 或 Provider 原始响应。
+- `memory_stage.memory` 的 pending 候选显示 confirm/reject；按钮调用 `POST /api/v1/memories/{memory_id}/confirm`，以服务端返回状态为准，confirmed/rejected 后自动隐藏操作按钮。
+
+这段实现对应学习型验收闭环：浏览器只保存 `sessionId/runId/memoryId` 等可恢复标识，后端 PostgreSQL Worker 才是队列和记忆状态真相；网络失败只显示错误，不伪造 completed 或自动确认案例记忆。`tests/integration/test_demo_frontend.py` 覆盖静态资源、路径穿越防护、409 错误提示和记忆决策入口。

@@ -1391,3 +1391,10 @@ Worker 不引入 Redis/Kafka，也不创建第三个 Agent。它使用 PostgreSQ
 数据库同时使用 `(status, created_at)` 队列索引和 `session_id WHERE status IN ('queued','running')` 部分唯一索引：前者让领取按 FIFO 近似有界扫描，后者把同一 session 的并发追问转成 HTTP 409，而不是让两个 workflow 竞争同一个 checkpoint。旧版本遗留的 running 行在 Alembic `20260716_0006` 中安全标记为 failed，因为它们没有可验证的 owner/lease，继续执行会重复调用外部工具。
 
 学习型验证顺序是：先运行 `ruff` 与非 PostgreSQL 单元/路由测试，再运行真实 PostgreSQL 迁移和 Worker 集成测试，最后通过 Docker `/health` 检查 `execution_mode=postgres-worker`、Worker 参数和契约版本。所有测试数据仍为合成/Mock，不接入生产系统。
+### 16.7 单页 Demo 与记忆决策闭环
+
+前端切片采用 FastAPI `FileResponse` 同源托管 `app/static/demo/index.html`、`styles.css` 与 `app.js`。这种选择让求职演示只需要启动一个服务，同时保留浏览器端可检查的原生 HTTP、DOM 安全和状态机实现。`app.js` 将后端 `AgentRunSnapshot` 映射为可见状态，并以递增退避轮询 run/events；浏览器刷新后仍可用 run ID 重新获取状态，不把内存 spinner 当作任务真相。
+
+报告完成后，页面读取 `DiagnosisRunResult.memory_stage.memory`。候选的 `memory_id/root_cause/components/status` 是不含 embedding 的领域投影；pending 时才显示两个动作按钮。点击后向 `/api/v1/memories/{memory_id}/confirm` 发送有限枚举 `confirm/reject`，再使用服务端返回的 `CaseMemory` 更新标签。这样避免前端自行修改状态，也保持“只有显式用户确认才进入 confirmed recall”的长期记忆原则。失败路径保留候选并显示错误，避免把网络失败误报为已确认。
+
+HTML/CSS 负责信息结构和可访问布局，JavaScript callable 均有 JSDoc，复杂状态转换旁有解释性注释；测试验证 `/demo`、CSS、ES module、path traversal 404、409 active run 和 memory decision endpoint。Docker 健康检查还验证 `/demo` 与 `/demo/static/app.js` 可被容器同源加载。

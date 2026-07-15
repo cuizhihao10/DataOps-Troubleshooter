@@ -9,6 +9,7 @@
 const state = {
   sessionId: null,
   runId: null,
+  memoryId: null,
   pollTimer: null,
   pollAttempt: 0,
 };
@@ -164,6 +165,66 @@ function renderReport(result) {
     card.append(heading, text);
     return card;
   }));
+  // memory_stage 是后端持久化边界的公开投影；优先读取它，避免前端依赖内部 report state 的重复字段。
+  renderMemoryCandidate(result.memory_stage?.memory || result.report?.state?.memory_candidate || null);
+}
+
+/**
+ * 渲染 Auditor 通过后暂存的 CaseMemory 候选，并按状态决定是否显示用户决策按钮。
+ *
+ * @param {any|null} memory - DiagnosisRunResult.memory_stage.memory 的公开 JSON；不包含 embedding。
+ * @returns {void} 通过 DOM 更新候选摘要和按钮可见性。
+ */
+function renderMemoryCandidate(memory) {
+  const card = document.getElementById("memory-card");
+  const actions = document.getElementById("memory-actions");
+  const error = document.getElementById("memory-error");
+  if (!card || !actions || !error) return;
+  error.hidden = true;
+  if (!memory) {
+    state.memoryId = null;
+    card.hidden = true;
+    actions.hidden = true;
+    return;
+  }
+  // 只保存 memory_id，后续决策仍通过同源 API 完成，避免把客户端状态当作数据库真相。
+  state.memoryId = memory.memory_id;
+  card.hidden = false;
+  setText("memory-id", memory.memory_id);
+  setText("memory-root-cause", memory.root_cause);
+  setText("memory-components", (memory.components || []).join(", "));
+  const status = document.getElementById("memory-status");
+  status.textContent = memory.status || "pending";
+  status.dataset.state = memory.status || "pending";
+  // 只有 pending 可改变；confirmed/rejected 是服务端终态，按钮隐藏防止误导用户重复提交。
+  actions.hidden = memory.status !== "pending";
+  [...actions.querySelectorAll("button")].forEach((button) => { button.disabled = false; });
+}
+
+/**
+ * 将用户的 confirm/reject 决策提交给后端，并用服务端返回的 CaseMemory 刷新状态。
+ *
+ * @param {"confirm"|"reject"} decision - 有限的用户决策枚举，不能传递任意状态字符串。
+ * @returns {Promise<void>} 请求成功后完成界面状态更新；失败时保留候选并显示错误。
+ */
+async function decideMemory(decision) {
+  if (!state.memoryId) return;
+  const error = document.getElementById("memory-error");
+  const buttons = [...document.querySelectorAll(".memory-action")];
+  buttons.forEach((button) => { button.disabled = true; });
+  error.hidden = true;
+  try {
+    const { payload } = await requestJson(`/api/v1/memories/${encodeURIComponent(state.memoryId)}/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision }),
+    });
+    renderMemoryCandidate(payload.memory);
+  } catch (requestError) {
+    error.textContent = `记忆决策失败：${requestError.message}`;
+    error.hidden = false;
+    buttons.forEach((button) => { button.disabled = false; });
+  }
 }
 
 /**
@@ -233,6 +294,8 @@ async function submitMessage() {
   });
   state.runId = payload.run.run_id;
   state.pollAttempt = 0;
+  // 新 run 尚未产生报告时清空上一轮候选，避免用户把旧 memory 决策误认为当前 run 的结果。
+  renderMemoryCandidate(null);
   renderRun(payload.run);
   await pollRun(state.runId);
 }
@@ -243,6 +306,8 @@ async function submitMessage() {
 function init() {
   document.getElementById("refresh-health").addEventListener("click", refreshHealth);
   document.getElementById("refresh-events").addEventListener("click", () => state.runId && refreshRun(state.runId));
+  document.getElementById("confirm-memory").addEventListener("click", () => decideMemory("confirm"));
+  document.getElementById("reject-memory").addEventListener("click", () => decideMemory("reject"));
   document.getElementById("diagnosis-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const button = document.getElementById("submit-diagnosis");
