@@ -36,6 +36,13 @@ from app.domain.models import (
     RiskLevel,
     RootCauseConclusion,
 )
+from app.observability import (
+    InMemoryModelCallRecorder,
+    ModelCallRole,
+    ModelCallStatus,
+    bind_model_call_recorder,
+    reset_model_call_recorder,
+)
 from app.orchestration import (
     AuditedReportWorkflow,
     ReportRunRequest,
@@ -233,7 +240,13 @@ async def test_official_sdk_sends_audit_result_schema_without_tools() -> None:
         ChatMessage(role=ChatRole.USER, content="Audit only this synthetic report."),
     )
 
-    result = await provider.complete(messages)
+    recorder = InMemoryModelCallRecorder()
+    token = bind_model_call_recorder(recorder)
+    try:
+        result = await provider.complete(messages)
+    finally:
+        # Recorder 只覆盖这一请求，避免测试事件循环复用时把后续调用误计入本次结果。
+        reset_model_call_recorder(token)
 
     assert result.status is AuditStatus.ACCEPT
     assert len(captured) == 1
@@ -244,6 +257,12 @@ async def test_official_sdk_sends_audit_result_schema_without_tools() -> None:
     assert set(schema["required"]) == {"status", "issues", "revision_instructions"}
     assert "tools" not in body
     assert "tool_choice" not in body
+    metrics = recorder.snapshot()
+    assert len(metrics) == 1
+    assert metrics[0].role is ModelCallRole.AUDITOR
+    assert metrics[0].status is ModelCallStatus.SUCCEEDED
+    assert metrics[0].token_usage is not None
+    assert metrics[0].token_usage.total_tokens == 15
     await client.close()
 
 

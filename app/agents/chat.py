@@ -24,7 +24,9 @@ from app.agents.planner import (
     PlannerProviderError,
     PlannerRefusalError,
 )
+from app.agents.prompts import PLANNER_PROMPT_ID
 from app.domain.planner import PlannerDecision
+from app.observability import ModelCallMeasurement, ModelCallRole, ModelCallStatus
 
 PLANNER_PROVIDER_CONTRACT_ID = "openai-compatible-planner:v1"
 
@@ -118,6 +120,12 @@ class OpenAICompatiblePlannerProvider:
 
         if len(messages) < 2:
             raise ValueError("Planner completion requires at least system and user messages")
+        measurement = ModelCallMeasurement(
+            role=ModelCallRole.PLANNER,
+            provider_contract_id=PLANNER_PROVIDER_CONTRACT_ID,
+            model=self.model,
+            prompt_contract_id=PLANNER_PROMPT_ID,
+        )
         try:
             # parse 同时提交 Pydantic strict Schema 和解析返回，避免请求/响应维护两份手写结构。
             completion = await self._client.chat.completions.parse(
@@ -126,31 +134,38 @@ class OpenAICompatiblePlannerProvider:
                 response_format=PlannerDecision,
             )
         except ValidationError as exc:
+            # Schema 错误只记录稳定分类；原始输出仍仅在当前修复调用内存中短暂存在。
+            measurement.finish(ModelCallStatus.OUTPUT_INVALID)
             raw_output, summary = validation_failure_details(exc)
             raise PlannerOutputValidationError(
                 validation_summary=summary,
                 raw_output=raw_output,
             ) from exc
         except ContentFilterFinishReasonError as exc:
+            measurement.finish(ModelCallStatus.REFUSED)
             raise PlannerRefusalError("provider content filter stopped the response") from exc
         except LengthFinishReasonError as exc:
+            measurement.finish(ModelCallStatus.OUTPUT_INVALID)
             raise PlannerOutputValidationError(
                 validation_summary="model output ended because the length limit was reached",
                 raw_output="",
             ) from exc
         except APITimeoutError as exc:
+            measurement.finish(ModelCallStatus.TIMEOUT)
             raise PlannerProviderError(
                 error_code="timeout",
                 public_summary="Planner 模型请求超过配置超时。",
                 retryable=True,
             ) from exc
         except APIConnectionError as exc:
+            measurement.finish(ModelCallStatus.CONNECTION_ERROR)
             raise PlannerProviderError(
                 error_code="connection_error",
                 public_summary="无法连接 OpenAI-compatible Planner 服务。",
                 retryable=True,
             ) from exc
         except APIStatusError as exc:
+            measurement.finish(ModelCallStatus.HTTP_ERROR)
             retryable = exc.status_code == 429 or exc.status_code >= 500
             error_code = (
                 "rate_limited"
@@ -167,18 +182,23 @@ class OpenAICompatiblePlannerProvider:
 
         # refusal 必须先于 parsed 检查；安全拒绝不满足业务 Schema，但也不是可修复格式错误。
         if not completion.choices:
+            measurement.finish(ModelCallStatus.OUTPUT_INVALID, usage=completion.usage)
             raise PlannerOutputValidationError(
                 validation_summary="response contained no choices",
                 raw_output="",
             )
         message = completion.choices[0].message
         if message.refusal:
+            measurement.finish(ModelCallStatus.REFUSED, usage=completion.usage)
             raise PlannerRefusalError(message.refusal)
         if message.parsed is None:
+            measurement.finish(ModelCallStatus.OUTPUT_INVALID, usage=completion.usage)
             raise PlannerOutputValidationError(
                 validation_summary="response contained no parsed PlannerDecision",
                 raw_output=message.content or "",
             )
+        # usage 只投影为 token 数；消息内容和完整 SDK 响应不会进入 recorder。
+        measurement.finish(ModelCallStatus.SUCCEEDED, usage=completion.usage)
         return message.parsed
 
     async def aclose(self) -> None:

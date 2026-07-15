@@ -844,3 +844,26 @@ Schema 兼容，但 7200 条预期事件只到 6300 条。FlashSync 日志必须
 新增 suite、改变测试入口或改变指标快照必须提升 manifest 契约、同步详细实测
 文档并通过对应评测测试；不能只改 README 数字。CLI 使用 `python -m app.evaluation` 输出结构化 JSON，
 不写 Thought、凭据或数据库 URL。
+
+## 9. 真实模型 Golden 运行与观测契约
+
+`live-golden-eval:v1` 复用 `golden-diagnosis-eval:v21` 的评分器，但 runner 必须经过生产
+PostgreSQL GraphRAG、Planner/Auditor Structured Outputs、LangGraph 和 stdio MCP。默认三案例 smoke
+不加入 `portfolio-eval-manifest:v22`，因为它需要用户显式提供本地模型密钥；缺少 Provider、密钥或
+数据库时必须在任何模型调用前失败，不能生成假的 `metric_kind=measured` 报告。
+
+合成 `scenario_id`、资源 ID 和观察窗口只作为 Mock MCP 寻址信息进入 Planner 的不可信 user 消息。
+runner 不得把 `required_tools`、允许根因、必要 Evidence source、故障路径、预期停止原因或风险标注
+渲染给 Planner/Auditor。增加或改变这段路由 envelope 若影响 system/user 边界，必须同步 Prompt 回归
+测试；当前它没有改变 `planner-react:v4` 或 `auditor-report:v2` 静态模板，因此 Prompt ID 不提升。
+
+模型调用观测契约为 `model-call-metric:v1`。每个 Provider 调用只允许记录双 Agent 角色、Provider /
+Prompt 契约、模型名、稳定状态、单调时钟耗时和供应商可选 token usage。`ContextVar` 记录器只在一次
+live CLI 作用域内绑定并在 `finally` 恢复；普通 API 请求不保存全局 `last_usage`。Prompt、user 消息、
+Schema 修复原始输出、refusal 文本、完整 SDK response、base URL、API key、数据库 URL、Thought 和
+traceback 均禁止进入指标。usage 缺失必须显式计数，不能写成零 token。
+
+真实模型报告必须记录 code revision、模型、Planner/Auditor Prompt、Embedding、Golden 契约、案例
+顺序、每次调用状态/耗时/token 和完整 Golden 评分。三案例 smoke 只证明接线与代表安全边界，不能
+外推为 28 条成绩；没有固定条件下的真实运行文件时，文档必须明确写“尚未发布测量成绩”，不得引用
+MockTransport 的合成 token 或确定性 runner 满分。

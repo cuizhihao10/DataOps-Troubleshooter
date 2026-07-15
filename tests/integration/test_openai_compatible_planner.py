@@ -35,6 +35,13 @@ from app.domain.models import AgentState, Component
 from app.domain.planner import PlannerStatus
 from app.mcp.client import StdioMcpClient
 from app.mcp.executor import McpToolExecutor
+from app.observability import (
+    InMemoryModelCallRecorder,
+    ModelCallRole,
+    ModelCallStatus,
+    bind_model_call_recorder,
+    reset_model_call_recorder,
+)
 from app.orchestration import BoundedReactLoop, ReactLoopConfig, ReactRunRequest
 
 
@@ -167,7 +174,13 @@ async def test_official_sdk_sends_strict_pydantic_schema_without_api_tools() -> 
         ChatMessage(role=ChatRole.USER, content="Use the supplied synthetic context only."),
     )
 
-    result = await provider.complete(messages)
+    recorder = InMemoryModelCallRecorder()
+    token = bind_model_call_recorder(recorder)
+    try:
+        result = await provider.complete(messages)
+    finally:
+        # 恢复 ContextVar，保证同一 pytest 进程中的后续 Provider 测试不会写入本例记录器。
+        reset_model_call_recorder(token)
 
     assert result.status is PlannerStatus.FINISH
     assert len(captured) == 1
@@ -186,6 +199,12 @@ async def test_official_sdk_sends_strict_pydantic_schema_without_api_tools() -> 
     }
     assert "tools" not in body
     assert "tool_choice" not in body
+    metrics = recorder.snapshot()
+    assert len(metrics) == 1
+    assert metrics[0].role is ModelCallRole.PLANNER
+    assert metrics[0].status is ModelCallStatus.SUCCEEDED
+    assert metrics[0].token_usage is not None
+    assert metrics[0].token_usage.total_tokens == 15
     await client.close()
 
 

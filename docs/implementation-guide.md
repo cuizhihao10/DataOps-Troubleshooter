@@ -1261,6 +1261,84 @@ $env:DATAOPS_TEST_DATABASE_URL='postgresql+asyncpg://...'
 python -m pytest -m postgres
 ```
 
+### 16.5 真实模型 Golden 冒烟评测与安全调用遥测
+
+确定性 Golden runner 的职责是验证数据集、评分器和安全门禁，不是测量 Planner/Auditor 模型质量。
+为了让真实模型可以复用完全相同的评分逻辑，`app/evaluation/live_golden.py` 实现独立
+`live-golden-eval:v1`：它进入 FastAPI lifespan，取得生产 `DiagnosisApplicationRuntime` 与已验证
+Fixture registry，为每条案例创建独立 PostgreSQL session，再顺序运行 GraphRAG、双 Agent、真实
+stdio MCP、Auditor 和 memory staging。它没有加入默认 `portfolio-eval-manifest:v22`，因为离线 CI
+没有密钥时应明确不运行，而不是让完整 Portfolio 永久 blocked 或偷偷换回确定性替身。
+
+v1 默认固定三条低成本代表案例：LTS 参数错误单组件、订单水位线时区错配三组件链路，以及 BDS 三个
+成功响应事实冲突。这个选择同时覆盖直接根因、跨层传播和“必须克制下结论”的安全边界，但分母只有
+3，不能外推为 28 条真实模型成绩。显式 `--case-id` 运行其他子集时 scope 为 custom；未来要发布
+完整 28 条固定模型快照，应升级运行契约并记录全类别分母，而不是继续沿用 smoke 标签。
+
+Live runner 必须解决一个只存在于 Mock 环境的路由问题：MCP 按 `scenario_id + tool_name + resource_id`
+精确查找 Fixture，而普通用户问题不一定包含所有机器资源 ID。`build_live_golden_message()` 因此只从
+Scenario 读取 scenario ID、资源 ID、时间窗口和组件，并把它们作为明确标记的合成路由元数据追加到
+不可信 user 消息。它刻意不读取或渲染 Golden 的 `required_tools`、allowed roots、required evidence
+sources、fault paths、stop reasons 和 risk answer。测试逐一搜索这些字段，保证模型必须通过 Action /
+Observation 得到事实，不能从评测答案抄写报告。
+
+模型调用可观测性位于 `app/observability/model_calls.py`，核心不是全局日志，而是以下作用域：
+
+```text
+CLI creates InMemoryModelCallRecorder
+  -> ContextVar binds recorder to current asyncio task
+  -> Planner/Auditor Provider starts ModelCallMeasurement
+  -> official SDK parse returns or raises a stable domain branch
+  -> measurement records role/version/status/duration/optional usage
+  -> CLI finally resets the ContextVar token
+  -> live-golden-eval:v1 aggregates calls and existing Golden report
+```
+
+选择 `ContextVar` 而不是在 Provider 保存 `last_usage`，是因为 Planner/Auditor 实例会被 FastAPI 并发
+请求复用：共享最后值可能把 A 请求 token 记到 B 请求。Measurement 在请求开始时捕获当前 recorder，
+使用 `perf_counter()` 单调计时，并用 `_finished` 阻止同一调用被成功与异常分支重复记录。没有绑定时
+`finish()` 只关闭本次测量状态，不追加任何列表，所以普通 API 请求不会造成无界内存增长。
+
+`model-call-metric:v1` 的 Pydantic Schema 没有文本载荷字段，只包含 Planner/Auditor 角色、Provider /
+Prompt 契约、模型名、成功/结构失败/拒绝/超时/连接/HTTP 状态、耗时和可选 token。usage 只通过属性
+读取 prompt/completion/total 三个整数，不序列化完整 SDK response；兼容端点漏报 usage 时单独增加
+`unreported_usage_call_count`，不能把未知成本写成零。Prompt、修复前原始输出、refusal 正文、base URL、
+API key、Thought 和 traceback 都不会进入 recorder 或实测报告。
+
+命令在任何付费调用前检查 `DATAOPS_CHAT_PROVIDER`、本地 SecretStr key 和数据库 URL，code revision
+必须显式传入：
+
+```powershell
+$env:DATAOPS_DATABASE_URL='postgresql+asyncpg://...'
+$env:DATAOPS_CHAT_PROVIDER='openai-compatible'
+$env:DATAOPS_CHAT_API_KEY='仅在本机环境设置'
+.venv\Scripts\python -m app.evaluation.live_golden `
+  --code-revision '<git commit>' `
+  --output 'live-golden-smoke.json'
+```
+
+当前仓库只完成可执行基础和 MockTransport/路由隔离测试，没有保存真实模型密钥，也没有发布测量
+数字。`docs/live-golden-eval-results.md` 明确记录这一状态；只有上述命令在固定模型、Prompt、数据和
+代码版本下成功生成 `metric_kind=measured` 报告后，才能新增真实成绩，不得用 15-token 合成 SDK
+响应或确定性 Golden 满分填表。
+
+### 16.6 必需单页 Demo 的实现顺序
+
+产品 M4 的单页前端仍是完成定义的一部分。当前资源 API 的 POST message 在请求内同步完成，而下一
+切片要增加可靠 PostgreSQL Worker、queued/running/cancelled 状态和轮询语义；若现在把 UI 绑定到
+“POST 返回 completed”，Worker 完成后会立即重写提交、错误和恢复流程。因此先稳定异步资源契约，
+随后连续实现前端，不把前端从范围中删除。
+
+已固定的实现选择是由 FastAPI 同容器静态托管原生 HTML/CSS/模块 JavaScript：它复用现有结构化 API，
+避免为单页演示引入 Node 服务、CORS 和重型状态库。页面必须展示健康状态、session/input、run 轮询、
+Action/Observation 公开时间线、Evidence、GraphRAG 路径、已审计报告、风险、不确定性和 memory
+confirm/reject；不得展示 Thought、Prompt、Provider 响应或凭据。所有 JavaScript callable 也必须有
+详细 JSDoc，关键轮询/AbortController/事件去重步骤解释设计原因与失败语义。
+
+完整信息架构、状态机、安全边界、响应式/可访问性和两步验收条件见
+`docs/frontend-design.md`。在静态托管、前端测试、浏览器实测、Docker 验证和三组件截图全部完成前，
+README 必须继续标明“单页前端尚未完成”。
+
 ## 17. 配置与生成文件说明
 
 | 文件 | 为什么不逐行注释 | 如何理解和验证 |
@@ -1292,6 +1370,7 @@ python -m pytest -m postgres
 - `auditor-impact-eval:v1` 三条语义缺陷案例、规则/Auditor 增量归因、危险残留与安全处置指标和真实报告 LangGraph 实测。
 - `golden-case:v7` Schema/位点/倾斜/参数/限流/授权/水位线反证、补参/降级/跨组件门禁、记忆与冲突标注，以及 `golden-diagnosis-eval:v21` 二十八条案例评测。
 - `portfolio-eval-manifest:v22` 五层受限 pytest 入口、v1–v21 兼容读取、指标发布门禁，以及 `portfolio-eval-run:v22` 单命令 JSON 汇总。
+- `live-golden-eval:v1` 生产路径三案例真实模型入口、Golden 答案隔离、ContextVar 安全遥测和 measured-only 报告契约。
 - `audited-diagnosis-workflow:v2` 按需召回、两阶段案例解释、ReAct、Auditor 和审计后 staging 顶层闭环。
 - `diagnosis-resources:v2` session/message/run/event PostgreSQL 资源 API、完整相似案例结果和安全失败事件。
 - `session-checkpoint:v1` 同 session 成功快照、追问恢复、版本门禁、失败保护和跨 run Action 去重。
@@ -1302,3 +1381,4 @@ python -m pytest -m postgres
 - LangGraph 逐节点中断恢复、可靠后台 run worker/取消/重试，以及超长会话滚动摘要归档。
 - 模型级复杂历史语义对比。
 - 删除案例 API、更大规模长期记忆召回评测集，以及固定真实模型/Prompt 的 28 条端到端评测快照。
+- 产品 M4 必需的单页前端 Demo；将在可靠后台 Worker 与轮询资源契约稳定后按 `docs/frontend-design.md` 连续实现。

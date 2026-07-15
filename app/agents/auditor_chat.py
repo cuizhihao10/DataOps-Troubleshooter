@@ -24,7 +24,9 @@ from app.agents.auditor import (
     AuditorRefusalError,
 )
 from app.agents.chat import ChatMessage, validation_failure_details
+from app.agents.prompts import AUDITOR_PROMPT_ID
 from app.domain.models import AuditResult
+from app.observability import ModelCallMeasurement, ModelCallRole, ModelCallStatus
 
 AUDITOR_PROVIDER_CONTRACT_ID = "openai-compatible-auditor:v1"
 
@@ -93,6 +95,12 @@ class OpenAICompatibleAuditorProvider:
 
         if len(messages) < 2:
             raise ValueError("Auditor completion requires at least system and user messages")
+        measurement = ModelCallMeasurement(
+            role=ModelCallRole.AUDITOR,
+            provider_contract_id=AUDITOR_PROVIDER_CONTRACT_ID,
+            model=self.model,
+            prompt_contract_id=AUDITOR_PROMPT_ID,
+        )
         try:
             # parse 同时提交 strict Schema 和解析响应，保证请求与领域类型使用同一事实来源。
             completion = await self._client.chat.completions.parse(
@@ -101,31 +109,38 @@ class OpenAICompatibleAuditorProvider:
                 response_format=AuditResult,
             )
         except ValidationError as exc:
+            # 记录器只知道结构失败分类，既不接收原始输出，也不参与下一次修复 Prompt。
+            measurement.finish(ModelCallStatus.OUTPUT_INVALID)
             raw_output, summary = validation_failure_details(exc)
             raise AuditorOutputValidationError(
                 validation_summary=summary,
                 raw_output=raw_output,
             ) from exc
         except ContentFilterFinishReasonError as exc:
+            measurement.finish(ModelCallStatus.REFUSED)
             raise AuditorRefusalError("provider content filter stopped the response") from exc
         except LengthFinishReasonError as exc:
+            measurement.finish(ModelCallStatus.OUTPUT_INVALID)
             raise AuditorOutputValidationError(
                 validation_summary="model output ended because the length limit was reached",
                 raw_output="",
             ) from exc
         except APITimeoutError as exc:
+            measurement.finish(ModelCallStatus.TIMEOUT)
             raise AuditorProviderError(
                 error_code="timeout",
                 public_summary="Auditor 模型请求超过配置超时。",
                 retryable=True,
             ) from exc
         except APIConnectionError as exc:
+            measurement.finish(ModelCallStatus.CONNECTION_ERROR)
             raise AuditorProviderError(
                 error_code="connection_error",
                 public_summary="无法连接 OpenAI-compatible Auditor 服务。",
                 retryable=True,
             ) from exc
         except APIStatusError as exc:
+            measurement.finish(ModelCallStatus.HTTP_ERROR)
             retryable = exc.status_code == 429 or exc.status_code >= 500
             error_code = (
                 "rate_limited"
@@ -142,18 +157,23 @@ class OpenAICompatibleAuditorProvider:
 
         # refusal 是安全决策而非 Schema 错误，必须先于 parsed 检查并直接停止审计。
         if not completion.choices:
+            measurement.finish(ModelCallStatus.OUTPUT_INVALID, usage=completion.usage)
             raise AuditorOutputValidationError(
                 validation_summary="response contained no choices",
                 raw_output="",
             )
         message = completion.choices[0].message
         if message.refusal:
+            measurement.finish(ModelCallStatus.REFUSED, usage=completion.usage)
             raise AuditorRefusalError(message.refusal)
         if message.parsed is None:
+            measurement.finish(ModelCallStatus.OUTPUT_INVALID, usage=completion.usage)
             raise AuditorOutputValidationError(
                 validation_summary="response contained no parsed AuditResult",
                 raw_output=message.content or "",
             )
+        # 完整响应在 Provider 返回前丢弃，评测工件只得到版本、耗时、状态和 token 数。
+        measurement.finish(ModelCallStatus.SUCCEEDED, usage=completion.usage)
         return message.parsed
 
     async def aclose(self) -> None:

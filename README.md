@@ -31,11 +31,12 @@
 - `golden-case:v7` 同时覆盖安全降级、反证、Schema、检查点、倾斜、限流、授权和水位线时区传播；当前 28 条案例使用 18 个脱敏 Fixture，类别配额完整达到 8/10/4/3/3。
 - `golden-diagnosis-eval:v21` 要求三层 900 条缺口闭合，并用 `WATERMARK_TIMEZONE_MISMATCH` 与一致性抽检识别“同步完成但静默漏数”；当前 28/28 确定性脚本满分不冒充真实 LLM 成绩。
 - `portfolio-eval-run:v22` 通过 `python -m app.evaluation` 一次执行五层、19 个独立指标。
+- `live-golden-eval:v1` 提供显式 opt-in 的真实模型三案例冒烟评测，经生产 PostgreSQL GraphRAG、双 Agent、LangGraph 与 stdio MCP 执行，并只记录版本、状态、耗时和 token，不记录 Prompt、原始响应或 Thought。
 - `audited-diagnosis-workflow:v2` 按 history trigger 召回 confirmed 案例，在 ReAct 前后两次确定性比较同批候选，再串联独立 Auditor 和审计后 memory staging。
 - `diagnosis-resources:v2` 提供 session/message/run/event PostgreSQL 资源；最终报告可直接展示相似度、共同点、差异点、参考方案、避坑提示与引用。
 - `session-checkpoint:v1` 在成功 run 的同一事务保存最新公开状态；同 session 追问恢复报告、证据、路径和工具事件，失败 run 不覆盖旧快照，跨 run 同参 Action 仍会被拦截。
 
-当前已完成全部 MCP 工具、GraphRAG 检索闭环、五项固定 runtime capabilities、Planner ReAct、独立 Auditor、长期案例记忆、五层小样本统一评测运行器、顶层诊断工作流、资源 API、同 session checkpoint 追问恢复和 28 条 Golden Case 数据集。默认模型 Provider 仍为 disabled；Golden 诊断层是确定性脚本回归基线，自动化测试不宣称已经调用付费模型或取得模型质量成绩。可靠后台 worker、LangGraph 逐节点中断恢复和模型级复杂语义对比仍待后续实现。
+当前已完成全部 MCP 工具、GraphRAG 检索闭环、五项固定 runtime capabilities、Planner ReAct、独立 Auditor、长期案例记忆、五层小样本统一评测运行器、顶层诊断工作流、资源 API、同 session checkpoint 追问恢复和 28 条 Golden Case 数据集。默认模型 Provider 仍为 disabled；Golden 诊断层是确定性脚本回归基线，自动化测试不宣称已经调用付费模型或取得模型质量成绩。真实模型评测入口已经完成，但仓库不保存密钥，也尚未发布真实模型测量快照；可靠后台 worker、LangGraph 逐节点中断恢复、模型级 Embedding/复杂语义对比和单页前端仍待后续实现。前端不是可选装饰，详细信息架构、状态机和验收条件见 [`docs/frontend-design.md`](docs/frontend-design.md)。
 
 ## 本地启动
 
@@ -56,6 +57,20 @@ $env:DATAOPS_TEST_DATABASE_URL='postgresql+asyncpg://...'
 
 无数据库快速反馈使用 `.venv\Scripts\python -m app.evaluation --skip-postgres`；其 JSON 报告会明确
 `complete=false`，不能作为完整评测成绩。
+
+真实模型 Golden 冒烟评测是单独的 opt-in 命令，不加入默认离线 Portfolio。先通过本地环境变量提供
+PostgreSQL、OpenAI-compatible Provider 和本地密钥，再传入可追溯代码版本：
+
+```powershell
+$env:DATAOPS_DATABASE_URL='postgresql+asyncpg://...'
+$env:DATAOPS_CHAT_PROVIDER='openai-compatible'
+$env:DATAOPS_CHAT_API_KEY='仅保存在本机环境中的密钥'
+.venv\Scripts\python -m app.evaluation.live_golden --code-revision '<git commit>' --output live-golden.json
+```
+
+默认只运行单组件、三组件链路、成功响应证据冲突三个代表案例。命令只有真正完成运行时才生成
+`metric_kind=measured` 报告；没有密钥或数据库会在模型调用前失败。当前仓库没有伪造或占位的真实
+模型分数，测量口径见 [`docs/live-golden-eval-results.md`](docs/live-golden-eval-results.md)。
 
 ## Docker 启动
 

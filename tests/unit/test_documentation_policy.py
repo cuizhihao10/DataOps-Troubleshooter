@@ -29,6 +29,8 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/orchestration/auditor_evaluation.py"),
     Path("app/orchestration/history_evaluation.py"),
     Path("app/evaluation/portfolio.py"),
+    Path("app/evaluation/live_golden.py"),
+    Path("app/observability/model_calls.py"),
     Path("app/reporting/draft.py"),
     Path("app/reporting/policy.py"),
     Path("app/reporting/revision.py"),
@@ -69,6 +71,8 @@ REQUIRED_GUIDE_SECTIONS = (
     "端到端诊断编排",
     "资源化诊断 API",
     "测试分层",
+    "真实模型 Golden 冒烟评测",
+    "必需单页 Demo",
 )
 
 
@@ -173,6 +177,10 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
     assert "GoldenEvidenceConflictExpectation" in guide
     assert "统一作品集评测 manifest 与单命令运行器" in guide
     assert "portfolio-eval-run:v22" in guide
+    assert "live-golden-eval:v1" in guide
+    assert "model-call-metric:v1" in guide
+    assert "ContextVar" in guide
+    assert "docs/frontend-design.md" in guide
     assert "graph-seed:v11" in guide
     assert "54 节点/71 边" in guide
     assert "authorization_value_exposed=false" in guide
@@ -180,6 +188,48 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
     assert "尚未完成" in guide
     assert "代码注释的强制粒度" in guide
     assert "callable 级 docstring" in guide
+
+
+def test_live_golden_status_document_separates_runnable_contract_from_measurement() -> None:
+    """确认真实模型评测文档明确无当前成绩、答案隔离和安全 token 遥测边界。
+
+    该门禁防止作品集把可执行 CLI 或 MockTransport 测试包装成真实模型实测；同时要求默认三案例、
+    生产运行路径、measured-only、usage 缺失和不保存 Prompt/Thought 的约束保持可见。
+    """
+
+    report = Path("docs/live-golden-eval-results.md").read_text(encoding="utf-8")
+
+    assert "live-golden-eval:v1" in report
+    assert "没有发布真实模型测量成绩" in report
+    assert "golden_lts_invalid_partition_parameter_single" in report
+    assert "golden_cross_lts_bds_flashsync_watermark_timezone_mismatch" in report
+    assert "golden_bds_conflicting_partition_evidence" in report
+    assert "不读取 Fixture 响应拼装答案" in report
+    assert "ContextVar" in report
+    assert "unreported_usage_call_count" in report
+    assert "Prompt、模型原始响应或 Thought" in report
+    assert "不能把三案例 smoke 外推到 28 条" in report
+
+
+def test_frontend_design_is_mandatory_and_defines_safe_async_demo_acceptance() -> None:
+    """确认前端没有从范围中遗失，并固定异步状态、证据展示与安全验收边界。
+
+    文档必须把单页 Demo 标为必需但尚未完成，说明为何等待 Worker 契约，并锁定 run/event 轮询、
+    Evidence/GraphRAG/报告/记忆展示、JSDoc、XSS 和不展示 Thought 的完成定义。
+    """
+
+    design = Path("docs/frontend-design.md").read_text(encoding="utf-8")
+
+    assert "必需交付项" in design
+    assert "当前仓库尚未包含前端实现" in design
+    assert "queued/running/cancelled" in design
+    assert "FastAPI 静态托管" in design
+    assert "Action/Observation 时间线" in design
+    assert "GraphRAG 路径" in design
+    assert "confirm/reject" in design
+    assert "详细 JSDoc" in design
+    assert "不用不可信数据赋值 `innerHTML`" in design
+    assert "不提供 Thought 展开按钮" in design
 
 
 def test_memory_recall_measured_report_documents_scope_and_no_generalized_claim() -> None:
