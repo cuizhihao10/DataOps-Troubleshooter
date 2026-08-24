@@ -1,0 +1,55 @@
+{
+  "library_version": "document-seed:v1",
+  "documents": [
+    {
+      "doc_id": "runbook_flashsync_primary_key_conflict",
+      "doc_type": "runbook",
+      "title": "FlashSync 同步任务主键冲突处置手册",
+      "components": ["flashsync"],
+      "source_id": "synthetic_runbook_flashsync_pk_v1",
+      "revision": "r3",
+      "reliability": 0.95,
+      "path": "runbook_flashsync_primary_key_conflict.md"
+    },
+    {
+      "doc_id": "sop_lts_parameter_validation",
+      "doc_type": "sop",
+      "title": "LTS 调度参数校验失败标准处置流程",
+      "components": ["lts"],
+      "source_id": "synthetic_sop_lts_parameter_v1",
+      "revision": "r2",
+      "reliability": 0.9,
+      "path": "sop_lts_parameter_validation.md"
+    },
+    {
+      "doc_id": "runbook_bds_data_skew",
+      "doc_type": "runbook",
+      "title": "BDS 计算任务长尾与数据倾斜处置手册",
+      "components": ["bds"],
+      "source_id": "synthetic_runbook_bds_skew_v1",
+      "revision": "r4",
+      "reliability": 0.9,
+      "path": "runbook_bds_data_skew.md"
+    },
+    {
+      "doc_id": "postmortem_flashsync_checkpoint_regression",
+      "doc_type": "postmortem",
+      "title": "FlashSync checkpoint 回退导致同步延迟的复盘",
+      "components": ["flashsync", "bds"],
+      "source_id": "synthetic_postmortem_flashsync_checkpoint_v1",
+      "revision": "r1",
+      "reliability": 0.85,
+      "path": "postmortem_flashsync_checkpoint_regression.md"
+    },
+    {
+      "doc_id": "faq_cross_component_triage",
+      "doc_type": "faq",
+      "title": "LTS / BDS / FlashSync 跨组件排障常见问题",
+      "components": ["lts", "bds", "flashsync"],
+      "source_id": "synthetic_faq_cross_component_v1",
+      "revision": "r2",
+      "reliability": 0.7,
+      "path": "faq_cross_component_triage.md"
+    }
+  ]
+}

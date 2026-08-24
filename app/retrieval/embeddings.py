@@ -1,8 +1,9 @@
-"""可替换 Embedding Provider 契约与离线确定性基线实现。
+"""可替换 Embedding Provider 契约、离线确定性基线与 OpenAI-compatible 真实模型实现。
 
-在线检索和知识入库只依赖 `EmbeddingProvider` 协议，不依赖具体模型 SDK。默认实现使用稳定
+在线检索和知识入库只依赖 `EmbeddingProvider` 协议，不依赖具体模型 SDK。离线实现使用稳定
 feature hashing 将中英文词元和字符片段映射为归一化向量，使测试、Docker 演示和离线学习环境
-无需外部凭据即可真实执行 pgvector 查询；它是工程基线而非神经语义模型，后续可用相同接口替换。
+无需外部凭据即可真实执行 pgvector 查询；它是工程基线而非神经语义模型。生产默认改用远程
+`bge-m3:v1`，它提供真正的多语言语义空间；两者通过版本化 provider_id 严格隔离，绝不混算。
 """
 
 from __future__ import annotations
@@ -14,10 +15,27 @@ from hashlib import sha256
 from math import isfinite, sqrt
 from typing import Protocol
 
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
+from pydantic import SecretStr
+
+from app.core.http_identity import outbound_default_headers
+from app.observability.tracing import TraceSpanKind, trace_span
+from app.retrieval.documents import DocumentLibrary, document_chunk_text
 from app.retrieval.models import KnowledgeNode, KnowledgeSeedBundle
 
 DETERMINISTIC_HASH_PROVIDER_ID = "deterministic-hash:v1"
+BGE_M3_PROVIDER_ID = "bge-m3:v1"
+BGE_M3_DIMENSIONS = 1024
 _TOKEN_PATTERN = re.compile(r"[a-z0-9_]+|[\u3400-\u4dbf\u4e00-\u9fff]+")
+
+
+class EmbeddingProviderError(RuntimeError):
+    """把远程 embedding 服务的传输、状态码和契约失败收敛为单一领域异常。
+
+    调用方（种子入库、检索服务、文档 ingestion）只需捕获这一个类型即可决定放弃整批而不是写入
+    半个向量空间；异常消息只保留稳定分类和 HTTP 状态，不包含 API key、完整响应体或用户输入
+    文本，因此失败日志可以安全地进入作品集演示环境。
+    """
 
 
 class EmbeddingProvider(Protocol):
@@ -130,15 +148,195 @@ class DeterministicHashEmbeddingProvider:
         return vectors
 
 
-def create_embedding_provider(provider_id: str, *, dimensions: int) -> EmbeddingProvider:
+class OpenAICompatibleEmbeddingProvider:
+    """通过 OpenAI-compatible `/embeddings` 端点调用真实多语言 embedding 模型。
+
+    默认面向硅基流动托管的 `BAAI/bge-m3`：它原生支持中英混排的运维术语，因此"任务卡住"与
+    "作业长时间无响应"能获得真实语义相似度，而 feature hashing 基线做不到这一点。实现按固定
+    批量顺序请求、严格校验返回条数与维度，并把 SDK 异常收敛为 `EmbeddingProviderError`，
+    保证一批文本要么全部拿到同一空间的向量、要么整体失败，不产生半更新的知识库。
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: SecretStr,
+        base_url: str,
+        model: str,
+        dimensions: int,
+        provider_id: str = BGE_M3_PROVIDER_ID,
+        timeout_seconds: float = 30,
+        batch_size: int = 32,
+        client: AsyncOpenAI | None = None,
+    ) -> None:
+        """配置凭据、兼容端点、模型、期望维度与批量大小，并可注入 SDK 客户端供测试使用。
+
+        SecretStr 只在构造 SDK 时解包，实例不保存明文副本。`max_retries=0` 关闭 SDK 隐式重试，
+        使调用方看到的失败次数与真实请求次数一致，便于评测统计成本；非法空模型、空 URL、非正
+        超时或越界维度在任何网络请求前显式失败，避免部署者以为已启用语义检索。
+        """
+
+        if not base_url.strip():
+            raise ValueError("embedding base_url must not be empty")
+        if not model.strip():
+            raise ValueError("embedding model must not be empty")
+        if timeout_seconds <= 0:
+            raise ValueError("embedding timeout must be positive")
+        if not 8 <= dimensions <= 4096:
+            raise ValueError("embedding dimensions must be between 8 and 4096")
+        if not 1 <= batch_size <= 256:
+            raise ValueError("embedding batch_size must be between 1 and 256")
+        self._provider_id = provider_id
+        self._model = model
+        self._dimensions = dimensions
+        self._batch_size = batch_size
+        self._owns_client = client is None
+        self._client = client or AsyncOpenAI(
+            api_key=api_key.get_secret_value(),
+            base_url=base_url,
+            timeout=timeout_seconds,
+            max_retries=0,
+            # 与 Planner/Auditor 共用出站身份：避免不同 Provider 在网关侧表现为不同客户端。
+            default_headers=outbound_default_headers(),
+        )
+
+    @property
+    def provider_id(self) -> str:
+        """返回带版本的远程 Provider ID，使数据库能把模型向量与离线基线彻底分开。
+
+        ID 描述模型语义空间而非维度，维度单独记录在 `embedding_dimensions`；更换模型或其权重
+        版本时必须提升该 ID，否则旧向量会与新查询在同名空间里被 pgvector 直接比较并给出无意义
+        的相似度排序。
+        """
+
+        return self._provider_id
+
+    @property
+    def dimensions(self) -> int:
+        """返回配置的期望维度，所有批次都会按该长度严格校验远程返回结果。
+
+        bge-m3 固定输出 1024 维；把期望值放在配置里而不是硬编码，可以在换模型时通过启动校验
+        立刻发现维度与数据库既有向量不一致，而不是等到 cosine 查询静默返回错误排序。
+        """
+
+        return self._dimensions
+
+    async def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+        """按输入顺序分批请求远程模型，并返回数量、维度、数值均已校验的向量列表。
+
+        空批次合法返回空列表；任一文本为空或任一批次失败时整体抛出 `EmbeddingProviderError`，
+        不返回部分结果。远程返回按 `index` 重排而非依赖响应顺序，因为 OpenAI-compatible 服务
+        允许乱序返回；零向量同样被拒绝，因为 cosine 距离无法为它给出有意义的方向。
+        """
+
+        if not texts:
+            return []
+        for text in texts:
+            if not text.strip():
+                raise ValueError("embedding text must not be blank")
+
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), self._batch_size):
+            batch = list(texts[start : start + self._batch_size])
+            vectors.extend(await self._embed_batch(batch))
+        return vectors
+
+    async def _embed_batch(self, batch: list[str]) -> list[list[float]]:
+        """请求单个批次并把 SDK 失败、条数漂移和非法数值统一转换为领域异常。
+
+        错误分类保留 timeout/connection/HTTP 三类以便上层解释可靠性，但不携带响应正文；成功后
+        逐项校验维度、有限性和非零，确保数据库约束 `vector_dims(embedding) = embedding_dimensions`
+        不会在写入时才失败，也不会有全零向量污染语义排序。
+        """
+
+        try:
+            # span 只覆盖一个批次：批次大小由配置决定，按批记录才能看出是网络延迟还是批数过多。
+            with trace_span(
+                TraceSpanKind.MODEL_CALL,
+                "embedding.embed_batch",
+                model=self._model,
+                batch_size=len(batch),
+            ):
+                response = await self._client.embeddings.create(
+                    model=self._model,
+                    input=batch,
+                    encoding_format="float",
+                )
+        except APITimeoutError as exc:
+            raise EmbeddingProviderError("embedding request timed out") from exc
+        except APIConnectionError as exc:
+            raise EmbeddingProviderError("embedding endpoint is unreachable") from exc
+        except APIStatusError as exc:
+            raise EmbeddingProviderError(
+                f"embedding endpoint returned HTTP {exc.status_code}"
+            ) from exc
+
+        if len(response.data) != len(batch):
+            raise EmbeddingProviderError("embedding provider returned a different batch size")
+        # 兼容端点允许乱序返回，必须按 index 重排，否则节点会拿到别人的向量且无从察觉。
+        ordered = sorted(response.data, key=lambda item: item.index)
+        if [item.index for item in ordered] != list(range(len(batch))):
+            raise EmbeddingProviderError("embedding provider returned non-contiguous indices")
+
+        vectors: list[list[float]] = []
+        for item in ordered:
+            vector = [float(value) for value in item.embedding]
+            if len(vector) != self._dimensions:
+                raise EmbeddingProviderError(
+                    f"embedding provider returned {len(vector)} dimensions, "
+                    f"expected {self._dimensions}"
+                )
+            if not all(isfinite(value) for value in vector):
+                raise EmbeddingProviderError("embedding provider returned non-finite values")
+            if not any(value != 0 for value in vector):
+                raise EmbeddingProviderError("embedding provider returned an all-zero vector")
+            vectors.append(vector)
+        return vectors
+
+    async def aclose(self) -> None:
+        """关闭由 Provider 自行创建的 AsyncOpenAI/httpx 连接池，注入客户端交由调用方管理。
+
+        FastAPI lifespan 退出和评测 CLI 结束时应各调用一次；重复调用官方 close 是安全的，但保持
+        单次调用让连接池所有权保持清晰，避免测试之间共享已关闭的传输层。
+        """
+
+        if self._owns_client:
+            await self._client.close()
+
+
+def create_embedding_provider(
+    provider_id: str,
+    *,
+    dimensions: int,
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key: SecretStr | None = None,
+    timeout_seconds: float = 30,
+    batch_size: int = 32,
+) -> EmbeddingProvider:
     """根据集中配置创建一个实现统一协议的 Embedding Provider。
 
-    工厂目前只批准离线确定性版本，未知 ID 立即失败而不是静默回退，防止部署者以为正在使用外部
-    语义模型。未来 Provider 只需新增实现和显式注册，不应让仓储或服务判断供应商名称。
+    工厂只批准显式注册的两种实现，未知 ID 立即失败而不是静默回退，防止部署者以为正在使用外部
+    语义模型。远程分支强制要求 SecretStr key 与 base_url，因此缺凭据时会在启动审计阶段暴露，
+    而不是等到第一次检索才返回空结果。未来新增 Provider 只需注册，仓储与混合评分无需改动。
     """
 
     if provider_id == DETERMINISTIC_HASH_PROVIDER_ID:
         return DeterministicHashEmbeddingProvider(dimensions=dimensions)
+    if provider_id == BGE_M3_PROVIDER_ID:
+        if api_key is None:
+            raise ValueError(f"embedding provider {provider_id} requires an API key")
+        if base_url is None:
+            raise ValueError(f"embedding provider {provider_id} requires a base URL")
+        return OpenAICompatibleEmbeddingProvider(
+            api_key=api_key,
+            base_url=base_url,
+            model=model or "BAAI/bge-m3",
+            dimensions=dimensions,
+            provider_id=provider_id,
+            timeout_seconds=timeout_seconds,
+            batch_size=batch_size,
+        )
     raise ValueError(f"unsupported embedding provider: {provider_id}")
 
 
@@ -153,7 +351,7 @@ async def embed_knowledge_bundle(
     原样，从而让节点向量更新和图结构写入可在同一数据库事务提交。
     """
 
-    texts = [_knowledge_node_text(node) for node in bundle.nodes]
+    texts = [knowledge_node_text(node) for node in bundle.nodes]
     vectors = await provider.embed_texts(texts)
     if len(vectors) != len(bundle.nodes):
         raise ValueError("embedding provider returned a different number of vectors")
@@ -177,7 +375,50 @@ async def embed_knowledge_bundle(
     )
 
 
-def _knowledge_node_text(node: KnowledgeNode) -> str:
+async def embed_document_library(
+    library: DocumentLibrary,
+    provider: EmbeddingProvider,
+) -> DocumentLibrary:
+    """批量嵌入全部文档切片并返回带 Provider 溯源信息的新文档库，不修改输入对象。
+
+    整库一次性嵌入而不是逐份文档，是为了让"要么全部切片进入同一向量空间、要么整体失败"这一原子
+    语义与单次数据库事务对齐；返回向量数量与切片总数不符即视为 Provider 契约漂移并立即中止，
+    因为错位的向量会让每个切片静默拿到别人的语义坐标，而检索结果看不出任何异常。
+    """
+
+    flattened = [
+        (document, chunk) for document in library.documents for chunk in document.chunks
+    ]
+    texts = [document_chunk_text(document, chunk) for document, chunk in flattened]
+    vectors = await provider.embed_texts(texts)
+    if len(vectors) != len(flattened):
+        raise ValueError("embedding provider returned a different number of vectors")
+
+    # 按切片 ID 建索引再回填，避免依赖"文档顺序 × 切片顺序"这一隐式假设重新展开一次嵌套循环。
+    vectors_by_chunk_id = {
+        chunk.chunk_id: vector for (_, chunk), vector in zip(flattened, vectors, strict=True)
+    }
+    embedded_documents: list[dict[str, object]] = []
+    for document in library.documents:
+        payload = document.model_dump()
+        chunks: list[dict[str, object]] = []
+        for chunk in document.chunks:
+            chunk_payload = chunk.model_dump()
+            chunk_payload.update(
+                embedding=vectors_by_chunk_id[chunk.chunk_id],
+                embedding_provider=provider.provider_id,
+                embedding_dimensions=provider.dimensions,
+            )
+            chunks.append(chunk_payload)
+        payload["chunks"] = chunks
+        embedded_documents.append(payload)
+
+    return DocumentLibrary.model_validate(
+        {**library.model_dump(), "documents": embedded_documents}
+    )
+
+
+def knowledge_node_text(node: KnowledgeNode) -> str:
     """按稳定字段顺序组合节点名称、别名和正文，作为 embedding 的可审计输入。
 
     source_span 通常与正文重复，故不再次加入以免重复内容获得不成比例权重；别名对组件缩写和英文

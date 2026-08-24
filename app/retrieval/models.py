@@ -12,8 +12,38 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-GRAPH_RETRIEVAL_CONTRACT_ID = "graphrag-retrieval:v2"
-GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID = "graphrag-evidence-bundle:v1"
+from app.retrieval.documents import BundledDocumentChunk
+from app.retrieval.scoring import (
+    RetrievalChannel,
+    default_final_score,
+    validate_rerank_consistency,
+)
+
+GRAPH_RETRIEVAL_CONTRACT_ID = "graphrag-retrieval:v3"
+GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID = "graphrag-evidence-bundle:v2"
+
+__all__ = [
+    "GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID",
+    "GRAPH_RETRIEVAL_CONTRACT_ID",
+    "BundledGraphPath",
+    "BundledKnowledgeNode",
+    "EvidenceBundleBudget",
+    "GraphEvidenceBundle",
+    "GraphPath",
+    "GraphRetrievalResult",
+    "HybridScoringWeights",
+    "HybridSeedMatch",
+    "KnowledgeEdge",
+    "KnowledgeNode",
+    "KnowledgeNodeType",
+    "KnowledgeRelationType",
+    "KnowledgeSeedBundle",
+    "LexicalSeedMatch",
+    "RetrievalChannel",
+    "RetrievalMode",
+    "ScoredGraphPath",
+    "VectorSeedMatch",
+]
 
 
 class KnowledgeNodeType(StrEnum):
@@ -48,17 +78,6 @@ class KnowledgeRelationType(StrEnum):
     CAUSED_BY = "CAUSED_BY"
     RESOLVED_BY = "RESOLVED_BY"
     SIMILAR_TO = "SIMILAR_TO"
-
-
-class RetrievalChannel(StrEnum):
-    """标记一个种子节点由全文、向量或两种检索通道中的哪些通道命中。
-
-    通道信息随结果返回，使 Planner、Auditor 和评测能够区分关键词命中与 embedding 相似度，
-    防止把融合后的单个分数误解为不可解释的模型判断；字符串枚举便于 API 稳定序列化。
-    """
-
-    LEXICAL = "lexical"
-    VECTOR = "vector"
 
 
 class RetrievalMode(StrEnum):
@@ -239,10 +258,12 @@ class VectorSeedMatch(BaseModel):
 
 
 class HybridSeedMatch(BaseModel):
-    """表示全文与向量候选按节点 ID 合并后的可解释种子评分。
+    """表示全文与向量候选按节点 ID 合并、并可选经 cross-encoder 重排后的可解释种子评分。
 
     模型保留每个评分分量、实际命中通道和组合分数，避免服务只返回一个无法复核的排序值。
     当前知识节点没有案例时间字段，因此 freshness 默认为零；后续案例记忆可在同一契约中补值。
+    `hybrid_score` 是五项加权的一阶段分数，`rerank_score` 是二阶段 cross-encoder 分数，
+    `final_score` 是两者的显式融合结果——三者分开保存，才能在评测里判断名次变化来自哪一阶段。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -254,6 +275,30 @@ class HybridSeedMatch(BaseModel):
     reliability_score: float = Field(ge=0, le=1)
     freshness_score: float = Field(default=0, ge=0, le=1)
     hybrid_score: float = Field(ge=0, le=1)
+    rerank_score: float | None = Field(default=None, ge=0, le=1)
+    final_score: float = Field(ge=0, le=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_final_score(cls, data: object) -> object:
+        """未显式给出 `final_score` 时让它等于 `hybrid_score`，表示本次没有跑第二阶段。
+
+        省略即"未重排"是唯一自洽的默认：一阶段结果的最终排序值本来就是 hybrid_score，如果要求
+        每个调用点重复写一次相同数字，只会制造两者不一致的机会。显式传入的值不会被覆盖。
+        """
+
+        return default_final_score(data)
+
+    @model_validator(mode="after")
+    def validate_rerank_consistency(self) -> HybridSeedMatch:
+        """禁止在没有 `rerank_score` 的情况下让 `final_score` 偏离 `hybrid_score`。
+
+        这条不变量防止排序值被静默调整却无从溯源：只要最终分与一阶段分不同，就必须同时存在一个
+        二阶段分数来解释差异，评测因此能把任何名次变化归因到召回或精排中确定的一个环节。
+        """
+
+        validate_rerank_consistency(self.hybrid_score, self.rerank_score, self.final_score)
+        return self
 
 
 class GraphPath(BaseModel):
@@ -274,10 +319,12 @@ class GraphPath(BaseModel):
 
 
 class ScoredGraphPath(GraphPath):
-    """在原始关系路径上附加种子来源与五项混合评分分量。
+    """在原始关系路径上附加种子来源、五项混合评分分量与继承的重排分数。
 
-    继承字段中的 `score` 仍表示边权乘积形成的路径相关性，`hybrid_score` 才是最终排序值；二者
-    分开保存让删边消融、评分调参与审计都能判断结果变化来自图结构还是种子召回。
+    继承字段中的 `score` 仍表示边权乘积形成的路径相关性，`final_score` 才是最终排序值；三层
+    分数分开保存让删边消融、评分调参与审计都能判断结果变化来自图结构、种子召回还是二阶段重排。
+    路径本身不单独送进 cross-encoder，`rerank_score` 由其种子节点继承，因为路径的相关性来源是
+    "这个种子值得展开"，重复对拼接文本打分只会增加成本而不增加信息。
     """
 
     seed_node_id: str = Field(min_length=3, max_length=100)
@@ -287,13 +334,39 @@ class ScoredGraphPath(GraphPath):
     reliability_score: float = Field(ge=0, le=1)
     freshness_score: float = Field(ge=0, le=1)
     hybrid_score: float = Field(ge=0, le=1)
+    rerank_score: float | None = Field(default=None, ge=0, le=1)
+    final_score: float = Field(ge=0, le=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_final_score(cls, data: object) -> object:
+        """未显式给出 `final_score` 时让它等于 `hybrid_score`，与种子匹配保持同一默认语义。
+
+        路径分数由 `score_graph_path` 计算，但消融测试和 Fixture 经常直接构造路径；共用同一默认
+        规则可避免两处出现不同的"未重排"表示方式，让排序断言在两种构造路径下完全一致。
+        """
+
+        return default_final_score(data)
+
+    @model_validator(mode="after")
+    def validate_rerank_consistency(self) -> ScoredGraphPath:
+        """禁止路径在没有继承 `rerank_score` 的情况下让 `final_score` 偏离 `hybrid_score`。
+
+        路径的最终排序决定哪些证据进入上下文预算，因此这条不变量比种子层更重要：任何"看起来更相关"
+        的重新排序都必须留下可核对的二阶段分数，而不能由某个中间步骤悄悄调整权重后无从追溯。
+        """
+
+        validate_rerank_consistency(self.hybrid_score, self.rerank_score, self.final_score)
+        return self
 
 
 class EvidenceBundleBudget(BaseModel):
-    """定义注入 Planner 上下文前必须同时满足的字节、节点和路径预算。
+    """定义注入 Planner 上下文前必须同时满足的字节、节点、路径和文档切片预算。
 
-    字节预算使用模型无关且可精确重放的 UTF-8 JSON 长度，节点/路径上限防止大量短记录绕过字节
+    字节预算使用模型无关且可精确重放的 UTF-8 JSON 长度，节点/路径/切片上限防止大量短记录绕过字节
     控制。该模型不可变并限制合理范围，调用方不能用零预算制造看似成功但完全无证据的 Bundle。
+    `max_documents` 与节点预算分开计数，因为文档切片正文通常远长于知识节点，共用一个上限会让
+    几条 Runbook 片段挤掉全部图证据，反而削弱"关系可解释"这一核心能力。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -301,6 +374,7 @@ class EvidenceBundleBudget(BaseModel):
     max_bytes: int = Field(default=6000, ge=256, le=100_000)
     max_nodes: int = Field(default=8, ge=1, le=50)
     max_paths: int = Field(default=4, ge=0, le=20)
+    max_documents: int = Field(default=3, ge=0, le=20)
 
 
 class BundledKnowledgeNode(BaseModel):
@@ -346,43 +420,52 @@ class BundledGraphPath(BaseModel):
 
 
 class GraphEvidenceBundle(BaseModel):
-    """封装预算化知识节点和图路径，以及所有因预算被省略的稳定 ID。
+    """封装预算化知识节点、图路径与文档切片，以及所有因预算被省略的稳定 ID。
 
-    `used_bytes` 只计算 selected_nodes/selected_paths 的规范 JSON 载荷，便于精确断言上下文主体
-    不超限；诊断元数据和 omitted IDs 不计入模型上下文预算。`truncated` 明确提示 Planner 证据
-    集合并非全量，防止其把预算裁剪误解为知识库不存在其他候选。
+    `used_bytes` 只计算 selected_nodes/selected_paths/selected_documents 的规范 JSON 载荷，便于
+    精确断言上下文主体不超限；诊断元数据和 omitted IDs 不计入模型上下文预算。`truncated` 明确提示
+    Planner 证据集合并非全量，防止其把预算裁剪误解为知识库不存在其他候选。文档切片与图证据放在
+    同一个 Bundle 而不是两个并行对象，是为了让 Planner 与 Auditor 面对同一份证据清单和同一套
+    `kn_*` / `path_*` / `dc_*` 引用空间，避免"报告引用了 Auditor 没看到的那一半上下文"。
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    contract_id: Literal["graphrag-evidence-bundle:v1"] = GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID
-    retrieval_contract_id: Literal["graphrag-retrieval:v2"] = GRAPH_RETRIEVAL_CONTRACT_ID
+    contract_id: Literal["graphrag-evidence-bundle:v2"] = GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID
+    retrieval_contract_id: Literal["graphrag-retrieval:v3"] = GRAPH_RETRIEVAL_CONTRACT_ID
     query: str = Field(min_length=1, max_length=2000)
     retrieval_mode: RetrievalMode
     budget: EvidenceBundleBudget
     used_bytes: int = Field(ge=0)
     selected_nodes: list[BundledKnowledgeNode] = Field(default_factory=list)
     selected_paths: list[BundledGraphPath] = Field(default_factory=list)
+    selected_documents: list[BundledDocumentChunk] = Field(default_factory=list)
     omitted_node_ids: list[str] = Field(default_factory=list)
     omitted_path_ids: list[str] = Field(default_factory=list)
+    omitted_chunk_ids: list[str] = Field(default_factory=list)
     truncated: bool = False
 
 
 class GraphRetrievalResult(BaseModel):
-    """表示一次检索的原始查询、种子节点和去重图路径集合。
+    """表示一次检索的原始查询、种子节点、去重图路径与二阶段重排溯源信息。
 
     服务层不生成自然语言结论，只返回可验证结构供 Planner 受上下文预算选择；空 seeds/paths 是
-    合法“未召回”结果，调用方应降级并声明不确定性，不能伪造知识证据。
+    合法“未召回”结果，调用方应降级并声明不确定性，不能伪造知识证据。`reranker_model` 为空即
+    表示本次只跑了一阶段；`candidate_count` 记录重排前的候选规模，使"重排带来多少提升"这一问题
+    在评测里有可核对的分母，而不是只能看最终名次。
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    contract_id: Literal["graphrag-retrieval:v2"] = GRAPH_RETRIEVAL_CONTRACT_ID
+    contract_id: Literal["graphrag-retrieval:v3"] = GRAPH_RETRIEVAL_CONTRACT_ID
     query: str = Field(min_length=1, max_length=2000)
     mode: RetrievalMode = RetrievalMode.HYBRID_GRAPH
     seed_limit: int = Field(default=5, ge=1, le=20)
     max_hops: int = Field(default=2, ge=1, le=2)
     embedding_provider: str = Field(min_length=1, max_length=100)
+    reranker_model: str | None = Field(default=None, min_length=1, max_length=200)
+    candidate_count: int = Field(default=0, ge=0)
     score_weights: HybridScoringWeights
+    rerank_blend_weight: float = Field(default=0, ge=0, le=1)
     seeds: list[HybridSeedMatch] = Field(default_factory=list)
     paths: list[ScoredGraphPath] = Field(default_factory=list)

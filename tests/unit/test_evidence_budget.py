@@ -2,11 +2,24 @@
 
 测试使用完整 Pydantic 检索模型构造一条合成路径，不依赖数据库；它确保构建器不会超过 UTF-8
 上下文预算，不会只纳入路径的一部分节点，并为所有未选候选保留稳定 omitted ID。
+
+文档切片作为第二条知识通道共用同一个字节预算但拥有独立条数上限，因此这里额外锁定加载顺序
+（路径 → 种子节点 → 文档切片）与"预算紧张时先保住图证据"这一优先级：反过来的实现同样不会
+报错，只会让本系统区别于普通 RAG 的关系可解释性被几段长 Runbook 正文挤出上下文。
 """
 
 import json
 
 from app.retrieval.budget import build_evidence_bundle
+from app.retrieval.documents import (
+    DocumentChunk,
+    DocumentMetadata,
+    DocumentRetrievalResult,
+    DocumentScoringWeights,
+    DocumentType,
+    ScoredDocumentChunk,
+    make_chunk_id,
+)
 from app.retrieval.models import (
     EvidenceBundleBudget,
     GraphRetrievalResult,
@@ -92,12 +105,16 @@ def _selected_payload_size(bundle) -> int:
     """按生产构建器相同的规范 JSON 规则计算测试 Bundle 主体 UTF-8 字节数。
 
     测试独立重算而不调用私有实现，能够发现 `used_bytes` 只写固定值或遗漏中文多字节的回归；
-    omitted IDs 和预算诊断元数据按契约不计入上下文主体。
+    三个 selected 列表必须一起计入，因为文档切片和图证据共用同一个字节预算，漏算任何一个都会让
+    "预算内"这一结论失真。omitted IDs 和预算诊断元数据按契约不计入上下文主体。
     """
 
     payload = {
         "selected_nodes": [node.model_dump(mode="json") for node in bundle.selected_nodes],
         "selected_paths": [path.model_dump(mode="json") for path in bundle.selected_paths],
+        "selected_documents": [
+            chunk.model_dump(mode="json") for chunk in bundle.selected_documents
+        ],
     }
     return len(
         json.dumps(
@@ -145,6 +162,140 @@ def test_zero_path_budget_keeps_seed_but_omits_entire_path_and_unselected_node()
     assert bundle.omitted_node_ids == ["root_cause_demo_conflict"]
     assert bundle.omitted_path_ids == ["path_0123456789abcdef"]
     assert bundle.truncated is True
+
+
+def _document_result(*, content_chars: int = 20) -> DocumentRetrievalResult:
+    """构造一个含三条降序评分切片的文档检索结果，正文长度可调以便制造字节压力。
+
+    分数刻意两两不同，使"按最终分加入"与"按 chunk_id 排序"两种实现能被区分；正文长度参数让同一
+    组候选既能用于宽预算断言，也能用于"长 Runbook 片段挤不进剩余字节"的优先级断言。
+    """
+
+    document = DocumentMetadata(
+        doc_id="runbook_budget_demo",
+        doc_type=DocumentType.RUNBOOK,
+        title="合成主键冲突处置手册",
+        components=["flashsync"],
+        source_id="synthetic_budget_document",
+        revision="r1",
+        reliability=0.9,
+    )
+    chunks: list[ScoredDocumentChunk] = []
+    for ordinal, hybrid_score in enumerate((0.9, 0.6, 0.3)):
+        content = f"第 {ordinal} 段处置步骤：" + "暂停任务并核对主键分布。" * content_chars
+        chunks.append(
+            ScoredDocumentChunk(
+                document=document,
+                chunk=DocumentChunk(
+                    chunk_id=make_chunk_id(document.doc_id, ordinal),
+                    doc_id=document.doc_id,
+                    ordinal=ordinal,
+                    heading_path=f"{document.title} > 处置步骤",
+                    content=content,
+                    char_count=len(content),
+                ),
+                channels=[RetrievalChannel.VECTOR],
+                semantic_score=hybrid_score,
+                authority_score=document.reliability,
+                hybrid_score=hybrid_score,
+            )
+        )
+    return DocumentRetrievalResult(
+        query="合成同步积压",
+        embedding_provider="unit-provider:v1",
+        candidate_count=len(chunks),
+        score_weights=DocumentScoringWeights(),
+        chunks=chunks,
+    )
+
+
+def test_document_chunks_enter_the_bundle_with_stable_dc_references() -> None:
+    """验证充足预算下文档切片按最终分进入 Bundle，引用为 `dc_*` 且不携带评分分量。
+
+    `dc_*` 同时作为 evidence_id 与数据库主键，报告脚注、Auditor 核对和文档表因此指向同一标识；
+    只保留 `retrieval_score` 是刻意的——把语义/全文/权威度分量注入 Prompt 只会让模型把内部排序
+    数字当成事实强度。独立字节重算同时确认三类证据合并计费。
+    """
+
+    budget = EvidenceBundleBudget(max_bytes=6000, max_nodes=8, max_paths=4, max_documents=3)
+    bundle = build_evidence_bundle(
+        _retrieval_result(),
+        budget=budget,
+        documents=_document_result(),
+    )
+
+    assert [chunk.retrieval_score for chunk in bundle.selected_documents] == [0.9, 0.6, 0.3]
+    assert all(chunk.evidence_id == chunk.chunk_id for chunk in bundle.selected_documents)
+    assert all(chunk.evidence_id.startswith("dc_") for chunk in bundle.selected_documents)
+    assert bundle.omitted_chunk_ids == []
+    assert bundle.truncated is False
+    assert bundle.used_bytes == _selected_payload_size(bundle)
+    assert bundle.used_bytes <= budget.max_bytes
+
+
+def test_document_cap_is_counted_separately_from_the_node_budget() -> None:
+    """验证文档条数上限独立生效：图证据不受影响，落选切片全部进入 omitted 列表。
+
+    共用一个上限会让几条 Runbook 片段挤掉全部图证据，而关系可解释性正是本系统区别于普通 RAG 的
+    部分；反过来，被截断的切片 ID 必须可见，否则 Planner 无法判断上下文是完整的还是被预算裁过的。
+    """
+
+    documents = _document_result()
+    budget = EvidenceBundleBudget(max_bytes=6000, max_nodes=8, max_paths=4, max_documents=1)
+    bundle = build_evidence_bundle(_retrieval_result(), budget=budget, documents=documents)
+
+    assert len(bundle.selected_documents) == 1
+    assert bundle.selected_documents[0].chunk_id == documents.chunks[0].chunk.chunk_id
+    assert bundle.omitted_chunk_ids == sorted(
+        chunk.chunk.chunk_id for chunk in documents.chunks[1:]
+    )
+    assert len(bundle.selected_paths) == 1
+    assert len(bundle.selected_nodes) == 2
+    assert bundle.truncated is True
+
+
+def test_zero_document_budget_and_absent_channel_are_both_graph_only() -> None:
+    """验证 `max_documents=0` 与未传 documents 都得到只含图证据的 Bundle，但截断状态不同。
+
+    两者在证据主体上同形，差异只体现在 omitted 列表：预算为零是"有候选但被裁掉"，未传通道是
+    "本次没有文档通道"。把它们混为一谈会让报告无法区分"没查到"和"查到了但没放进上下文"。
+    """
+
+    budget = EvidenceBundleBudget(max_bytes=6000, max_nodes=8, max_paths=4, max_documents=0)
+    capped = build_evidence_bundle(
+        _retrieval_result(),
+        budget=budget,
+        documents=_document_result(),
+    )
+    absent = build_evidence_bundle(_retrieval_result(), budget=budget)
+
+    assert capped.selected_documents == []
+    assert len(capped.omitted_chunk_ids) == 3
+    assert capped.truncated is True
+    assert absent.selected_documents == []
+    assert absent.omitted_chunk_ids == []
+    assert absent.truncated is False
+
+
+def test_byte_pressure_evicts_long_chunks_but_keeps_the_graph_path() -> None:
+    """验证剩余字节装不下长切片时整段省略，图路径与节点保持完整。
+
+    加载顺序是路径 → 种子节点 → 文档切片，因此预算紧张时先保住"故障如何沿依赖传播"；切片按整段
+    省略而不是截断正文，因为半条处置步骤既不可执行，还会让引用看起来仍然完整。
+    """
+
+    documents = _document_result(content_chars=60)
+    budget = EvidenceBundleBudget(max_bytes=1500, max_nodes=8, max_paths=4, max_documents=3)
+    bundle = build_evidence_bundle(_retrieval_result(), budget=budget, documents=documents)
+
+    assert [path.path_id for path in bundle.selected_paths] == ["path_0123456789abcdef"]
+    assert len(bundle.selected_nodes) == 2
+    assert bundle.selected_documents == []
+    assert bundle.omitted_chunk_ids == sorted(
+        chunk.chunk.chunk_id for chunk in documents.chunks
+    )
+    assert bundle.used_bytes == _selected_payload_size(bundle)
+    assert bundle.used_bytes <= budget.max_bytes
 
 
 def test_tiny_byte_budget_never_exceeds_limit_and_reports_all_omissions() -> None:

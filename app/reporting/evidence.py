@@ -17,9 +17,9 @@ def collect_reference_sources(
 ) -> dict[str, EvidenceSourceType]:
     """返回当前报告可引用 ID 到证据来源类型的稳定映射。
 
-    实时 Evidence 优先写入，GraphRAG 节点/路径随后补充，最后才加入已确认案例携带的历史引用；
-    同一 ID 若跨来源冲突会抛出 ValueError，防止历史记录覆盖本次 Observation。输入案例必须由
-    上游确认状态门禁保证为 confirmed，本函数只建立引用索引，不静默过滤污染数据。
+    实时 Evidence 优先写入，GraphRAG 节点/路径与文档切片随后补充，最后才加入已确认案例携带的
+    历史引用；同一 ID 若跨来源冲突会抛出 ValueError，防止历史记录覆盖本次 Observation。输入案例
+    必须由上游确认状态门禁保证为 confirmed，本函数只建立引用索引，不静默过滤污染数据。
     """
 
     sources: dict[str, EvidenceSourceType] = {}
@@ -28,11 +28,13 @@ def collect_reference_sources(
     for path in state.retrieved_paths:
         _insert_source(sources, path.path_id, EvidenceSourceType.GRAPH_PATH)
     if evidence_bundle is not None:
-        # Bundle 节点使用独立 evidence_id；路径的 evidence_id 与 path_id 按契约相同。
+        # Bundle 节点使用独立 evidence_id；路径与文档切片的 evidence_id 与其主键按契约相同。
         for node in evidence_bundle.selected_nodes:
             _insert_source(sources, node.evidence_id, EvidenceSourceType.KNOWLEDGE_NODE)
         for path in evidence_bundle.selected_paths:
             _insert_source(sources, path.evidence_id, EvidenceSourceType.GRAPH_PATH)
+        for chunk in evidence_bundle.selected_documents:
+            _insert_source(sources, chunk.evidence_id, EvidenceSourceType.DOCUMENT_CHUNK)
     for memory in confirmed_case_memories:
         # 案例本身是可审计历史来源；其内部 evidence_refs 没有随原 Evidence 内容注入时不能伪装
         # 成本次可直接核对的证据。报告应引用 memory_id，再由案例对象追溯其历史引用。
