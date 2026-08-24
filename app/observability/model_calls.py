@@ -14,6 +14,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.observability.tracing import (
+    TraceSpanKind,
+    TraceSpanStatus,
+    record_completed_span,
+)
+
 MODEL_CALL_METRIC_CONTRACT_ID = "model-call-metric:v1"
 
 
@@ -217,6 +223,26 @@ class ModelCallMeasurement:
         if self._finished:
             raise RuntimeError("model call measurement cannot be finished twice")
         self._finished = True
+        duration_ms = (perf_counter() - self._started) * 1000
+        token_usage = ModelTokenUsage.from_openai_usage(usage)
+        # trace 与 recorder 是两套用途不同的出口：recorder 服务离线评测聚合，span 服务单次 run 的
+        # 时间轴，因此即使没有绑定 recorder（普通 API 请求）也要落 span，否则生产 trace 会缺模型层。
+        record_completed_span(
+            TraceSpanKind.MODEL_CALL,
+            "model.chat_completion",
+            duration_ms=duration_ms,
+            status=(
+                TraceSpanStatus.OK
+                if status is ModelCallStatus.SUCCEEDED
+                else TraceSpanStatus.ERROR
+            ),
+            role=self._role.value,
+            model=self._model,
+            prompt_contract_id=self._prompt_contract_id,
+            call_status=status.value,
+            input_tokens=(None if token_usage is None else token_usage.input_tokens),
+            output_tokens=(None if token_usage is None else token_usage.output_tokens),
+        )
         # 未绑定是普通 API 的预期路径；直接返回可避免在长期进程中建立隐式全局调用历史。
         if self._recorder is None:
             return
@@ -227,7 +253,7 @@ class ModelCallMeasurement:
                 model=self._model,
                 prompt_contract_id=self._prompt_contract_id,
                 status=status,
-                duration_ms=(perf_counter() - self._started) * 1000,
-                token_usage=ModelTokenUsage.from_openai_usage(usage),
+                duration_ms=duration_ms,
+                token_usage=token_usage,
             )
         )
