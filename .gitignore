@@ -1,4 +1,4 @@
-# Local Python environment and generated interpreter caches.
+# 本机 Python 环境与解释器生成的缓存目录。
 .venv/
 __pycache__/
 *.py[cod]
@@ -6,9 +6,12 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
-# Local secrets, coverage output, packages, and build artifacts are reproducible
-# from tracked configuration and must not be committed.
+# 本机密钥、覆盖率产物、打包结果都可以从已跟踪的配置重新生成，因此绝不提交；.env 尤其如此，
+# 它保存只存在于本机的真实端点与 API key。
 .env
 dist/
 build/
 *.egg-info/
+# 真实模型评测的原始 JSON 报告只在本机产生，含模型端点配置与逐案例明细；对外发布的口径与数字
+# 统一写进 docs/live-golden-eval-results.md，原始文件不进仓库以免夹带本机环境信息。
+live-golden*.json
