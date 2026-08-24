@@ -1,5 +1,5 @@
 {
-  "contract_id": "portfolio-eval-manifest:v22",
+  "contract_id": "portfolio-eval-manifest:v23",
   "suites": [
     {
       "suite_id": "graphrag_ablation",
@@ -151,7 +151,7 @@
     {
       "suite_id": "golden_diagnosis_baseline",
       "layer": "Golden Case 顶层诊断确定性回归基线",
-      "source_contract_id": "golden-diagnosis-eval:v21",
+      "source_contract_id": "golden-diagnosis-eval:v22",
       "result_document": "docs/golden-diagnosis-eval-results.md",
       "requires_postgres": false,
       "test_targets": [

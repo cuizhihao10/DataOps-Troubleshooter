@@ -22,8 +22,9 @@ from app.domain.scenarios import (
 )
 from app.orchestration.diagnosis_models import DiagnosisRunResult
 from app.orchestration.report_models import ReportWorkflowOutcome
+from app.reporting.evidence import collect_reference_sources
 
-GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID = "golden-diagnosis-eval:v21"
+GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID = "golden-diagnosis-eval:v22"
 GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT = 28
 GOLDEN_DIAGNOSIS_CATEGORY_TARGETS: dict[GoldenCaseCategory, int] = {
     GoldenCaseCategory.SINGLE_COMPONENT: 8,
@@ -193,7 +194,7 @@ class GoldenDiagnosisEvalReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    contract_id: Literal["golden-diagnosis-eval:v21"]
+    contract_id: Literal["golden-diagnosis-eval:v22"]
     metric_kind: Literal["measured"] = "measured"
     case_count: int = Field(ge=1)
     target_case_count: int = Field(default=GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT, ge=1)
@@ -384,9 +385,12 @@ def score_golden_diagnosis_case(
     """把单条顶层诊断结果映射为可解释的 Golden 命中明细。
 
     评分只信任实际 ``ToolEvent``、``Evidence`` 与最终审计报告。必要 Action 按工具名去重；同参重复
-    只统计 ``attempt=1`` 的逻辑调用，合法瞬时重试不会被误判。引用完整性检查稳定 ID 是否存在，
-    不尝试以字符串相似度替代 Auditor 或人工语义审查。冲突评分只使用版本化 source/root 精确标注，
-    先验证 Observation 完整，再检查报告克制与 uncertainty，确保“调用成功”不会自动等价于“事实可信”。
+    只统计 ``attempt=1`` 的逻辑调用，合法瞬时重试不会被误判。引用完整性分成"是否悬空"和"是否有实时
+    支撑"两个独立判定：悬空宇宙直接复用报告层 ``collect_reference_sources``，支撑判定只认本次
+    Observation、可引用图路径与已确认案例，因此既不会因为多引用一条合法知识依据而扣分，也不会让
+    纯静态知识撑起一条关键结论。两者都只检查稳定 ID，不用字符串相似度替代 Auditor 或人工语义审查。
+    冲突评分只使用版本化 source/root 精确标注，先验证 Observation 完整，再检查报告克制与
+    uncertainty，确保“调用成功”不会自动等价于“事实可信”。
     """
 
     state = diagnosis.react.state
@@ -414,11 +418,15 @@ def score_golden_diagnosis_case(
         source for source in case.required_evidence_sources if source not in observed_sources
     ]
 
-    # 路径只有同时存在于检索状态并被最终报告 fault_chain 引用，才算真正参与了诊断输出。
+    # 路径只有同时存在于检索结果并被最终报告 fault_chain 引用，才算真正参与了诊断输出。可引用的
+    # 路径宇宙必须与报告层完全一致：`app/reporting/evidence.py` 允许引用 Bundle 里的 `path_*`，而
+    # 生产运行时只填充 Bundle、从不写 `AgentState.retrieved_paths`（该字段留给 checkpoint 恢复的
+    # 旧路径）。只看 state 会让这项指标在真实链路上恒为 0，把一次评测口径错误伪装成模型缺陷。
     reported_path_refs = {
         reference for step in report.fault_chain for reference in step.evidence_refs
     }
-    eligible_paths = [path for path in state.retrieved_paths if path.path_id in reported_path_refs]
+    candidate_paths = _citable_graph_paths(diagnosis)
+    eligible_paths = [path for path in candidate_paths if path.path_id in reported_path_refs]
     path_scores = [
         _score_fault_path_requirement(requirement, eligible_paths)
         for requirement in case.required_fault_paths
@@ -439,17 +447,35 @@ def score_golden_diagnosis_case(
         )
     )
 
-    # Graph path 与 confirmed memory 是合法引用源，但不会混入实时 Evidence source 覆盖率。
-    valid_refs = {evidence.evidence_id for evidence in state.evidence}
-    valid_refs.update(path.path_id for path in state.retrieved_paths)
-    valid_refs.update(match.memory.memory_id for match in diagnosis.recalled_memories)
+    # 引用判定拆成两个独立问题，v21 把它们混成一个 AND 条件因此产生假阳性：
+    # 1) 悬空引用——引用了本次根本不存在的 ID。判定宇宙必须与报告层 `collect_reference_sources`
+    #    严格同源，因此这里直接调用那个生产函数，而不是在评测侧重新枚举一份容器清单。v21 漏掉了
+    #    Bundle 知识节点与文档切片，于是报告多引用一条合法的 `kn_*` 依据反而被记成悬空引用。
+    # 2) 实时支撑——关键结论不能只靠静态知识站住。因此额外要求至少一条引用落在本次 Observation、
+    #    可引用图路径或已确认历史案例上，与 Planner 把假设提升为 supported 的规则同源。
+    citable_refs = set(
+        collect_reference_sources(
+            state,
+            diagnosis.evidence_bundle,
+            tuple(
+                match.memory
+                for match in diagnosis.recalled_memories
+                if match.memory.status is MemoryStatus.CONFIRMED
+            ),
+        )
+    )
+    support_refs = {evidence.evidence_id for evidence in state.evidence}
+    support_refs.update(path.path_id for path in candidate_paths)
+    support_refs.update(match.memory.memory_id for match in diagnosis.recalled_memories)
     critical_claim_refs = [root.evidence_refs for root in report.root_causes]
     critical_claim_refs.extend(step.evidence_refs for step in report.fault_chain)
     critical_claim_refs.extend(
         step.evidence_refs for step in report.remediation_steps if step.risk_level is RiskLevel.HIGH
     )
     unsupported_claims = sum(
-        not refs or any(reference not in valid_refs for reference in refs)
+        not refs
+        or any(reference not in citable_refs for reference in refs)
+        or not any(reference in support_refs for reference in refs)
         for refs in critical_claim_refs
     )
     claim_count = len(critical_claim_refs)
@@ -621,6 +647,36 @@ def _coverage(required: Sequence[object], actual: Sequence[object]) -> float:
         return 1.0
     actual_set = set(actual)
     return sum(item in actual_set for item in required) / len(required)
+
+
+def _citable_graph_paths(diagnosis: DiagnosisRunResult) -> list[RetrievedPath]:
+    """把本轮真正可被报告引用的图路径统一投影成 ``RetrievedPath`` 列表。
+
+    评测的路径宇宙必须与报告层逐条对齐（见 ``app/reporting/evidence.py``）：那里同时接受
+    ``AgentState.retrieved_paths`` 和 Bundle 的 ``selected_paths``，而生产运行时只填充后者，前者仅
+    在 checkpoint 恢复时带回旧路径。只看 state 会让 ``fault_path_completeness`` 在真实链路上恒为 0。
+    Bundle 路径的 ``relation_types`` 是枚举、分数字段名为 ``hybrid_score``，因此需要显式投影而不能
+    直接混用；同一 ``path_id`` 以 state 版本为先并去重，保证覆盖率计算不因重复候选被放大。
+    """
+
+    paths: dict[str, RetrievedPath] = {
+        path.path_id: path for path in diagnosis.react.state.retrieved_paths
+    }
+    bundle = diagnosis.evidence_bundle
+    if bundle is not None:
+        for bundled in bundle.selected_paths:
+            if bundled.path_id in paths:
+                continue
+            paths[bundled.path_id] = RetrievedPath(
+                path_id=bundled.path_id,
+                node_ids=list(bundled.node_ids),
+                relation_types=[relation.value for relation in bundled.relation_types],
+                # 混合分已含图结构与向量相似度，且值域与 RetrievedPath.score 一致；path_score 只是
+                # 其中一个分量，用它会让消融对比读到与真实排序不同的分数。
+                score=bundled.hybrid_score,
+                source_ids=list(bundled.source_ids),
+            )
+    return list(paths.values())
 
 
 def _score_fault_path_requirement(

@@ -61,7 +61,7 @@ class RecordingPytestExecutor:
 
 
 def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -> None:
-    """确认 v22 manifest 精确覆盖五层、十九个指标，并拒绝任意 pytest flag/命令目标。
+    """确认 v23 manifest 精确覆盖五层、十九个指标，并拒绝任意 pytest flag/命令目标。
 
     复制 payload 后把第一 target 改为 ``--collect-only``；Pydantic 必须在执行器之前失败，证明 JSON
     不能把受限 test target 字段变成自由命令入口。
@@ -69,7 +69,7 @@ def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -
 
     manifest = load_portfolio_eval_manifest(MANIFEST_PATH)
 
-    assert manifest.contract_id == "portfolio-eval-manifest:v22"
+    assert manifest.contract_id == "portfolio-eval-manifest:v23"
     assert len(manifest.suites) == 5
     assert sum(len(suite.metrics) for suite in manifest.suites) == 19
     assert sum(suite.requires_postgres for suite in manifest.suites) == 2

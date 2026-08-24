@@ -21,7 +21,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-PORTFOLIO_EVAL_MANIFEST_CONTRACT_ID = "portfolio-eval-manifest:v22"
+PORTFOLIO_EVAL_MANIFEST_CONTRACT_ID = "portfolio-eval-manifest:v23"
 PORTFOLIO_EVAL_RUN_CONTRACT_ID = "portfolio-eval-run:v22"
 DEFAULT_MANIFEST_PATH = Path("data/evals/portfolio_eval_manifest.json")
 _V1_REQUIRED_SUITE_IDS = {
@@ -54,6 +54,7 @@ _REQUIRED_SUITE_IDS_BY_CONTRACT = {
     "portfolio-eval-manifest:v20": _V2_REQUIRED_SUITE_IDS,
     "portfolio-eval-manifest:v21": _V2_REQUIRED_SUITE_IDS,
     "portfolio-eval-manifest:v22": _V2_REQUIRED_SUITE_IDS,
+    "portfolio-eval-manifest:v23": _V2_REQUIRED_SUITE_IDS,
 }
 _GOLDEN_SOURCE_CONTRACT_BY_MANIFEST = {
     "portfolio-eval-manifest:v2": "golden-diagnosis-eval:v1",
@@ -77,6 +78,8 @@ _GOLDEN_SOURCE_CONTRACT_BY_MANIFEST = {
     "portfolio-eval-manifest:v20": "golden-diagnosis-eval:v19",
     "portfolio-eval-manifest:v21": "golden-diagnosis-eval:v20",
     "portfolio-eval-manifest:v22": "golden-diagnosis-eval:v21",
+    # v23 只换引用完整性判定口径（悬空与实时支撑分离），案例集合与其余指标定义保持 v22 语义。
+    "portfolio-eval-manifest:v23": "golden-diagnosis-eval:v22",
 }
 _GOLDEN_COVERAGE_VALUE_BY_MANIFEST = {
     "portfolio-eval-manifest:v2": 0.1786,
@@ -100,6 +103,7 @@ _GOLDEN_COVERAGE_VALUE_BY_MANIFEST = {
     "portfolio-eval-manifest:v20": 0.9286,
     "portfolio-eval-manifest:v21": 0.9643,
     "portfolio-eval-manifest:v22": 1.0,
+    "portfolio-eval-manifest:v23": 1.0,
 }
 _GOLDEN_V2_METRIC_IDS = {
     "golden_case_coverage",
@@ -238,6 +242,13 @@ _GOLDEN_REQUIRED_METRIC_IDS_BY_MANIFEST = {
         "golden_realtime_priority_pass",
         "golden_evidence_conflict_safe_resolution",
     },
+    "portfolio-eval-manifest:v23": _GOLDEN_V2_METRIC_IDS
+    | {
+        "golden_fault_path_completeness",
+        "golden_history_recall_coverage",
+        "golden_realtime_priority_pass",
+        "golden_evidence_conflict_safe_resolution",
+    },
 }
 _TEST_TARGET = re.compile(r"^tests/[a-zA-Z0-9_./-]+\.py(?:::[a-zA-Z0-9_\[\]-]+)?$")
 
@@ -365,6 +376,7 @@ class PortfolioEvalManifest(BaseModel):
         "portfolio-eval-manifest:v20",
         "portfolio-eval-manifest:v21",
         "portfolio-eval-manifest:v22",
+        "portfolio-eval-manifest:v23",
     ]
     suites: list[PortfolioSuiteSpec] = Field(min_length=4)
 
@@ -513,6 +525,7 @@ class PortfolioEvalRunReport(BaseModel):
         "portfolio-eval-manifest:v20",
         "portfolio-eval-manifest:v21",
         "portfolio-eval-manifest:v22",
+        "portfolio-eval-manifest:v23",
     ]
     metric_kind: Literal["measured"] = "measured"
     suites: list[PortfolioSuiteRun] = Field(min_length=4)

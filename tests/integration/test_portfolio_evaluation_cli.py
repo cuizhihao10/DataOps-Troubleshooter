@@ -43,7 +43,7 @@ def test_portfolio_cli_fast_mode_runs_three_suites_and_marks_report_incomplete()
     assert completed.stderr == ""
     report = json.loads(completed.stdout)
     assert report["contract_id"] == "portfolio-eval-run:v22"
-    assert report["manifest_contract_id"] == "portfolio-eval-manifest:v22"
+    assert report["manifest_contract_id"] == "portfolio-eval-manifest:v23"
     assert report["metric_kind"] == "measured"
     assert report["run_success"] is True
     assert report["complete"] is False

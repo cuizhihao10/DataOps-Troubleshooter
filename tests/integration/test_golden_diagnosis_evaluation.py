@@ -64,6 +64,15 @@ from app.orchestration.report_models import (
     ReportRunResult,
     ReportWorkflowOutcome,
 )
+from app.retrieval.models import (
+    BundledGraphPath,
+    BundledKnowledgeNode,
+    EvidenceBundleBudget,
+    GraphEvidenceBundle,
+    KnowledgeNodeType,
+    KnowledgeRelationType,
+    RetrievalMode,
+)
 
 FIXTURE_DIRECTORY = Path("data/fixtures/scenarios")
 GOLDEN_CASE_FILE = Path("data/fixtures/golden_cases.json")
@@ -698,6 +707,192 @@ async def test_golden_diagnosis_requires_retrieved_path_to_be_used_by_final_repo
         "component_dependency_chain",
         "sync_backlog_causal_chain",
     ]
+
+
+@pytest.mark.asyncio
+async def test_golden_diagnosis_credits_graph_paths_that_only_exist_in_evidence_bundle() -> None:
+    """确认报告引用的 `path_*` 只存在于 GraphRAG Bundle 时仍计入链路完整率与合法引用集合。
+
+    生产运行时把检索结果放进 `GraphEvidenceBundle` 并注入两个 Agent，从不写
+    `AgentState.retrieved_paths`（该字段只在 checkpoint 恢复时带回旧路径）。测试把基线的两条路径整体
+    搬进 Bundle 并清空 state，报告文本与 evidence_refs 一字不改；若评分器只认 state，这项指标会在
+    真实链路上结构性归零，把评测口径错误伪装成"模型没有引用图路径"，首次真实模型冒烟评测读到的
+    就是这个 0。
+    """
+
+    cases = load_golden_cases(GOLDEN_CASE_FILE)
+    target = next(case for case in cases if case.case_id == "golden_cross_chain_pk_conflict")
+    baseline = await FixtureBackedGoldenRunner(
+        FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
+    ).run(target)
+    state_paths = list(baseline.react.state.retrieved_paths)
+    assert len(state_paths) == 2
+
+    bundled_paths = [
+        BundledGraphPath(
+            evidence_id=path.path_id,
+            path_id=path.path_id,
+            seed_node_id=path.node_ids[0],
+            node_ids=list(path.node_ids),
+            edge_ids=[f"edge_{index}_{position}" for position in range(len(path.relation_types))],
+            relation_types=[
+                KnowledgeRelationType(relation) for relation in path.relation_types
+            ],
+            edge_source_spans=[f"synthetic span {position}" for position in
+                               range(len(path.relation_types))],
+            source_ids=list(path.source_ids),
+            depth=min(2, len(path.node_ids) - 1),
+            path_score=path.score,
+            hybrid_score=path.score,
+        )
+        for index, path in enumerate(state_paths)
+    ]
+    bundle = GraphEvidenceBundle(
+        query=baseline.react.state.user_query,
+        retrieval_mode=RetrievalMode.HYBRID_GRAPH,
+        budget=EvidenceBundleBudget(),
+        used_bytes=0,
+        selected_paths=bundled_paths,
+    )
+    # 清空 state 路径是刻意的：只有两个来源互斥时，断言才能证明分数确实来自 Bundle 而不是 state。
+    bundle_only_state = baseline.react.state.model_copy(update={"retrieved_paths": []})
+    diagnosis = baseline.model_copy(
+        update={
+            "react": baseline.react.model_copy(update={"state": bundle_only_state}),
+            "evidence_bundle": bundle,
+        }
+    )
+
+    result = (await evaluate_golden_diagnosis([target], _SingleResultRunner(diagnosis))).cases[0]
+
+    assert result.fault_path_completeness == 1
+    assert result.matched_fault_path_labels == [
+        "component_dependency_chain",
+        "sync_backlog_causal_chain",
+    ]
+    assert result.unsupported_critical_claim_count == 0
+    assert result.citation_completeness == 1
+
+
+@pytest.mark.asyncio
+async def test_golden_diagnosis_accepts_bundle_knowledge_node_alongside_live_observations() -> None:
+    """确认根因在实时 Observation 之外再引用一条 Bundle 知识节点时不会被记成悬空引用。
+
+    v21 的引用判定把"不悬空"和"有实时支撑"写成同一个 AND 条件，且合法引用宇宙只收
+    ``state.evidence``、候选 path 和召回记忆，于是报告多引用一条 Prompt 里真实给出的 ``kn_*``
+    反而扣分——真实模型冒烟读到的 ``citation_completeness=0.875`` 就是这个假阳性。测试保持原有实时
+    引用不动，只追加一个 Bundle 知识节点 ID，指标必须仍然满分。
+    """
+
+    cases = load_golden_cases(GOLDEN_CASE_FILE)
+    target = next(case for case in cases if case.case_id == "golden_cross_chain_pk_conflict")
+    baseline = await FixtureBackedGoldenRunner(
+        FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
+    ).run(target)
+    report = baseline.report.state.draft_report
+    assert report is not None
+    assert report.root_causes
+
+    knowledge_node = BundledKnowledgeNode(
+        evidence_id="kn_pk_conflict_root",
+        node_id="cause_pk_conflict",
+        node_type=KnowledgeNodeType.ROOT_CAUSE,
+        name="主键冲突导致同步失败",
+        content="下游表主键约束与上游补数写入顺序冲突时，同步任务会在写入阶段失败。",
+        source_id="kb_sync_runbook",
+        source_span="第 3 节 主键冲突",
+        reliability=0.9,
+        retrieval_score=0.82,
+    )
+    bundle = GraphEvidenceBundle(
+        query=baseline.react.state.user_query,
+        retrieval_mode=RetrievalMode.HYBRID_GRAPH,
+        budget=EvidenceBundleBudget(),
+        used_bytes=0,
+        selected_nodes=[knowledge_node],
+    )
+    enriched_roots = [
+        root.model_copy(
+            update={"evidence_refs": [*root.evidence_refs, knowledge_node.evidence_id]}
+        )
+        for root in report.root_causes
+    ]
+    enriched_report = report.model_copy(update={"root_causes": enriched_roots})
+    enriched_state = baseline.report.state.model_copy(update={"draft_report": enriched_report})
+    diagnosis = baseline.model_copy(
+        update={
+            "report": baseline.report.model_copy(update={"state": enriched_state}),
+            "evidence_bundle": bundle,
+        }
+    )
+
+    result = (await evaluate_golden_diagnosis([target], _SingleResultRunner(diagnosis))).cases[0]
+
+    assert result.unsupported_critical_claim_count == 0
+    assert result.citation_completeness == 1
+
+
+@pytest.mark.asyncio
+async def test_golden_diagnosis_rejects_root_cause_supported_only_by_static_knowledge() -> None:
+    """确认根因只引用 Bundle 知识节点、没有任何本次 Observation 时仍被判为缺乏支撑。
+
+    悬空判定放宽到与报告层同源之后，必须有一条独立规则守住"关键结论要有实时依据"，否则模型可以
+    只复述知识库就拿满引用分。这里把根因的实时引用整体替换成同一个合法 ``kn_*``：ID 不悬空，但
+    ``support_refs`` 为空交集，因此必须计入 unsupported。
+    """
+
+    cases = load_golden_cases(GOLDEN_CASE_FILE)
+    target = next(case for case in cases if case.case_id == "golden_cross_chain_pk_conflict")
+    baseline = await FixtureBackedGoldenRunner(
+        FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
+    ).run(target)
+    report = baseline.report.state.draft_report
+    assert report is not None
+
+    knowledge_node = BundledKnowledgeNode(
+        evidence_id="kn_pk_conflict_root",
+        node_id="cause_pk_conflict",
+        node_type=KnowledgeNodeType.ROOT_CAUSE,
+        name="主键冲突导致同步失败",
+        content="下游表主键约束与上游补数写入顺序冲突时，同步任务会在写入阶段失败。",
+        source_id="kb_sync_runbook",
+        source_span="第 3 节 主键冲突",
+        reliability=0.9,
+        retrieval_score=0.82,
+    )
+    bundle = GraphEvidenceBundle(
+        query=baseline.react.state.user_query,
+        retrieval_mode=RetrievalMode.HYBRID_GRAPH,
+        budget=EvidenceBundleBudget(),
+        used_bytes=0,
+        selected_nodes=[knowledge_node],
+    )
+    knowledge_only_report = report.model_copy(
+        update={
+            "root_causes": [
+                RootCauseConclusion(
+                    root_cause="主键冲突导致同步失败",
+                    confidence=0.8,
+                    evidence_refs=[knowledge_node.evidence_id],
+                )
+            ],
+            "fault_chain": [],
+        }
+    )
+    knowledge_only_state = baseline.report.state.model_copy(
+        update={"draft_report": knowledge_only_report}
+    )
+    diagnosis = baseline.model_copy(
+        update={
+            "report": baseline.report.model_copy(update={"state": knowledge_only_state}),
+            "evidence_bundle": bundle,
+        }
+    )
+
+    result = (await evaluate_golden_diagnosis([target], _SingleResultRunner(diagnosis))).cases[0]
+
+    assert result.unsupported_critical_claim_count == 1
+    assert result.citation_completeness == 0
 
 
 @pytest.mark.asyncio
