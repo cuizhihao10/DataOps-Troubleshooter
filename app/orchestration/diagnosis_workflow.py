@@ -16,6 +16,7 @@ from app.capabilities import HistoryTrigger
 from app.domain.models import AgentState, EvidenceSourceType
 from app.memory.matcher import explain_case_matches
 from app.memory.models import CaseMemoryMatch, MemoryStageResult
+from app.observability.tracing import traced_node
 from app.orchestration.diagnosis_models import (
     DIAGNOSIS_WORKFLOW_CONTRACT_ID,
     DiagnosisGraphState,
@@ -174,6 +175,7 @@ class AuditedDiagnosisWorkflow:
             react=final_state.react_result,
             report=final_state.report_result,
             memory_stage=final_state.memory_stage,
+            evidence_bundle=final_state.evidence_bundle,
         )
 
 
@@ -185,11 +187,20 @@ def _build_diagnosis_graph():
     """
 
     graph = StateGraph(DiagnosisGraphState, context_schema=DiagnosisGraphRuntime)
-    graph.add_node("recall_case_memories", _recall_case_memories)
-    graph.add_node("run_react", _run_react)
-    graph.add_node("explain_case_matches", _explain_case_matches)
-    graph.add_node("run_report", _run_report)
-    graph.add_node("stage_case_memory", _stage_case_memory)
+    graph.add_node(
+        "recall_case_memories",
+        traced_node("diagnosis.recall_memories")(_recall_case_memories),
+    )
+    graph.add_node("run_react", traced_node("diagnosis.run_react")(_run_react))
+    graph.add_node(
+        "explain_case_matches",
+        traced_node("diagnosis.explain_matches")(_explain_case_matches),
+    )
+    graph.add_node("run_report", traced_node("diagnosis.run_report")(_run_report))
+    graph.add_node(
+        "stage_case_memory",
+        traced_node("diagnosis.stage_memory")(_stage_case_memory),
+    )
     graph.add_edge(START, "recall_case_memories")
     graph.add_edge("recall_case_memories", "run_react")
     graph.add_edge("run_react", "explain_case_matches")

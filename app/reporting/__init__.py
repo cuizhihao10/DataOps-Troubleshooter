@@ -4,7 +4,7 @@
 负责语义审查，规则校验器负责引用和风险不变量，两者共同阻止无依据内容进入最终响应。
 """
 
-from app.reporting.draft import DeterministicReportBuilder
+from app.reporting.draft import DeterministicReportBuilder, derive_report_risks
 from app.reporting.policy import ReportPolicyValidator
 from app.reporting.revision import SafeReportReviser
 
@@ -12,4 +12,5 @@ __all__ = [
     "DeterministicReportBuilder",
     "ReportPolicyValidator",
     "SafeReportReviser",
+    "derive_report_risks",
 ]

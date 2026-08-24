@@ -29,15 +29,17 @@ class Component(StrEnum):
 
 
 class EvidenceSourceType(StrEnum):
-    """区分证据来自实时工具、知识节点、图路径还是已确认案例记忆。
+    """区分证据来自实时工具、知识节点、图路径、文档切片还是已确认案例记忆。
 
     显式来源类型使 Auditor 能按可靠性和时效性审查引用，并保证历史案例不会伪装成本次实时
-    Observation；字符串值也便于 API 与持久化层稳定序列化。
+    Observation；字符串值也便于 API 与持久化层稳定序列化。文档切片单独成类而不并入知识节点，
+    因为两者的核查方式不同：节点要核对 source_span，切片要核对"哪份文档的哪一节"。
     """
 
     TOOL = "tool"
     KNOWLEDGE_NODE = "knowledge_node"
     GRAPH_PATH = "graph_path"
+    DOCUMENT_CHUNK = "document_chunk"
     CASE_MEMORY = "case_memory"
 
 

@@ -30,7 +30,7 @@ class OneToolProtocolPlanner:
     def __init__(self) -> None:
         """初始化空上下文记录，供测试检查两轮状态传播。
 
-        构造不启动 MCP、模型或后台任务；所有外部 I/O 只会发生在 LangGraph 的 execute_tool
+        构造不启动 MCP、模型或后台任务；所有外部 I/O 只会发生在 LangGraph 的 execute_tools
         节点中，因此 Planner 替身无法绕过协议边界读取 Fixture。
         """
 
@@ -50,18 +50,20 @@ class OneToolProtocolPlanner:
                     "status": "call_tool",
                     "decision_summary": "先查询 LTS 合成任务状态。",
                     "hypothesis_updates": [],
-                    "action": {
-                        "tool_name": "lts.get_task_status",
-                        "arguments": {
-                            "resource_id": "dws_order_report_daily",
-                            "time_range": {
-                                "start": "2026-07-10T00:00:00+08:00",
-                                "end": "2026-07-10T03:00:00+08:00",
+                    "actions": [
+                        {
+                            "tool_name": "lts.get_task_status",
+                            "arguments": {
+                                "resource_id": "dws_order_report_daily",
+                                "time_range": {
+                                    "start": "2026-07-10T00:00:00+08:00",
+                                    "end": "2026-07-10T03:00:00+08:00",
+                                },
+                                "scenario_id": "cross_chain_pk_conflict",
+                                "trace_id": context.state.run_id,
                             },
-                            "scenario_id": "cross_chain_pk_conflict",
-                            "trace_id": context.state.run_id,
-                        },
-                    },
+                        }
+                    ],
                     "evidence_refs": [],
                     "stop_reason": None,
                 }
@@ -72,7 +74,7 @@ class OneToolProtocolPlanner:
                     "status": "finish",
                     "decision_summary": "已获得本轮真实状态 Observation。",
                     "hypothesis_updates": [],
-                    "action": None,
+                    "actions": [],
                     "evidence_refs": context.state.observation_refs,
                     "stop_reason": "evidence_sufficient",
                 }

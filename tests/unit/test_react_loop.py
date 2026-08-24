@@ -13,8 +13,15 @@ import pytest
 
 from app.agents.planner import PlannerProviderError, PlannerTurnContext
 from app.capabilities import CapabilityName, CapabilitySelectionRequest, DiagnosisIntent
-from app.domain.models import AgentState, Component
-from app.domain.planner import PlannerDecision, PlannerStatus, ToolAction
+from app.domain.models import AgentState, Component, HypothesisStatus
+from app.domain.planner import (
+    HypothesisUpdate,
+    HypothesisUpdateStatus,
+    PlannerDecision,
+    PlannerStatus,
+    PlannerStopReason,
+    ToolAction,
+)
 from app.domain.tooling import McpToolResponse, ToolEvidencePayload, ToolName
 from app.mcp.observation import ToolObservation, normalize_observation
 from app.orchestration import (
@@ -23,6 +30,13 @@ from app.orchestration import (
     ReactLoopConfig,
     ReactRunRequest,
     ReactStopReason,
+)
+from app.retrieval.models import (
+    BundledKnowledgeNode,
+    EvidenceBundleBudget,
+    GraphEvidenceBundle,
+    KnowledgeNodeType,
+    RetrievalMode,
 )
 
 OBSERVED_AT = datetime(2026, 7, 10, 1, 0, tzinfo=UTC)
@@ -134,6 +148,40 @@ class RecordingExecutor:
         )
 
 
+class ConcurrencyProbeExecutor(RecordingExecutor):
+    """在 RecordingExecutor 之上测量同一时刻真正在执行的 Action 数量。
+
+    每次调用先自增在途计数并记录峰值，再让出事件循环，最后自减。峰值大于一是"批次确实并发"的
+    唯一可靠证据：只看总耗时会被机器负载干扰，而只看 actions 列表无法区分并发与串行。
+    """
+
+    def __init__(self) -> None:
+        """初始化在途计数与峰值记录，不改变父类的 Action 收集行为。
+
+        计数只在单个事件循环内被协程交替修改，因此无需锁；峰值在测试断言前保持只增不减，
+        便于在批次结束后回读整轮的最大并发度。
+        """
+
+        super().__init__()
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def execute(self, action: ToolAction) -> ToolObservation:
+        """在维护并发峰值的同时委托父类生成确定性 Observation。
+
+        `asyncio.sleep(0.05)` 提供一个足以让兄弟协程全部进入执行体的让出点；串行实现会让峰值
+        停在一，并行实现会把峰值推到批次长度。异常路径不会掩盖计数，因为自减放在 finally 中。
+        """
+
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            await asyncio.sleep(0.05)
+            return await super().execute(action)
+        finally:
+            self.in_flight -= 1
+
+
 def _state(*, run_id: str = "run_react_unit_001") -> AgentState:
     """构造带稳定运行、会话和脱敏问题的最小 AgentState。
 
@@ -170,10 +218,27 @@ def _action_decision(
     trace_id: str = "run_react_unit_001",
     resource_id: str = "lts_synthetic_task",
 ) -> PlannerDecision:
-    """构造一个字段完整、可执行的 call_tool PlannerDecision。
+    """构造一个字段完整、只含单个 Action 的 call_tool PlannerDecision。
 
     时间窗、场景和 trace 都使用脱敏稳定值；允许覆盖工具与 trace 以验证组件越界和链路绑定。
     返回值先经过嵌套 ToolAction/McpToolRequest 校验，测试不会用松散字典绕过生产 Schema。
+    """
+
+    return _batch_decision(
+        specs=[(tool_name, resource_id)],
+        trace_id=trace_id,
+    )
+
+
+def _batch_decision(
+    *,
+    specs: list[tuple[ToolName, str]],
+    trace_id: str = "run_react_unit_001",
+) -> PlannerDecision:
+    """构造一个含任意条数并行 Action 的 call_tool 决策，供批次门禁测试复用。
+
+    每个 spec 是"工具名 + 资源 ID"二元组，因此同一工具查不同资源和不同工具查同一资源都能表达；
+    时间窗、场景与 trace 对整批保持一致，使指纹差异只来自测试真正想验证的那个维度。
     """
 
     return PlannerDecision.model_validate(
@@ -181,18 +246,21 @@ def _action_decision(
             "status": "call_tool",
             "decision_summary": "查询当前合成任务状态。",
             "hypothesis_updates": [],
-            "action": {
-                "tool_name": tool_name.value,
-                "arguments": {
-                    "resource_id": resource_id,
-                    "time_range": {
-                        "start": "2026-07-10T00:00:00+00:00",
-                        "end": "2026-07-10T03:00:00+00:00",
+            "actions": [
+                {
+                    "tool_name": tool_name.value,
+                    "arguments": {
+                        "resource_id": resource_id,
+                        "time_range": {
+                            "start": "2026-07-10T00:00:00+00:00",
+                            "end": "2026-07-10T03:00:00+00:00",
+                        },
+                        "scenario_id": "cross_chain_pk_conflict",
+                        "trace_id": trace_id,
                     },
-                    "scenario_id": "cross_chain_pk_conflict",
-                    "trace_id": trace_id,
-                },
-            },
+                }
+                for tool_name, resource_id in specs
+            ],
             "evidence_refs": [],
             "stop_reason": None,
         }
@@ -462,8 +530,8 @@ async def test_restored_tool_event_blocks_same_action_with_new_run_trace() -> No
     """
 
     previous_decision = _action_decision(trace_id="run_previous_001")
-    assert previous_decision.action is not None
-    previous_observation = await RecordingExecutor().execute(previous_decision.action)
+    assert len(previous_decision.actions) == 1
+    previous_observation = await RecordingExecutor().execute(previous_decision.actions[0])
     restored_state = _state().model_copy(
         update={"tool_events": list(previous_observation.tool_events)}
     )
@@ -516,3 +584,463 @@ async def test_expected_planner_provider_error_becomes_public_loop_stop() -> Non
     assert result.state.stop_reason == "planner_provider_error"
     assert result.events[-1].summary == "Planner 模型请求超过配置超时。"
     assert executor.actions == []
+
+
+@pytest.mark.asyncio
+async def test_parallel_batch_runs_concurrently_and_consumes_one_step_per_action() -> None:
+    """验证一批三个互不依赖的只读 Action 并发执行并按条数消耗步数预算。
+
+    并发度由执行器峰值计数证明，而不是靠总耗时推断；三条 Evidence/ToolEvent 说明批内 ID 不冲突，
+    react_step 增加三而不是一说明并行买到的是延迟而不是额外取证预算。事件时间线保留一条
+    PLANNER_DECISION 加三条 OBSERVATION_RECORDED，因此单个工具失败仍能被单独读出来。
+    """
+
+    planner = ScriptedPlanner(
+        [
+            _batch_decision(
+                specs=[
+                    (ToolName.LTS_GET_TASK_STATUS, "lts_synthetic_task"),
+                    (ToolName.LTS_GET_TASK_LOG, "lts_synthetic_task"),
+                    (ToolName.LTS_GET_DEPENDENCY_TOPOLOGY, "lts_synthetic_task"),
+                ]
+            ),
+            _finish_decision(),
+        ]
+    )
+    executor = ConcurrencyProbeExecutor()
+    loop = BoundedReactLoop(
+        planner=planner,
+        executor=executor,
+        config=ReactLoopConfig(max_steps=6, max_parallel_actions=3, total_timeout_seconds=5),
+    )
+
+    result = await loop.run(_run_request())
+
+    assert result.state.stop_reason == "evidence_sufficient"
+    assert result.state.react_step == 3
+    assert executor.max_in_flight == 3
+    assert len(executor.actions) == 3
+    assert len(result.state.evidence) == 3
+    assert len({event.event_id for event in result.state.tool_events}) == 3
+    assert [event.event_type for event in result.events] == [
+        ReactEventType.CAPABILITIES_SELECTED,
+        ReactEventType.PLANNER_DECISION,
+        ReactEventType.OBSERVATION_RECORDED,
+        ReactEventType.OBSERVATION_RECORDED,
+        ReactEventType.OBSERVATION_RECORDED,
+        ReactEventType.PLANNER_DECISION,
+        ReactEventType.LOOP_STOPPED,
+    ]
+    decision_event = result.events[1]
+    assert decision_event.parallel_action_count == 3
+    # 批次刻意不填 tool_name：只写第一个工具会让时间线读起来像"只调用了一个工具"。
+    assert decision_event.tool_name is None
+    observation_tools = {event.tool_name for event in result.events[2:5]}
+    assert observation_tools == {
+        ToolName.LTS_GET_TASK_STATUS,
+        ToolName.LTS_GET_TASK_LOG,
+        ToolName.LTS_GET_DEPENDENCY_TOPOLOGY,
+    }
+
+
+@pytest.mark.asyncio
+async def test_single_action_batch_still_reports_its_tool_name() -> None:
+    """验证单 Action 批次仍在决策事件上保留具体工具名与批次大小一。
+
+    并行改造不应让最常见的单调用路径失去可读性；前端和评测依赖 PLANNER_DECISION 上的 tool_name
+    展示"这一步查了什么"，因此这项断言防止批次字段回归时把单调用也一起清空。
+    """
+
+    planner = ScriptedPlanner([_action_decision(), _finish_decision()])
+    executor = RecordingExecutor()
+    loop = BoundedReactLoop(
+        planner=planner,
+        executor=executor,
+        config=ReactLoopConfig(max_steps=6, max_parallel_actions=3, total_timeout_seconds=2),
+    )
+
+    result = await loop.run(_run_request())
+
+    decision_event = result.events[1]
+    assert decision_event.parallel_action_count == 1
+    assert decision_event.tool_name is ToolName.LTS_GET_TASK_STATUS
+    assert result.state.react_step == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_action_inside_one_batch_is_blocked_before_any_execution() -> None:
+    """验证批内同参重复整批拒绝，并行不能成为绕过去重门禁的路径。
+
+    两个 Action 的工具、资源、时间窗和场景完全一致，指纹相同；控制器必须在 MCP 之前停止整批，
+    executor 保持为空，react_step 不增加。若只丢弃重复项，Planner 会基于"提交了两个"的错误前提
+    继续推理，因此这里刻意不做部分执行。
+    """
+
+    planner = ScriptedPlanner(
+        [
+            _batch_decision(
+                specs=[
+                    (ToolName.LTS_GET_TASK_STATUS, "lts_synthetic_task"),
+                    (ToolName.LTS_GET_TASK_STATUS, "lts_synthetic_task"),
+                ]
+            )
+        ]
+    )
+    executor = RecordingExecutor()
+    loop = BoundedReactLoop(
+        planner=planner,
+        executor=executor,
+        config=ReactLoopConfig(max_steps=6, max_parallel_actions=3, total_timeout_seconds=2),
+    )
+
+    result = await loop.run(_run_request())
+
+    assert result.state.stop_reason == ReactStopReason.DUPLICATE_ACTION_BLOCKED.value
+    assert result.state.react_step == 0
+    assert executor.actions == []
+    assert result.events[-1].event_type is ReactEventType.POLICY_BLOCKED
+
+
+@pytest.mark.asyncio
+async def test_batch_over_configured_parallel_limit_is_blocked() -> None:
+    """验证超过本次运行并行上限的批次被 parallel_limit_exceeded 拦下。
+
+    运行配置只允许一个并行 Action，但 Planner 提交两个；上限属于部署决定而不是模型偏好，因此
+    必须由控制器客观拒绝而不是靠 Prompt 提醒。executor 为空证明拦截发生在 MCP 边界之前。
+    """
+
+    planner = ScriptedPlanner(
+        [
+            _batch_decision(
+                specs=[
+                    (ToolName.LTS_GET_TASK_STATUS, "lts_synthetic_task"),
+                    (ToolName.LTS_GET_TASK_LOG, "lts_synthetic_task"),
+                ]
+            )
+        ]
+    )
+    executor = RecordingExecutor()
+    loop = BoundedReactLoop(
+        planner=planner,
+        executor=executor,
+        config=ReactLoopConfig(max_steps=6, max_parallel_actions=1, total_timeout_seconds=2),
+    )
+
+    result = await loop.run(_run_request())
+
+    assert result.state.stop_reason == ReactStopReason.PARALLEL_LIMIT_EXCEEDED.value
+    assert result.state.react_step == 0
+    assert executor.actions == []
+
+
+@pytest.mark.asyncio
+async def test_batch_exceeding_remaining_step_budget_is_blocked() -> None:
+    """验证批次长度超过剩余工具步数时整批拒绝，而不是执行到预算用尽为止。
+
+    max_steps 为二、并行上限为二：首轮批次两个 Action 恰好用尽预算是允许的，因此本用例先执行
+    一个单 Action 再提交两个，使剩余步数只剩一。控制器必须给出 parallel_budget_exceeded，
+    executor 仍只收到第一轮那一次调用。
+    """
+
+    planner = ScriptedPlanner(
+        [
+            _action_decision(resource_id="lts_synthetic_task_a"),
+            _batch_decision(
+                specs=[
+                    (ToolName.LTS_GET_TASK_STATUS, "lts_synthetic_task_b"),
+                    (ToolName.LTS_GET_TASK_LOG, "lts_synthetic_task_b"),
+                ]
+            ),
+        ]
+    )
+    executor = RecordingExecutor()
+    loop = BoundedReactLoop(
+        planner=planner,
+        executor=executor,
+        config=ReactLoopConfig(max_steps=2, max_parallel_actions=2, total_timeout_seconds=2),
+    )
+
+    result = await loop.run(_run_request())
+
+    assert result.state.stop_reason == ReactStopReason.PARALLEL_BUDGET_EXCEEDED.value
+    assert result.state.react_step == 1
+    assert len(executor.actions) == 1
+
+
+@pytest.mark.asyncio
+async def test_planner_context_parallel_allowance_shrinks_with_remaining_budget() -> None:
+    """验证注入 Prompt 的并行上限始终等于控制器真正允许的数量。
+
+    max_steps 为二、并行上限为三：首轮剩余两步，因此模型只能看到二；执行一个 Action 后剩余一步，
+    第二轮必须降到一。这项断言把"Prompt 里的预算"和"门禁里的预算"绑成同一个事实，避免模型反复
+    提交刚好超预算的批次而每次都白花一次调用。
+    """
+
+    planner = ScriptedPlanner([_action_decision(), _finish_decision()])
+    executor = RecordingExecutor()
+    loop = BoundedReactLoop(
+        planner=planner,
+        executor=executor,
+        config=ReactLoopConfig(max_steps=2, max_parallel_actions=3, total_timeout_seconds=2),
+    )
+
+    await loop.run(_run_request())
+
+    assert [context.max_parallel_actions for context in planner.contexts] == [2, 1]
+
+
+_HYPOTHESIS_ID = "hyp_lts_invalid_partition_date_format"
+
+
+def _with_updates(
+    decision: PlannerDecision,
+    updates: list[HypothesisUpdate],
+) -> PlannerDecision:
+    """在已构造的决策上替换 hypothesis_updates，并重新走一遍生产 Schema 校验。
+
+    这里刻意不用 `model_copy`：跨字段校验器是契约的一部分，测试若绕过它就会用生产不可能出现的
+    组合去断言控制器行为。重新 `model_validate` 保证假设更新与 status/actions/stop_reason 的组合
+    仍然合法，因此断言的是真实可达路径。
+    """
+
+    return PlannerDecision.model_validate(
+        {
+            **decision.model_dump(mode="json"),
+            "hypothesis_updates": [update.model_dump(mode="json") for update in updates],
+        }
+    )
+
+
+class HypothesisPlanner:
+    """按轮次提交假设更新，并把引用绑定到上一轮真正产生的 Evidence ID。
+
+    真实 Planner 只能引用 Prompt 白名单里的 ID，而白名单要等工具执行后才非空，因此固定决策列表
+    无法表达"新建 → 增强 → 削弱"这条多轮演进。该替身在每轮读取 `context.state.evidence` 的末尾
+    一条来构造引用，从而在不接触 MCP 的前提下复现生产里唯一可达的引用顺序。
+    """
+
+    def __init__(self) -> None:
+        """初始化空的上下文记录，不预置任何决策或引用。
+
+        轮次由 `contexts` 长度推导，因此不需要额外计数器；实例不执行 I/O，也不生成 Thought，
+        只组装已经通过 Pydantic 校验的结构化决策。
+        """
+
+        self.contexts: list[PlannerTurnContext] = []
+
+    async def decide(self, context: PlannerTurnContext) -> PlannerDecision:
+        """依次返回带 new、strengthened 与 weakened 假设更新的三轮决策。
+
+        第一轮尚无任何 Evidence，因此新建假设不带引用，用于验证"无引用的新假设只能停在
+        candidate"；第二、三轮分别引用刚刚写回的 Observation，用于验证支持引用累积升级和反对
+        引用回落。超过三轮说明控制流与预期不符，显式失败而不是静默补一个 finish。
+        """
+
+        self.contexts.append(context)
+        turn = len(self.contexts)
+        if turn == 1:
+            return _with_updates(
+                _batch_decision(specs=[(ToolName.LTS_GET_TASK_STATUS, "lts_synthetic_task")]),
+                [
+                    HypothesisUpdate(
+                        hypothesis_id=_HYPOTHESIS_ID,
+                        status=HypothesisUpdateStatus.NEW,
+                        symptom="合成 LTS 任务连续三次调度失败。",
+                        candidate_root_cause="partition_date 参数格式不符合调度约定的 yyyy-MM-dd。",
+                    )
+                ],
+            )
+        latest_ref = context.state.evidence[-1].evidence_id
+        if turn == 2:
+            return _with_updates(
+                _batch_decision(specs=[(ToolName.LTS_GET_TASK_LOG, "lts_synthetic_task")]),
+                [
+                    HypothesisUpdate(
+                        hypothesis_id=_HYPOTHESIS_ID,
+                        status=HypothesisUpdateStatus.STRENGTHENED,
+                        evidence_refs=[latest_ref],
+                    )
+                ],
+            )
+        if turn == 3:
+            return _with_updates(
+                _finish_decision(),
+                [
+                    HypothesisUpdate(
+                        hypothesis_id=_HYPOTHESIS_ID,
+                        status=HypothesisUpdateStatus.WEAKENED,
+                        evidence_refs=[latest_ref],
+                    )
+                ],
+            )
+        raise AssertionError("planner was called more times than expected")
+
+
+@pytest.mark.asyncio
+async def test_hypothesis_updates_accumulate_into_state_with_deterministic_status() -> None:
+    """验证假设更新被确定性投影进 AgentState，并按引用决定状态与置信度。
+
+    这条链路此前完全缺失：控制器只保存 next_action，`hypothesis_updates` 被整体丢弃，于是确定性
+    草稿永远拿不到根因、Auditor 必然以"报告不完整"否决。断言覆盖三件事——新建假设在没有引用时
+    只能停在 candidate、带合法引用的增强升为 supported、削弱把引用记入反对集合并回落 candidate。
+    组件取已批准 capability 组件而不是模型自述，置信度取状态映射而不是模型自报数值。
+    """
+
+    planner = HypothesisPlanner()
+    executor = RecordingExecutor()
+    loop = BoundedReactLoop(
+        planner=planner,
+        executor=executor,
+        config=ReactLoopConfig(max_steps=6, total_timeout_seconds=2),
+    )
+
+    result = await loop.run(_run_request())
+
+    assert len(executor.actions) == 2
+    assert [hypothesis.hypothesis_id for hypothesis in result.state.hypotheses] == [_HYPOTHESIS_ID]
+    hypothesis = result.state.hypotheses[0]
+    assert hypothesis.symptom == "合成 LTS 任务连续三次调度失败。"
+    assert hypothesis.candidate_root_cause.startswith("partition_date")
+    assert hypothesis.components == [Component.LTS]
+    assert hypothesis.supporting_evidence == [result.state.evidence[0].evidence_id]
+    assert hypothesis.contradicting_evidence == [result.state.evidence[1].evidence_id]
+    # 第三轮是 weakened，因此终态必须回落 candidate；若投影按"最后一次出现即支持"实现，这里会读到
+    # supported，报告层就会把一个已被削弱的假设当成根因输出。
+    assert hypothesis.status is HypothesisStatus.CANDIDATE
+    assert hypothesis.confidence == pytest.approx(0.4)
+    assert [context.state.hypotheses for context in planner.contexts][0] == []
+    assert len(planner.contexts[1].state.hypotheses) == 1
+    assert planner.contexts[1].state.hypotheses[0].status is HypothesisStatus.CANDIDATE
+    assert planner.contexts[2].state.hypotheses[0].status is HypothesisStatus.SUPPORTED
+    assert planner.contexts[2].state.hypotheses[0].confidence == pytest.approx(0.7)
+
+
+@pytest.mark.asyncio
+async def test_fabricated_hypothesis_reference_is_blocked_like_decision_reference() -> None:
+    """验证假设更新里的引用与决策级引用共用同一道白名单门禁。
+
+    假设更新的 evidence_refs 会成为报告根因的引用，如果这里放宽校验，模型就能用一个格式合法但
+    不存在的 ID 换到一条看起来"有据可依"的结论。断言首轮被拦截、状态里不留下任何假设，并且停止
+    原因是可评测的 `invalid_evidence_reference` 而不是普通结束。
+    """
+
+    decision = _with_updates(
+        _batch_decision(specs=[(ToolName.LTS_GET_TASK_STATUS, "lts_synthetic_task")]),
+        [
+            HypothesisUpdate(
+                hypothesis_id=_HYPOTHESIS_ID,
+                status=HypothesisUpdateStatus.NEW,
+                symptom="合成 LTS 任务连续三次调度失败。",
+                candidate_root_cause="partition_date 参数格式不符合调度约定。",
+                evidence_refs=["ev_not_in_state_001"],
+            )
+        ],
+    )
+    planner = ScriptedPlanner([decision])
+    executor = RecordingExecutor()
+    loop = BoundedReactLoop(
+        planner=planner,
+        executor=executor,
+        config=ReactLoopConfig(max_steps=6, total_timeout_seconds=2),
+    )
+
+    result = await loop.run(_run_request())
+
+    assert result.state.stop_reason == ReactStopReason.INVALID_EVIDENCE_REFERENCE.value
+    assert result.state.hypotheses == []
+    assert executor.actions == []
+
+
+@pytest.mark.asyncio
+async def test_planner_stop_reason_reaches_state_as_evaluable_enum_value() -> None:
+    """验证结构化停止原因以枚举值而不是自由文本进入状态与公开事件。
+
+    停止原因会同时进入 `run_events`、trace span 属性和 Golden 评测的分类比较，自由文本会让公开
+    时间线出现接近推理过程的长篇叙述，并使"命中期望停止原因"永远无法为真。断言状态与终止事件
+    携带同一个 ASCII 枚举值，且该值确实来自 `PlannerStopReason`。
+    """
+
+    planner = ScriptedPlanner(
+        [_finish_decision(stop_reason=PlannerStopReason.EVIDENCE_CONFLICT_REQUIRES_MANUAL_REVIEW)]
+    )
+    loop = BoundedReactLoop(
+        planner=planner,
+        executor=RecordingExecutor(),
+        config=ReactLoopConfig(max_steps=6, total_timeout_seconds=2),
+    )
+
+    result = await loop.run(_run_request())
+
+    expected = PlannerStopReason.EVIDENCE_CONFLICT_REQUIRES_MANUAL_REVIEW.value
+    assert result.state.stop_reason == expected
+    assert result.events[-1].stop_reason == expected
+    assert result.events[-1].stop_reason.isascii()
+
+
+def _knowledge_bundle() -> GraphEvidenceBundle:
+    """构造只含一个 root_cause 知识节点的最小 GraphRAG Bundle，用于白名单同源断言。
+
+    节点的 `evidence_id` 用生产前缀 `kn_`，因为报告层正是按这个 ID 判定引用合法性；不放路径与
+    文档切片，使断言能精确区分"知识引用被接受"与"实时 Observation 才能支撑假设"这两件事。
+    """
+
+    return GraphEvidenceBundle(
+        query="合成 LTS 分区参数格式问题",
+        retrieval_mode=RetrievalMode.HYBRID_GRAPH,
+        budget=EvidenceBundleBudget(max_bytes=4000, max_nodes=4, max_paths=2),
+        used_bytes=256,
+        selected_nodes=[
+            BundledKnowledgeNode(
+                evidence_id="kn_invalid_partition_date",
+                node_id="cause_invalid_partition_date",
+                node_type=KnowledgeNodeType.ROOT_CAUSE,
+                name="分区参数格式不符合任务声明",
+                content="合成知识：partition_date 必须使用 yyyy-MM-dd，否则启动校验直接失败。",
+                source_id="synthetic_knowledge_source",
+                source_span="合成知识第 1 段",
+                reliability=0.8,
+                retrieval_score=0.7,
+            )
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_knowledge_reference_passes_gate_but_cannot_promote_hypothesis() -> None:
+    """验证 Bundle 知识引用与报告层同源被接受，但不足以把假设升为 supported。
+
+    Planner 侧白名单曾比报告层更窄，模型引用 Prompt 里刚给出的 `kn_*` 反而被整批拒绝，Run C 的一个
+    案例即以 `invalid_evidence_reference` 终止；因此这里先断言运行正常结束、引用被保留。同时升级
+    口径只认实时 Observation：只有知识依据时假设必须停在 candidate，否则模型能凭"知识库里有这种
+    故障模式"直接换到一条会进入报告根因的结论，而本次运行其实没有观察到它。
+    """
+
+    knowledge_ref = "kn_invalid_partition_date"
+    decision = _with_updates(
+        _finish_decision(evidence_refs=[knowledge_ref]),
+        [
+            HypothesisUpdate(
+                hypothesis_id=_HYPOTHESIS_ID,
+                status=HypothesisUpdateStatus.NEW,
+                symptom="合成 LTS 任务连续三次调度失败。",
+                candidate_root_cause="partition_date 参数格式不符合调度约定。",
+                evidence_refs=[knowledge_ref],
+            )
+        ],
+    )
+    loop = BoundedReactLoop(
+        planner=ScriptedPlanner([decision]),
+        executor=RecordingExecutor(),
+        config=ReactLoopConfig(max_steps=6, total_timeout_seconds=2),
+    )
+
+    request = _run_request().model_copy(update={"evidence_bundle": _knowledge_bundle()})
+    result = await loop.run(request)
+
+    assert result.state.stop_reason == PlannerStopReason.EVIDENCE_SUFFICIENT.value
+    assert result.state.next_action is not None
+    assert result.state.next_action.evidence_refs == [knowledge_ref]
+    assert [item.hypothesis_id for item in result.state.hypotheses] == [_HYPOTHESIS_ID]
+    assert result.state.hypotheses[0].supporting_evidence == [knowledge_ref]
+    assert result.state.hypotheses[0].status is HypothesisStatus.CANDIDATE
+    assert result.state.hypotheses[0].confidence == pytest.approx(0.4)

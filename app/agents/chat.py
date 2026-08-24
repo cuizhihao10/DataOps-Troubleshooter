@@ -25,6 +25,7 @@ from app.agents.planner import (
     PlannerRefusalError,
 )
 from app.agents.prompts import PLANNER_PROMPT_ID
+from app.core.http_identity import outbound_default_headers
 from app.domain.planner import PlannerDecision
 from app.observability import ModelCallMeasurement, ModelCallRole, ModelCallStatus
 
@@ -109,6 +110,8 @@ class OpenAICompatiblePlannerProvider:
             base_url=base_url,
             timeout=timeout_seconds,
             max_retries=0,
+            # 兼容网关的 WAF 会按 SDK 默认 User-Agent 拦截（实测 403），统一改用中性标识。
+            default_headers=outbound_default_headers(),
         )
 
     async def complete(self, messages: tuple[ChatMessage, ...]) -> PlannerDecision:

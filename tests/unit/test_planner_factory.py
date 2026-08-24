@@ -119,3 +119,38 @@ async def test_auditor_factory_builds_independent_runtime_without_network_probe(
     await runtime.aclose()
     assert not http_client.is_closed
     await sdk_client.close()
+
+
+@pytest.mark.asyncio
+async def test_planner_and_auditor_receive_independent_request_timeouts() -> None:
+    """验证两个角色的超时来自不同配置项，Auditor 更宽而 Planner 保持紧。
+
+    首次真实模型评测实测 Planner 单次 8–15s、Auditor 单次 22–30s：审计要读完整草稿并逐条核对
+    引用，输出也接近 1100 token。共用一个 30s 旋钮时四次审计有三次超时，而超时按"审计不可用"
+    直接降级且不消耗返工预算，于是三个案例全部拿不到 accepted 报告。Planner 不能跟着放宽，因为
+    它跑在 react_total_timeout_seconds 预算内、一次挂死就吃掉整轮；Auditor 不在该预算内。
+
+    这里不注入客户端，因为超时是在工厂构造 AsyncOpenAI 时落到客户端上的；构造期不发请求，所以
+    断言不产生付费调用。
+    """
+
+    settings = Settings(
+        _env_file=None,
+        chat_provider="openai-compatible",
+        chat_base_url="https://example.test/v1",
+        chat_api_key="local_test_secret",
+    )
+    assert settings.chat_timeout_seconds == 30.0
+    assert settings.auditor_timeout_seconds == 90.0
+
+    planner = create_planner_runtime(settings)
+    auditor = create_auditor_runtime(settings)
+    assert planner is not None
+    assert auditor is not None
+    try:
+        assert planner.provider._client.timeout == settings.chat_timeout_seconds
+        assert auditor.provider._client.timeout == settings.auditor_timeout_seconds
+    finally:
+        await planner.aclose()
+        await auditor.aclose()
+

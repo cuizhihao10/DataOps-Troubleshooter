@@ -16,6 +16,7 @@ from app.mcp.observation import (
     merge_observations,
     normalize_observation,
 )
+from app.observability.tracing import TraceSpanKind, TraceSpanStatus, trace_span
 
 
 class McpToolExecutor:
@@ -71,18 +72,33 @@ class McpToolExecutor:
         """
 
         started_at = datetime.now(UTC)
-        try:
-            response = await self._client.call_tool(action.tool_name, action.arguments)
-        except McpClientError as exc:
-            # 传输层没有可信工具事实，因此失败响应必须保持空 evidence，避免制造伪证据。
-            response = McpToolResponse(
-                ok=False,
-                data={},
-                evidence=[],
-                error_code=exc.error_code,
-                error_message=str(exc)[:1000],
-                observed_at=datetime.now(UTC),
+        # 每次尝试单独开 span：重试对上层是透明的，但"第一次超时、第二次成功"是可靠性分析的关键
+        # 事实，如果只给整个 Action 一个 span，重试延迟会被平均掉而无法归因。
+        with trace_span(
+            TraceSpanKind.TOOL_CALL,
+            "mcp.tool_attempt",
+            tool_name=action.tool_name.value,
+            attempt=attempt,
+        ) as span:
+            try:
+                response = await self._client.call_tool(action.tool_name, action.arguments)
+            except McpClientError as exc:
+                # 传输层没有可信工具事实，因此失败响应必须保持空 evidence，避免制造伪证据。
+                response = McpToolResponse(
+                    ok=False,
+                    data={},
+                    evidence=[],
+                    error_code=exc.error_code,
+                    error_message=str(exc)[:1000],
+                    observed_at=datetime.now(UTC),
+                )
+            span.annotate(
+                ok=response.ok,
+                error_code=(response.error_code.value if response.error_code else "none"),
+                evidence_count=len(response.evidence),
             )
+            if not response.ok:
+                span.mark(TraceSpanStatus.ERROR)
         # completed_at 在异常标准化后采集，使事件耗时覆盖错误映射但不包含后续模型处理。
         completed_at = datetime.now(UTC)
         return normalize_observation(

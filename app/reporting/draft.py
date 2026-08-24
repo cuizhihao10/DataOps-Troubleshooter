@@ -18,7 +18,14 @@ from app.domain.models import (
     SimilarCaseReference,
 )
 from app.reporting.evidence import collect_valid_reference_ids
+from app.retrieval.documents import BundledDocumentChunk, DocumentType
 from app.retrieval.models import GraphEvidenceBundle, KnowledgeNodeType
+
+# 只有明确写着"步骤"的小节才允许进入建议列表：Runbook 同样包含"禁止操作""升级条件"这类正文，
+# 把它们当成待执行动作会让报告建议运维去做一件文档明确禁止的事。关键词集合显式声明而不是靠
+# 模型判断，才能在 Golden 回放里稳定复现同一份建议。
+_REMEDIATION_SECTION_KEYWORDS = ("处置步骤", "确认步骤", "恢复步骤")
+_REMEDIATION_DOCUMENT_TYPES = frozenset({DocumentType.RUNBOOK, DocumentType.SOP})
 
 
 class DeterministicReportBuilder:
@@ -100,7 +107,7 @@ class DeterministicReportBuilder:
             if root_causes
             else "现有调查已停止，但证据不足以安全确认根因；请按只读步骤继续核验。"
         )
-        risks = _report_risks(remediation_steps)
+        risks = derive_report_risks(remediation_steps)
         return DiagnosisReport(
             summary=summary,
             fault_chain=fault_chain,
@@ -152,20 +159,28 @@ def _build_fault_chain(
 def _build_remediation_steps(
     evidence_bundle: GraphEvidenceBundle | None,
 ) -> list[RemediationStep]:
-    """从已召回 solution/SOP 节点生成中风险人工建议，否则生成只读检查步骤。
+    """从已召回 solution/SOP 节点与运维文档步骤小节生成中风险人工建议，否则生成只读检查步骤。
 
-    知识节点内容保持原文并引用自身 evidence_id；建议标记 medium，明确需审批、可回滚和验证，
-    但绝不声称系统已执行。没有方案证据时返回 low 风险的只读核对，避免编造具体写操作。
+    知识节点内容保持原文并引用自身 evidence_id，文档切片补充"步骤写在哪一节"的可执行细节并引用
+    `dc_*`；两类来源都标记 medium，明确需审批、可回滚和验证，但绝不声称系统已执行。图节点排在
+    文档之前，因为节点是人工归纳过的方案摘要，文档切片是更长的原文。没有任何方案证据时返回 low
+    风险的只读核对，避免编造具体写操作。
     """
 
     solution_nodes = []
+    document_chunks: list[BundledDocumentChunk] = []
     if evidence_bundle is not None:
         solution_nodes = [
             node
             for node in evidence_bundle.selected_nodes
             if node.node_type in {KnowledgeNodeType.SOLUTION, KnowledgeNodeType.SOP}
         ]
-    if not solution_nodes:
+        document_chunks = [
+            chunk
+            for chunk in evidence_bundle.selected_documents
+            if _is_remediation_chunk(chunk)
+        ]
+    if not solution_nodes and not document_chunks:
         return [
             RemediationStep(
                 order=1,
@@ -191,7 +206,35 @@ def _build_remediation_steps(
                 verification="重新执行对应只读检查，确认原症状消失且未引入新的链路异常。",
             )
         )
+    for order, chunk in enumerate(document_chunks, start=len(steps) + 1):
+        steps.append(
+            RemediationStep(
+                order=order,
+                action=chunk.content,
+                risk_level=RiskLevel.MEDIUM,
+                evidence_refs=[chunk.evidence_id],
+                prerequisites=[
+                    f"确认《{chunk.title}》修订版本 {chunk.revision} 仍适用于本次故障范围。",
+                ],
+                rollback="若验证失败，停止后续步骤并恢复变更前配置或数据快照。",
+                verification="按文档同一小节的验证要求复核，确认口径与历史基线一致。",
+            )
+        )
     return steps
+
+
+def _is_remediation_chunk(chunk: BundledDocumentChunk) -> bool:
+    """判断一个文档切片是否属于可作为人工处置建议的步骤小节。
+
+    只认 Runbook/SOP 的步骤小节：复盘的"改进项"是长期治理动作而非本次处置，FAQ 是判断依据而非
+    操作，把它们混入建议会让报告把"以后要改流程"和"现在要做什么"混为一谈。匹配标题路径而不是
+    正文关键词，因为标题由文档作者显式声明，正文里出现"步骤"二字往往只是叙述。
+    """
+
+    if chunk.doc_type not in _REMEDIATION_DOCUMENT_TYPES:
+        return False
+    section = chunk.heading_path.rsplit(" > ", maxsplit=1)[-1]
+    return any(keyword in section for keyword in _REMEDIATION_SECTION_KEYWORDS)
 
 
 def _path_description(node_ids: list[str], relation_types: list[str]) -> str:
@@ -209,11 +252,12 @@ def _path_description(node_ids: list[str], relation_types: list[str]) -> str:
     return " ".join(parts)
 
 
-def _report_risks(remediation_steps: list[RemediationStep]) -> list[str]:
+def derive_report_risks(remediation_steps: list[RemediationStep]) -> list[str]:
     """根据草稿中的真实风险枚举生成稳定且不夸大的报告级风险摘要。
 
     只读检查明确不产生生产写入；存在中/高风险步骤时提醒审批与回滚。函数不从动作文本猜风险，
-    防止自然语言关键词改变控制语义，空步骤则说明当前没有可审计执行方案。
+    防止自然语言关键词改变控制语义，空步骤则说明当前没有可审计执行方案。修订路径共享同一函数，
+    否则修订稿会写出"只允许人工只读核验"却同时保留中风险变更步骤这种自相矛盾的组合。
     """
 
     levels = {step.risk_level for step in remediation_steps}

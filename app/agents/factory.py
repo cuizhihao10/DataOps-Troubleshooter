@@ -103,6 +103,9 @@ def create_auditor_runtime(
 
     Settings 已验证共享端点和 SecretStr key；工厂先审计本地 Prompt，再创建 Provider，避免模板
     漂移后遗留连接池。构造不发送模型探测或付费请求，注入客户端便于真实 SDK MockTransport 测试。
+
+    超时取 `auditor_timeout_seconds` 而不是 Planner 那个 `chat_timeout_seconds`：审计要读完整草稿
+    并逐条核对引用，实测耗时是 Planner 的两到三倍，共用紧超时会让审计整条路径退化成降级。
     """
 
     if settings.chat_provider == "disabled":
@@ -116,7 +119,7 @@ def create_auditor_runtime(
         api_key=settings.chat_api_key,
         base_url=str(settings.chat_base_url),
         model=settings.chat_model,
-        timeout_seconds=settings.chat_timeout_seconds,
+        timeout_seconds=settings.auditor_timeout_seconds,
         client=client,
     )
     agent = OpenAICompatibleAuditorAgent(

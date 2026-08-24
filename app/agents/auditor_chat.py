@@ -25,6 +25,7 @@ from app.agents.auditor import (
 )
 from app.agents.chat import ChatMessage, validation_failure_details
 from app.agents.prompts import AUDITOR_PROMPT_ID
+from app.core.http_identity import outbound_default_headers
 from app.domain.models import AuditResult
 from app.observability import ModelCallMeasurement, ModelCallRole, ModelCallStatus
 
@@ -84,6 +85,8 @@ class OpenAICompatibleAuditorProvider:
             base_url=base_url,
             timeout=timeout_seconds,
             max_retries=0,
+            # 与 Planner 共用中性 User-Agent：兼容网关的 WAF 会按 SDK 默认 UA 返回 403（实测）。
+            default_headers=outbound_default_headers(),
         )
 
     async def complete(self, messages: tuple[ChatMessage, ...]) -> AuditResult:

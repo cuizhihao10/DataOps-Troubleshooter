@@ -78,6 +78,7 @@ def _planner_context(user_query: str) -> PlannerTurnContext:
         ),
         capabilities=selection,
         max_react_steps=6,
+        max_parallel_actions=3,
         remaining_time_ms=30_000,
     )
 

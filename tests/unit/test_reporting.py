@@ -2,6 +2,9 @@
 
 测试只使用合成 Evidence、假设和 GraphRAG Bundle，不调用模型或数据库；重点证明根因不会从
 candidate/冲突假设产生，无效语义即使引用存在也被拦截，返工只删除而不创造新事实。
+
+文档 RAG 侧额外锁定"哪些切片可以变成处置建议"：只有 Runbook/SOP 的步骤小节能被提升，复盘改进项、
+FAQ 与"禁止操作"小节即使被召回也只能作为证据存在，否则报告会要求运维执行文档明确禁止的操作。
 """
 
 from datetime import UTC, datetime
@@ -29,6 +32,12 @@ from app.reporting import (
     DeterministicReportBuilder,
     ReportPolicyValidator,
     SafeReportReviser,
+    derive_report_risks,
+)
+from app.retrieval.documents import (
+    BundledDocumentChunk,
+    DocumentType,
+    make_chunk_id,
 )
 from app.retrieval.models import (
     BundledGraphPath,
@@ -200,10 +209,12 @@ def test_policy_vetoes_valid_but_semantically_unsupported_root_cause() -> None:
 
 
 def test_safe_reviser_removes_unsupported_claim_and_degrade_never_confirms_root_cause() -> None:
-    """验证一次修订和最终降级都通过删除结论收窄风险，而不是改写新根因。
+    """验证一次修订按 claim_path 精确删除被否决结论，最终降级只保留低风险补证步骤。
 
-    同一 unsupported issue 进入 revise 后应移除根因/链路并添加 uncertainty；degrade 再次清空
-    历史案例和生产建议，只保留低风险补证步骤。
+    unsupported issue 指到 `root_causes[0]`，修订稿应删掉该根因、保留仍有引用支撑的传播链路，
+    并留下面向用户的删除说明；degrade 再次清空历史案例和生产建议。修订稿正文不得出现审计问题码
+    或"审计要求修订"这类过程陈述：那不是本轮证据支持的事实，第二轮审计会把它当成新的无支撑声明
+    再否决一次，使返工预算必然耗尽。摘要与风险都必须由保留内容推导，避免与实际保留的步骤矛盾。
     """
 
     initial = DeterministicReportBuilder().build(_state(), evidence_bundle=_bundle())
@@ -219,12 +230,90 @@ def test_safe_reviser_removes_unsupported_claim_and_degrade_never_confirms_root_
     degraded = reviser.degrade(revised, (issue,), _state(), evidence_bundle=_bundle())
 
     assert revised.root_causes == []
-    assert revised.fault_chain == []
-    assert any("unsupported_claim" in item for item in revised.uncertainties)
+    # 被否决的只有 root_causes[0]，仍有引用支撑的链路不能连带删除：空报告会与现有 Observation
+    # 自相矛盾，第二轮审计以 evidence_conflict 再否决一次，返工预算必然耗尽。
+    assert revised.fault_chain == initial.fault_chain
+    assert revised.uncertainties
+    assert any("按定位删除" in item for item in revised.uncertainties)
+    assert not any("审计要求修订" in item for item in revised.uncertainties)
+    assert not any(
+        code.value in item for item in revised.uncertainties for code in AuditIssueCode
+    )
+    # 风险文本与草稿共享同一推导规则，因此它只能来自实际保留步骤的 risk_level 集合。
+    assert revised.risks == derive_report_risks(revised.remediation_steps)
     assert degraded.root_causes == []
     assert degraded.similar_cases == []
     assert degraded.remediation_steps[0].risk_level is RiskLevel.LOW
     assert "不得依据本降级报告" in degraded.risks[0]
+
+
+def test_safe_reviser_keeps_unflagged_claims_and_falls_back_when_path_is_unparseable() -> None:
+    """验证精确删除只作用于被指到的条目，路径不可解析时才退回整类删除。
+
+    第一段构造两个根因、只否决第二个：修订稿必须保留第一个，否则模型给出的正确根因会被连带删掉，
+    第二轮审计再以 evidence_conflict 否决一次并耗尽返工预算（首次真实模型评测的案例 1 就是如此）。
+    第二段用非法路径确认兜底仍然清空根因与链路——无法定位时"删得更多"才是安全方向。第三段确认
+    指向 summary 的问题只触发重算：摘要由保留内容推导，删根因反而会制造新的自相矛盾。
+    """
+
+    reviser = SafeReportReviser()
+    base = DeterministicReportBuilder().build(_state(), evidence_bundle=_bundle())
+    extra = RootCauseConclusion(
+        root_cause="合成的第二项根因，引用与首项相同的工具证据。",
+        confidence=0.7,
+        evidence_refs=["ev_tool_001"],
+    )
+    two_causes = base.model_copy(update={"root_causes": [*base.root_causes, extra]})
+
+    targeted = reviser.revise(
+        two_causes,
+        (
+            AuditIssue(
+                code=AuditIssueCode.UNSUPPORTED_CLAIM,
+                claim_path="$.root_causes[1]",
+                message="合成 Auditor 只否决第二项根因。",
+            ),
+        ),
+        _state(),
+        evidence_bundle=_bundle(),
+    )
+    fallback = reviser.revise(
+        two_causes,
+        (
+            AuditIssue(
+                code=AuditIssueCode.UNSUPPORTED_CLAIM,
+                claim_path="root_causes[0].evidence_refs[0]",
+                message="合成 Auditor 给出无法解析的定位路径。",
+            ),
+        ),
+        _state(),
+        evidence_bundle=_bundle(),
+    )
+    derived_only = reviser.revise(
+        two_causes,
+        (
+            AuditIssue(
+                code=AuditIssueCode.UNSUPPORTED_CLAIM,
+                claim_path="summary",
+                message="合成 Auditor 认为摘要没有回答用户问题。",
+            ),
+        ),
+        _state(),
+        evidence_bundle=_bundle(),
+    )
+
+    assert [item.root_cause for item in targeted.root_causes] == [
+        base.root_causes[0].root_cause
+    ]
+    assert targeted.fault_chain == base.fault_chain
+    assert fallback.root_causes == []
+    assert fallback.fault_chain == []
+    assert any("引用集合不足" in item for item in fallback.uncertainties)
+    assert [item.root_cause for item in derived_only.root_causes] == [
+        item.root_cause for item in two_causes.root_causes
+    ]
+    # 摘要被否决时靠重算解决：新摘要必须复述保留下来的首要根因，而不是描述"报告已被修订"。
+    assert base.root_causes[0].root_cause.strip() in derived_only.summary
 
 
 def test_domain_schema_rejects_uncontrolled_high_risk_and_contradictory_audit_payloads() -> None:
@@ -254,3 +343,93 @@ def test_domain_schema_rejects_uncontrolled_high_risk_and_contradictory_audit_pa
             status=AuditStatus.REVISE,
             revision_instructions=["补充说明。"],
         )
+
+
+def _document_chunk(
+    ordinal: int,
+    *,
+    doc_type: DocumentType,
+    section: str,
+) -> BundledDocumentChunk:
+    """构造一个指定文档类型与末级小节名的紧凑文档证据，用于建议提升规则断言。
+
+    只有 doc_type 与 heading_path 的末级小节参与判断，因此其余字段固定；`dc_*` 由 `make_chunk_id`
+    生成，保证测试引用与生产、数据库主键使用同一套规则。
+    """
+
+    doc_id = f"doc_{doc_type.value}_case"
+    return BundledDocumentChunk(
+        evidence_id=make_chunk_id(doc_id, ordinal),
+        chunk_id=make_chunk_id(doc_id, ordinal),
+        doc_id=doc_id,
+        doc_type=doc_type,
+        title=f"合成{doc_type.value}文档",
+        heading_path=f"合成{doc_type.value}文档 > {section}",
+        content=f"{section}：暂停任务并核对主键分布后再由人工审批恢复。",
+        source_id=f"synthetic_{doc_type.value}_case",
+        revision="r1",
+        reliability=0.9,
+        retrieval_score=0.8,
+    )
+
+
+def test_only_runbook_and_sop_step_sections_become_remediation_steps() -> None:
+    """验证只有 Runbook/SOP 的步骤小节被提升为处置建议，其它小节仅作为证据存在。
+
+    复盘的"改进项"是长期治理动作、FAQ 是判断依据、Runbook 的"禁止操作"更是明确不能做的事；把它们
+    混进建议会让报告要求运维执行一件文档禁止的操作。断言同时检查提升顺序（图节点先于文档切片）、
+    风险等级为 medium、引用为 `dc_*`，以及未提升切片的 ID 不出现在报告级引用里。
+    """
+
+    bundle = _bundle().model_copy(
+        update={
+            "selected_documents": [
+                _document_chunk(0, doc_type=DocumentType.RUNBOOK, section="处置步骤"),
+                _document_chunk(1, doc_type=DocumentType.RUNBOOK, section="禁止操作"),
+                _document_chunk(0, doc_type=DocumentType.SOP, section="确认步骤"),
+                _document_chunk(0, doc_type=DocumentType.POSTMORTEM, section="改进项"),
+                _document_chunk(0, doc_type=DocumentType.FAQ, section="常见问题"),
+            ]
+        }
+    )
+
+    report = DeterministicReportBuilder().build(_state(), evidence_bundle=bundle)
+
+    promoted = [step.evidence_refs[0] for step in report.remediation_steps]
+    assert promoted == [
+        "kn_solution_wait",
+        make_chunk_id("doc_runbook_case", 0),
+        make_chunk_id("doc_sop_case", 0),
+    ]
+    assert [step.order for step in report.remediation_steps] == [1, 2, 3]
+    assert all(step.risk_level is RiskLevel.MEDIUM for step in report.remediation_steps)
+    assert "修订版本 r1" in report.remediation_steps[1].prerequisites[0]
+    # 未提升的切片仍是合法引用来源，但不能出现在报告级引用里——那会暗示它支撑了某项结论。
+    assert make_chunk_id("doc_runbook_case", 1) not in report.evidence_refs
+    assert make_chunk_id("doc_postmortem_case", 0) not in report.evidence_refs
+    assert make_chunk_id("doc_faq_case", 0) not in report.evidence_refs
+
+
+def test_document_chunks_alone_can_carry_remediation_without_solution_nodes() -> None:
+    """验证没有 solution/SOP 图节点时，Runbook 步骤切片仍能产出中风险建议而非只读兜底。
+
+    这是文档 RAG 存在的直接理由：知识图能解释传播链，但可执行步骤只写在 Runbook 里。若实现只在
+    图节点存在时才看文档，文档通道对最终建议就毫无贡献，检索指标再好也不改变报告内容。
+    """
+
+    bundle = _bundle().model_copy(
+        update={
+            "selected_nodes": [],
+            "selected_documents": [
+                _document_chunk(0, doc_type=DocumentType.RUNBOOK, section="恢复步骤")
+            ],
+        }
+    )
+
+    report = DeterministicReportBuilder().build(_state(), evidence_bundle=bundle)
+
+    assert len(report.remediation_steps) == 1
+    step = report.remediation_steps[0]
+    assert step.evidence_refs == [make_chunk_id("doc_runbook_case", 0)]
+    assert step.risk_level is RiskLevel.MEDIUM
+    assert "只读" not in step.action

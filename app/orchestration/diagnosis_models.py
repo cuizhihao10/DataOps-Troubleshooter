@@ -109,6 +109,13 @@ class DiagnosisRunResult(BaseModel):
     react: ReactRunResult
     report: ReportRunResult
     memory_stage: MemoryStageResult
+    # Bundle 随结果一起返回，而不是只在运行时传给两个 Agent：报告层允许引用 `path_*`，因此任何
+    # 事后核对（评测打分、离线重放、人工复查"这条 fault_chain 依据哪条图路径"）都必须能拿到本次
+    # 真正进入上下文的路径集合。缺这个字段时，评测只能退回 `AgentState.retrieved_paths`，而生产
+    # 路径从不填充该字段，于是"报告引用了图路径"这件事在实测里恒为 0——首次真实模型评测的
+    # fault_path_completeness 就是这样被结构性归零的，与模型表现无关。
+    evidence_bundle: GraphEvidenceBundle | None = None
+
 
     @model_validator(mode="after")
     def validate_cross_stage_consistency(self) -> DiagnosisRunResult:

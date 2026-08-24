@@ -24,6 +24,7 @@ from app.domain.models import (
     DiagnosisReport,
     SimilarCaseReference,
 )
+from app.observability.tracing import TraceSpanKind, trace_span, traced_node
 from app.orchestration.report_models import (
     AUDITED_REPORT_WORKFLOW_CONTRACT_ID,
     ReportEventType,
@@ -222,10 +223,10 @@ def _build_report_graph():
     """
 
     graph = StateGraph(ReportGraphState, context_schema=ReportGraphRuntime)
-    graph.add_node("draft_report", _draft_report)
-    graph.add_node("audit_report", _audit_report)
-    graph.add_node("revise_report", _revise_report)
-    graph.add_node("degrade_report", _degrade_report)
+    graph.add_node("draft_report", traced_node("report.draft")(_draft_report))
+    graph.add_node("audit_report", traced_node("report.audit")(_audit_report))
+    graph.add_node("revise_report", traced_node("report.revise")(_revise_report))
+    graph.add_node("degrade_report", traced_node("report.degrade")(_degrade_report))
     graph.add_edge(START, "draft_report")
     graph.add_edge("draft_report", "audit_report")
     graph.add_conditional_edges(
@@ -306,7 +307,18 @@ async def _audit_report(
         revision_number=graph_state.agent_state.retry_count,
     )
     try:
-        model_result = await runtime.context.auditor.review(context)
+        # 只给模型往返计时：确定性规则校验已在上方完成，合并进来会让 Auditor 看起来比实际更慢。
+        with trace_span(
+            TraceSpanKind.MODEL_CALL,
+            "auditor.review",
+            revision_number=graph_state.agent_state.retry_count,
+            deterministic_issue_count=len(deterministic_issues),
+        ) as span:
+            model_result = await runtime.context.auditor.review(context)
+            span.annotate(
+                audit_status=model_result.status.value,
+                model_issue_count=len(model_result.issues),
+            )
     except AuditorAgentError as exc:
         unavailable_issue = AuditIssue(
             code=AuditIssueCode.AUDITOR_UNAVAILABLE,

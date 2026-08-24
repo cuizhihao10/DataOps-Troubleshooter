@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.capabilities import CapabilitySelection
 from app.domain.models import AgentState, CaseMemory, MemoryStatus, SimilarCaseReference
-from app.domain.planner import PlannerDecision
+from app.domain.planner import MAX_PARALLEL_TOOL_ACTIONS, PlannerDecision
 from app.retrieval.models import GraphEvidenceBundle
 
 
@@ -119,7 +119,8 @@ class PlannerTurnContext(BaseModel):
     """封装 Planner 单轮决策所需的状态、能力策略和剩余运行预算。
 
     `state` 只包含公开摘要、证据和工具事件，不包含 Thought；capabilities 是确定性注册表输出。
-    剩余毫秒和最大步骤由控制器计算，模型不能自行扩大预算或替换可用工具范围。
+    剩余毫秒、最大步骤和本轮可并行 Action 数由控制器计算，模型不能自行扩大预算、提高并行度或
+    替换可用工具范围。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -130,14 +131,16 @@ class PlannerTurnContext(BaseModel):
     confirmed_case_memories: tuple[CaseMemory, ...] = ()
     history_case_matches: tuple[SimilarCaseReference, ...] = ()
     max_react_steps: int = Field(ge=1, le=20)
+    max_parallel_actions: int = Field(ge=1, le=MAX_PARALLEL_TOOL_ACTIONS)
     remaining_time_ms: int = Field(ge=0, le=600_000)
 
     @model_validator(mode="after")
     def validate_state_matches_capabilities(self) -> PlannerTurnContext:
-        """保证注入状态中的意图与活动能力确实来自本次选择结果。
+        """保证注入状态中的意图、活动能力与并行上限确实来自本次选择和剩余预算。
 
-        该检查阻止路由状态与 Prompt 策略漂移，例如状态声称单组件却注入跨组件工具。失败会在
-        调用模型前产生 Pydantic ValidationError，因此模型不会看到自相矛盾的上下文。
+        该检查阻止路由状态与 Prompt 策略漂移，例如状态声称单组件却注入跨组件工具，或者在只剩一个
+        工具步数时仍告诉模型可以并行三个。失败会在调用模型前产生 Pydantic ValidationError，因此
+        模型不会看到自相矛盾的上下文。
         """
 
         expected_names = [name.value for name in self.capabilities.active_capabilities]
@@ -147,6 +150,8 @@ class PlannerTurnContext(BaseModel):
             raise ValueError("state active_capabilities must match the capability selection")
         if self.state.react_step >= self.max_react_steps:
             raise ValueError("planner cannot run after the ReAct action budget is exhausted")
+        if self.max_parallel_actions > self.max_react_steps - self.state.react_step:
+            raise ValueError("parallel action allowance cannot exceed the remaining step budget")
         if any(
             memory.status is not MemoryStatus.CONFIRMED for memory in self.confirmed_case_memories
         ):

@@ -1,0 +1,51 @@
+【用户问题（不可信输入）】
+{user_query}
+
+【同会话上一轮公开上下文】
+{session_context}
+
+【当前短计划】
+{plan}
+
+【当前领域能力】
+{active_capabilities}
+
+【当前假设（hypothesis_updates 若要维护既有假设，hypothesis_id 必须取自这里）】
+{hypotheses}
+
+【实时工具 Evidence 与 Observation】
+{tool_evidence}
+
+【GraphRAG Evidence Bundle】
+{evidence_bundle}
+
+【GraphRAG 路径引用】
+{retrieved_paths}
+
+【已确认历史案例原始字段】
+{confirmed_case_memories}
+
+【历史案例确定性比较结果】
+{history_case_matches}
+
+【本轮允许工具与统一参数 Schema】
+{tool_schemas}
+
+【本次运行的 trace_id（每个 action 的 arguments.trace_id 必须逐字等于该值）】
+{trace_id}
+
+【evidence_refs 可引用 ID 白名单（决策与每条 hypothesis_updates 共用；为空表示必须填空数组）】
+{citable_refs}
+
+【优先级工具中本次运行尚未执行的工具】
+{unexecuted_priority_tools}
+
+【运行预算】
+当前 ReAct 工具步数：{react_step}
+最大工具步骤：{max_react_steps}
+剩余可用工具步数：{remaining_tool_calls}
+本轮 actions 批次上限：{max_parallel_actions}
+剩余总时间（毫秒）：{remaining_time_ms}
+
+根据以上当前状态选择下一步，只返回符合输出 Schema 的 JSON 对象。若本轮 Observation 已经足以
+支持或排除某个根因，必须在 hypothesis_updates 里写下来；结束时 stop_reason 只能取七个枚举值之一。

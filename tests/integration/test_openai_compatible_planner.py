@@ -92,7 +92,7 @@ def _finish_json(*, evidence_refs: list[str] | None = None) -> str:
             "status": "finish",
             "decision_summary": "当前结构化证据足以结束本轮。",
             "hypothesis_updates": [],
-            "action": None,
+            "actions": [],
             "evidence_refs": evidence_refs or [],
             "stop_reason": "evidence_sufficient",
         },
@@ -123,6 +123,7 @@ def _context() -> PlannerTurnContext:
         ),
         capabilities=selection,
         max_react_steps=6,
+        max_parallel_actions=3,
         remaining_time_ms=30_000,
     )
 
@@ -193,10 +194,14 @@ async def test_official_sdk_sends_strict_pydantic_schema_without_api_tools() -> 
         "status",
         "decision_summary",
         "hypothesis_updates",
-        "action",
+        "actions",
         "evidence_refs",
         "stop_reason",
     }
+    # strict Schema 不接受 maxItems，因此批次上限由 PlannerDecision 校验器执行；这里顺带确认
+    # actions 确实作为数组下发，而不是被 SDK 展平成单个对象。
+    assert schema["properties"]["actions"]["type"] == "array"
+    assert "maxItems" not in schema["properties"]["actions"]
     assert "tools" not in body
     assert "tool_choice" not in body
     metrics = recorder.snapshot()
@@ -317,10 +322,11 @@ async def test_sdk_refusal_and_timeout_map_to_non_repairable_domain_errors() -> 
 
 @pytest.mark.asyncio
 async def test_openai_compatible_agent_drives_langgraph_and_real_mcp_round_trip() -> None:
-    """验证真实 SDK适配器驱动 LangGraph→stdio MCP→Observation→模型第二轮。
+    """验证真实 SDK适配器驱动 LangGraph→并行 stdio MCP→Observation→模型第二轮。
 
-    Mock 模型首轮返回 LTS Action；真实 MCP 生成 evidence_id 后，第二个 SDK 请求的 Prompt 必须
-    包含该引用，handler 再返回引用它的 finish。该测试不访问外网但贯通当前全部运行边界。
+    Mock 模型首轮返回一批两个 LTS Action；两个真实 MCP 子进程并发执行后，第二个 SDK 请求的
+    Prompt 必须包含它们生成的 evidence_id，handler 再返回引用其中之一的 finish。该测试不访问
+    外网但贯通当前全部运行边界，并且是并行批次唯一跨真实子进程的证明。
     """
 
     bodies: list[dict[str, Any]] = []
@@ -338,20 +344,23 @@ async def test_openai_compatible_agent_drives_langgraph_and_real_mcp_round_trip(
             content = json.dumps(
                 {
                     "status": "call_tool",
-                    "decision_summary": "先读取 LTS 当前状态。",
+                    "decision_summary": "同时读取 LTS 当前状态与同一任务日志。",
                     "hypothesis_updates": [],
-                    "action": {
-                        "tool_name": "lts.get_task_status",
-                        "arguments": {
-                            "resource_id": "dws_order_report_daily",
-                            "time_range": {
-                                "start": "2026-07-10T00:00:00+08:00",
-                                "end": "2026-07-10T03:00:00+08:00",
+                    "actions": [
+                        {
+                            "tool_name": tool_name,
+                            "arguments": {
+                                "resource_id": "dws_order_report_daily",
+                                "time_range": {
+                                    "start": "2026-07-10T00:00:00+08:00",
+                                    "end": "2026-07-10T03:00:00+08:00",
+                                },
+                                "scenario_id": "cross_chain_pk_conflict",
+                                "trace_id": run_id,
                             },
-                            "scenario_id": "cross_chain_pk_conflict",
-                            "trace_id": run_id,
-                        },
-                    },
+                        }
+                        for tool_name in ("lts.get_task_status", "lts.get_task_log")
+                    ],
                     "evidence_refs": [],
                     "stop_reason": None,
                 },
@@ -379,7 +388,7 @@ async def test_openai_compatible_agent_drives_langgraph_and_real_mcp_round_trip(
     loop = BoundedReactLoop(
         planner=agent,
         executor=McpToolExecutor(StdioMcpClient(), retry_count=1),
-        config=ReactLoopConfig(max_steps=6, total_timeout_seconds=15),
+        config=ReactLoopConfig(max_steps=6, max_parallel_actions=2, total_timeout_seconds=15),
     )
     result = await loop.run(
         ReactRunRequest(
@@ -396,9 +405,12 @@ async def test_openai_compatible_agent_drives_langgraph_and_real_mcp_round_trip(
     )
 
     assert len(bodies) == 2
-    assert result.state.react_step == 1
+    # 一批两个 Action 消耗两个步数：并行只压缩等待时间，不发放额外取证预算。
+    assert result.state.react_step == 2
     assert result.state.stop_reason == "evidence_sufficient"
     assert result.state.evidence
     assert result.state.next_action is not None
-    assert result.state.next_action.evidence_refs == result.state.observation_refs
+    assert set(result.state.next_action.evidence_refs) <= set(result.state.observation_refs)
+    # 两条 ToolEvent 说明批内两个子进程都真的跑完了，而不是其中一个被去重或静默丢弃。
+    assert len(result.state.tool_events) == 2
     await client.close()

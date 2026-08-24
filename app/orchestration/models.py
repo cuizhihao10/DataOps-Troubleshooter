@@ -12,10 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.capabilities import CapabilitySelection, CapabilitySelectionRequest
 from app.domain.models import AgentState, CaseMemory, MemoryStatus, SimilarCaseReference
+from app.domain.planner import MAX_PARALLEL_TOOL_ACTIONS
 from app.domain.tooling import ToolName
 from app.retrieval.models import GraphEvidenceBundle
 
-REACT_LOOP_CONTRACT_ID = "langgraph-react-loop:v2"
+REACT_LOOP_CONTRACT_ID = "langgraph-react-loop:v3"
 
 
 class ReactLoopStatus(StrEnum):
@@ -33,7 +34,7 @@ class ReactStopReason(StrEnum):
     """列出确定性控制器能够主动产生的安全停止原因。
 
     Planner 的 finish/need_user_input 原因仍来自其结构化输出；本枚举只覆盖预算、总超时、重复
-    Action、组件越界、trace 漂移和无效引用等控制器可以客观判定的失败路径。
+    Action、组件越界、trace 漂移、无效引用和并行批次越界等控制器可以客观判定的失败路径。
     """
 
     REACT_BUDGET_EXHAUSTED = "react_budget_exhausted"
@@ -42,6 +43,8 @@ class ReactStopReason(StrEnum):
     TOOL_NOT_ALLOWED_BY_CAPABILITY = "tool_not_allowed_by_capability"
     TRACE_ID_MISMATCH = "trace_id_mismatch"
     INVALID_EVIDENCE_REFERENCE = "invalid_evidence_reference"
+    PARALLEL_LIMIT_EXCEEDED = "parallel_limit_exceeded"
+    PARALLEL_BUDGET_EXCEEDED = "parallel_budget_exceeded"
 
 
 class ReactEventType(StrEnum):
@@ -72,6 +75,9 @@ class ReactPublicEvent(BaseModel):
     event_type: ReactEventType
     summary: str = Field(min_length=1, max_length=500)
     tool_name: ToolName | None = None
+    # 并行批次仍然只产生一条 PLANNER_DECISION 事件，因此批次大小必须单独可读：只看 tool_name
+    # 无法区分"决定查一个工具"和"决定同时查三个工具"，而这正是延迟归因要用的事实。
+    parallel_action_count: int = Field(default=0, ge=0, le=MAX_PARALLEL_TOOL_ACTIONS)
     observation_refs: tuple[str, ...] = ()
     stop_reason: str | None = Field(default=None, min_length=1, max_length=500)
 
@@ -92,15 +98,18 @@ class ReactPublicEvent(BaseModel):
 
 
 class ReactLoopConfig(BaseModel):
-    """集中声明单次 Planner ReAct 运行的工具 Action 和墙钟预算。
+    """集中声明单次 Planner ReAct 运行的工具 Action、并行度和墙钟预算。
 
     `max_steps` 统计 Planner 选择的工具 Action，不统计 MCP 内部重试；`total_timeout_seconds`
-    覆盖路由、Planner、工具和图调度。模型冻结并限制范围，避免调用方在运行中扩大预算。
+    覆盖路由、Planner、工具和图调度。`max_parallel_actions` 只压缩等待时间而不放大预算：一批
+    N 个 Action 仍然消耗 N 个步数，因此并行买到的是延迟而不是更多次取证机会。模型冻结并限制
+    范围，避免调用方在运行中扩大预算。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     max_steps: int = Field(default=6, ge=1, le=20)
+    max_parallel_actions: int = Field(default=3, ge=1, le=MAX_PARALLEL_TOOL_ACTIONS)
     total_timeout_seconds: float = Field(default=60, gt=0, le=600)
 
 

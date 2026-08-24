@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.agents.planner import PlannerTurnContext
 from app.agents.prompts import PLANNER_PROMPT_ID, load_planner_prompt_parts
 from app.domain.tooling import McpToolRequest
+from app.reporting.evidence import collect_reference_sources
 
 _USER_TEMPLATE_FIELDS = frozenset(
     {
@@ -29,8 +30,13 @@ _USER_TEMPLATE_FIELDS = frozenset(
         "confirmed_case_memories",
         "history_case_matches",
         "tool_schemas",
+        "trace_id",
+        "citable_refs",
+        "unexecuted_priority_tools",
         "react_step",
         "max_react_steps",
+        "remaining_tool_calls",
+        "max_parallel_actions",
         "remaining_time_ms",
     }
 )
@@ -51,7 +57,7 @@ class PlannerPromptBundle(BaseModel):
 
 
 class PlannerPromptRenderer:
-    """使用 v3 模板和规范 JSON 将强类型 Planner 上下文渲染为两条消息。
+    """使用版本化模板和规范 JSON 将强类型 Planner 上下文渲染为两条消息。
 
     构造时读取并审计模板占位符；`render` 每轮只替换批准字段。模板字段缺失或新增会显式失败，
     防止代码与 Prompt 文件静默漂移，也让 Golden Case 能按 prompt_id 重放。
@@ -136,8 +142,41 @@ class PlannerPromptRenderer:
                 [item.model_dump(mode="json") for item in context.history_case_matches]
             ),
             "tool_schemas": _json_text(tool_schemas),
+            # trace_id 与可引用 ID 都是控制器门禁的判定输入，因此必须显式渲染而不是留给模型推断：
+            # 两者本来只存在于 ReactGraphState 里，模型看不到 run_id，也无法区分 evidence_id 和
+            # Evidence Bundle 里的 node_id，于是第一步就会被整批拒绝、白花一次付费调用。
+            "trace_id": _json_text(state.run_id),
+            # 白名单与报告层共用 `collect_reference_sources`，而不是只列实时 evidence_id：草稿、
+            # 策略校验、修订和 Auditor 都接受 Bundle 的 kn_*/path_*/dc_* 与 confirmed 案例 ID，
+            # 若 Planner 的白名单更窄，模型引用 Prompt 里明明给出的知识证据反而会被门禁整批拒绝
+            # （首次真实模型评测的第三个案例就以 invalid_evidence_reference 终止）。同时公开每个
+            # ID 的来源类型：只有实时 Observation 能把假设升为 supported，模型需要据此判断。
+            "citable_refs": _json_text(
+                [
+                    {"id": reference_id, "source": source.value}
+                    for reference_id, source in collect_reference_sources(
+                        state,
+                        context.evidence_bundle,
+                        context.confirmed_case_memories,
+                    ).items()
+                ]
+            ),
+            # 未执行的优先级工具由渲染层算好：模型能看到已有 Observation，却要自己做集合差集才能
+            # 发现"用户问的是上游依赖，而依赖拓扑工具还没跑"。首次真实模型评测里两个案例都在缺少
+            # 拓扑/表结构证据的情况下就 evidence_sufficient，随后被 Auditor 判为未回答用户问题。
+            "unexecuted_priority_tools": _json_text(
+                [
+                    tool.value
+                    for tool in context.capabilities.tool_priority
+                    if tool not in {event.tool_name for event in state.tool_events}
+                ]
+            ),
             "react_step": str(state.react_step),
             "max_react_steps": str(context.max_react_steps),
+            # 剩余步数由渲染层直接算出来交给模型，而不是让模型自己做减法：一批 N 个 Action 会消耗
+            # N 个步数，模型如果算错就会提交刚好超预算的批次，而每次被控制器拒绝都白花一次调用。
+            "remaining_tool_calls": str(context.max_react_steps - state.react_step),
+            "max_parallel_actions": str(context.max_parallel_actions),
             "remaining_time_ms": str(context.remaining_time_ms),
         }
         user_message = self._user_template.format_map(values)
