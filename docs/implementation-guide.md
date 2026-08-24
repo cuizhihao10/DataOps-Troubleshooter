@@ -181,6 +181,10 @@ Alembic 迁移是数据库结构的版本历史。首个迁移：
 
 Provider 算法发生变化时必须提升 ID 版本。只改变维度则更新 `embedding_dimensions`；两者都会让旧行自动退出当前向量查询，直到重新执行幂等种子写入。
 
+生产默认 `bge-m3:v1` 由 `OpenAICompatibleEmbeddingProvider` 通过 OpenAI-compatible `/embeddings` 调用硅基流动托管的 `BAAI/bge-m3`（1024 维，多语言）。它原生处理中英混排的运维术语，因此“任务卡住”与“作业长时间无响应”能得到真实语义相似度，这是 feature hashing 基线做不到的。实现关闭 SDK 隐式重试（`max_retries=0`），使失败次数等于真实请求次数以便成本核算；按 `embedding_batch_size` 分批请求，并严格校验返回条数、按 `index` 重排、逐项检查维度/有限性/非零，任一项不符即抛 `EmbeddingProviderError` 让整批失败，绝不写入半个向量空间。
+
+两个 Provider 通过版本化 ID 严格隔离，128 维旧行与 1024 维新行即使同库共存也不会进入同一次 cosine 排序，因此切换模型不需要迁移列类型，只需重跑种子。凭据只从 `DATAOPS_EMBEDDING_API_KEY` 读取并以 `SecretStr` 持有；`Settings` 启动校验要求非确定性 Provider 必须有 key，且 `bge-m3:v1` 的维度必须等于 1024，避免半配置部署一边宣称语义检索、一边继续输出 feature-hash 向量。
+
 ## 8. 显式 GraphRAG 路径
 
 ### 8.1 为什么关系必须进入边表
@@ -236,19 +240,45 @@ PostgreSQL `to_tsvector` 和 `websearch_to_tsquery` 召回全文种子，同时�
 
 ### 8.6 Evidence Bundle 上下文预算
 
-`GraphRetrievalResult` 是完整检索结果，不应原样注入 Planner。`app/retrieval/budget.py` 将它转换为 `graphrag-evidence-bundle:v1`：先按最终检索排序尝试加入路径及其全部节点，再补充未出现的高分种子。路径是原子候选，任何字节、节点或路径预算不满足时整条省略，不会切断边或截短正文。
+`GraphRetrievalResult` 是完整检索结果，不应原样注入 Planner。`app/retrieval/budget.py` 将它转换为 `graphrag-evidence-bundle:v2`：先按最终检索排序尝试加入路径及其全部节点，再补充未出现的高分种子，最后加入文档切片。路径是原子候选，任何字节、节点或路径预算不满足时整条省略，不会切断边或截短正文。
 
-默认预算为 6000 个 UTF-8 JSON 字节、8 个唯一节点和 4 条路径。使用字节而不是某个供应商 tokenizer，能在尚未绑定模型时保持精确可重放；未来模型适配层仍可在此硬上限内增加供应商 token 检查。`used_bytes` 只统计规范序列化后的 selected_nodes/selected_paths 主体，omitted IDs 属于诊断元数据。
+默认预算为 6000 个 UTF-8 JSON 字节、8 个唯一节点、4 条路径和 3 个文档切片。使用字节而不是某个供应商 tokenizer，能在尚未绑定模型时保持精确可重放；未来模型适配层仍可在此硬上限内增加供应商 token 检查。`used_bytes` 只统计规范序列化后的 selected_nodes/selected_paths/selected_documents 主体，omitted IDs 属于诊断元数据。
 
-知识节点使用 `kn_<node_id>` 作为稳定证据引用，路径继续使用数据库边序列生成的 `path_id`。Bundle 不包含 embedding、模型原始推理或数据库内部状态；`truncated=true` 明确表示仍有候选因预算未注入。
+文档切片单独设数量上限而不是与节点共享，是因为切片正文远长于知识节点：共享上限会让几段 Runbook 正文挤掉全部图证据，报告随之退化成"引用了文档但说不出故障如何传播"。装入顺序同理把图证据放在文档之前，关系路径是本系统区别于普通 RAG 的解释能力。
+
+知识节点使用 `kn_<node_id>` 作为稳定证据引用，路径继续使用数据库边序列生成的 `path_id`，文档切片使用 `dc_<hash>`。Bundle 不包含 embedding、模型原始推理或数据库内部状态；`truncated=true` 明确表示仍有候选因预算未注入。
 
 ### 8.7 Vector-only / Vector+Graph 消融
 
-检索服务提供三个显式模式：`vector_only` 只返回向量种子，`vector_graph` 在相同向量种子上扩图，`hybrid_graph` 再加入全文通道并作为生产默认值。模式进入 `graphrag-retrieval:v2` 输出，避免通过隐藏布尔开关运行无法复现的实验。
+检索服务提供三个显式模式：`vector_only` 只返回向量种子，`vector_graph` 在相同向量种子上扩图，`hybrid_graph` 再加入全文通道并作为生产默认值。模式进入 `graphrag-retrieval:v3` 输出，避免通过隐藏布尔开关运行无法复现的实验。
 
 `data/evals/graphrag_ablation_cases.json` 使用稳定知识节点 ID 标注预期根因和必要有序路径。`app/retrieval/ablation.py` 计算根因节点是否可见，以及必要节点序列在最佳真实路径中的覆盖比例；它不调用 LLM，因此当前指标只描述检索层，不冒充最终报告准确率。
 
 首个案例实测值记录在 `docs/graphrag-ablation-results.md`。结果显示根因在 vector-only 已经命中，图扩展没有虚报额外根因收益；图的可解释增益体现在必要因果链完整率从 0.0 变为 1.0。
+
+### 8.8 两阶段检索与 cross-encoder 重排
+
+双塔 embedding 为了可索引必须独立编码查询和文档，因此无法建模两者的交互；cross-encoder 把查询与候选拼在一起联合打分，在小候选集上判别力显著更强但无法预先建索引。主流做法因此是两阶段：一阶段多召回、二阶段精排少量候选。
+
+`app/retrieval/reranker.py` 定义 `RerankerProvider` 协议（`provider_id`、`model`、顺序对齐的 `rerank`），`HttpCrossEncoderReranker` 通过 Jina/Cohere 风格 `/rerank` 端点调用硅基流动托管的 `BAAI/bge-reranker-v2-m3`。该端点不属于 OpenAI 规范，所以这里直接用 httpx 而非 OpenAI SDK。**关键实现细节：`/rerank` 按 `relevance_score` 降序返回结果并携带 `index` 字段，必须按 `index` 回填到输入位置**；按响应顺序读取不会报错，只会把最高分错配给第一个候选，这是此类集成最容易出现且最难发现的缺陷，`tests/unit/test_reranker.py` 用乱序响应专门锁定这一点。
+
+检索服务的两阶段流程是：`_candidate_limit` 把 `seed_limit` 乘以 `rerank_candidate_multiplier`（默认 3）作为一阶段召回数，并同时受仓储 top-k 契约（20）和端点单次文档上限（64）双重设限——多召回是二阶段收益的唯一来源，候选太少精排就无从改名次；随后融合分数并截断到 `seed_limit`，只有存活的种子参与图扩展。融合公式是 `final_score = (1 - rerank_blend_weight) * hybrid_score + rerank_blend_weight * rerank_score`，默认权重 0.4。选择线性融合而不是直接用重排分覆盖，是因为 cross-encoder 只看查询与文本的语义匹配，完全不知道节点可靠性、图路径强度与命中通道；两者相加才能既吸收精排判别力，又保留知识库自身的可信度信息。
+
+三层分数分开保存并进入 `graphrag-retrieval:v3` 契约：`hybrid_score` 是一阶段五项加权分，`rerank_score` 是二阶段分数，`final_score` 是显式融合结果。领域模型强制一条不变量——`rerank_score` 为空时 `final_score` 必须等于 `hybrid_score`，因此“重排了顺序却没有重排分数”在结构上无法构造，评测总能把名次变化归因到召回或精排中确定的一个环节。`candidate_count` 记录精排前的候选规模，使“重排带来多少提升”有可核对的分母。路径不单独送进 cross-encoder：路径的相关性来源是“这个种子值得展开”，对拼接文本重复打分只增加成本不增加信息，因此路径按同一权重继承种子的 `rerank_score`。
+
+重排是可选增强而不是可用性依赖。`rerank_provider=disabled` 时工厂返回 `None`（而不是一个恒等替身），检索结果里的 `reranker_model` 因此真实为空；运行时 `RerankerError` 或分数长度不齐一律降级为保留一阶段排序，并同时把 `reranker_model` 置空、`rerank_blend_weight` 归零。这三个字段一起构成诚实性保证：任何报告都无法把未精排的顺序说成精排结果。证据预算按 `final_score` 选择注入上下文的节点与路径，所以重排真正影响“哪些证据进入 Prompt”，而不只是展示顺序。
+
+### 8.9 文档 RAG：第二条知识通道
+
+知识图能回答“故障如何沿依赖传播”，但排障的最后一步需要的是可执行处置步骤，而这些步骤只写在 Runbook、SOP、复盘和 FAQ 里。因此系统有第二条平行通道：`app/retrieval/documents.py` 定义领域契约，`document-retrieval:v1` 是它的对外结构。两条通道共享同一个 PostgreSQL、同一个 Embedding Provider、同一个 cross-encoder 和同一份评分诚实性不变量（`app/retrieval/scoring.py`），但保持独立表与独立仓储：切片是“一段可执行步骤”，节点是“一个实体”，混在一张表里会让向量空间过滤和评分因子互相污染。
+
+**切片而不是文档是检索与引用单元。** `app/retrieval/chunking.py` 按 Markdown 标题层级确定性切分，每个切片保留 `heading_path`（“文档标题 > 章节 > 小节”）和文档内连续 `ordinal`。`dc_<hash>` 由 `doc_id|ordinal` 的 SHA-256 前 16 位生成，因此同一文档重新导入后引用不变，历史报告里的脚注仍指向同一段正文。标题路径必须参与 embedding 编码：SOP 的关键词经常只出现在小节标题上（“限流阈值调整”），只编码正文会让这类片段在语义通道彻底消失。切片正文上限 1200 字符，这个数字不是随手取的——它必须小于 `RemediationStep.action` 的 2000 字符上限，否则一个超长切片被提升为处置建议时会在报告构建阶段抛 ValidationError。
+
+**三因子评分，刻意不复用图侧的五因子。** 默认权重是 semantic 0.60 / lexical 0.25 / authority 0.15，其中 authority 直接取文档人工声明的 `reliability`。`path` 对没有关系边的切片没有意义，`freshness` 也无法从静态语料得到诚实取值，硬凑五项只会让公式看起来更复杂而不更准确。权重和不为一时在 Settings 初始化阶段失败，不做隐式归一化：一个错配权重被静默修正后，评测报告的分数区间仍看起来正常，却已无法与文档基线比较。
+
+**导入采取“先删该文档全部切片再整批插入”。** 重新切片会改变切片数量与边界，逐条 upsert 会让旧版本的尾部切片以过时正文残留在库里继续被召回，而这种污染在检索结果上完全看不出来。知识图与文档语料在 `app/persistence/seed.py` 的同一个事务里提交，避免出现“图已就绪但文档缺失”的中间状态——那种状态下检索仍会返回结果，只是永远少了一条通道。启动审计对切片执行与知识节点相同的全有或全无向量检查：`document_chunks_embedded != document_chunks_loaded` 直接拒绝启动，因为部分切片缺向量时语义通道只会少召回而不报错。
+
+**只有 Runbook/SOP 的步骤小节能变成处置建议。** `app/reporting/draft.py` 的 `_is_remediation_chunk` 匹配标题路径最后一段是否含“处置步骤/确认步骤/恢复步骤”，且文档类型属于 Runbook/SOP。复盘的“改进项”是长期治理动作而非本次处置，FAQ 是判断依据而非操作，Runbook 里同样存在“禁止操作”“升级条件”这类正文——把它们当成待执行动作，报告就会建议运维去做一件文档明确禁止的事。判定依据是作者显式声明的标题，而不是正文关键词或模型判断，因此 Golden 回放能稳定复现同一份建议。文档来源的建议一律标记 medium 风险，前置条件包含“确认该修订版本仍适用于本次故障范围”，并且永不声称系统已执行。
 
 ## 9. 固定 runtime capability registry
 
@@ -322,14 +352,15 @@ while 循环中手工模仿节点名称。依赖通过 `pyproject.toml` 声明�
 START
   -> select_capabilities
   -> planner_react
-       -> execute_tool
+       -> execute_tools
        -> planner_react
        -> END
 ```
 
 `select_capabilities` 调用固定 registry，并把意图和名称注入 AgentState；`planner_react` 调用
-可替换 `PlannerAgent` 协议，接收结构化 PlannerDecision；`execute_tool` 使用注入执行器跨真实
-MCP，随后原子回写 Evidence、ToolEvent、observation_refs 和 react_step。
+可替换 `PlannerAgent` 协议，接收结构化 PlannerDecision；`execute_tools` 使用注入执行器跨真实
+MCP 执行本轮整批 Action，随后原子回写 Evidence、ToolEvent、observation_refs 和 react_step。
+编译后的图名为 `dataops_bounded_react_v3`，契约 ID 为 `langgraph-react-loop:v3`。
 
 LangGraph 的 state_schema 使用 `ReactGraphState` Pydantic 模型。每个节点接收和返回强类型
 模型，框架最终给出的映射也立即通过 `model_validate` 重建。Planner、Executor、Registry 和
@@ -340,7 +371,7 @@ LangGraph 的 state_schema 使用 `ReactGraphState` Pydantic 模型。每个节�
 
 `app/agents/planner.py` 的 `PlannerAgent` 是依赖反转边界：生产实现必须接收
 `PlannerTurnContext` 并返回 `PlannerDecision`。它不提供工具执行或 Observation 写入方法，因而
-模型供应商适配器不能绕过图节点。OpenAI-compatible Chat Provider、v4 Prompt Renderer 和一次
+模型供应商适配器不能绕过图节点。OpenAI-compatible Chat Provider、v5 Prompt Renderer 和一次
 结构化输出修复现已实现；报告草稿和独立 Auditor 由 `audited-report-workflow:v2` 接续。
 Scripted Planner 测试仍用于隔离纯图控制流，官方 SDK MockTransport 测试则验证真实模型协议边界。
 
@@ -350,44 +381,95 @@ PlannerTurnContext 会再次检查 AgentState.intent、active_capabilities 和 C
 
 ### 10.3 Action 门禁与重复检测
 
-PlannerDecision 通过 Pydantic 只证明 JSON 结构合法，仍不足以安全执行。控制器在 MCP 前依次
-检查：引用是否存在、工具是否属于当前组件范围、trace_id 是否等于 run_id、Action 是否已经
-执行。任何失败都生成 `policy_blocked` 事件和公开 stop_reason，不调用 Executor。
+PlannerDecision 通过 Pydantic 只证明 JSON 结构合法，仍不足以安全执行。控制器在 MCP 前按固定顺序
+检查：引用是否存在、批次是否超过配置并行上限、批次是否超过剩余步数预算，然后逐个 Action 检查工具
+是否属于当前组件范围、trace_id 是否等于 run_id、Action 是否已经执行。任何失败都生成 `policy_blocked`
+事件和公开 stop_reason，不调用 Executor。
+
+门禁一律整批拒绝，不做截断执行。截断看起来更"宽容"，但会让 Planner 下一轮基于"我提交的三个调用
+都发生了"的错误前提推理，排查成本远高于直接停止。
 
 重复检测先从 ToolAction 排除每轮必变但不影响查询语义的 trace_id，再把工具、资源、时间窗和场景
 规范化为排序键、紧凑 UTF-8 JSON 并计算 SHA-256。同工具不同资源仍允许；同一查询即使恢复后使用
-新 run trace 也会拦截。trace_id 仍由独立策略门禁强制等于当前 run_id，不能借去重逻辑绕过审计。
+新 run trace 也会拦截。指纹集合同时覆盖同批次内部与此前轮次（含 checkpoint 恢复后的历史），因为
+一批里放两个完全同参的调用只会浪费两个步数换同一个 Observation。trace_id 仍由独立策略门禁强制等于
+当前 run_id，不能借去重逻辑绕过审计。
 
-MCP 内部 TIMEOUT/SERVICE_UNAVAILABLE 重试仍由 McpToolExecutor 负责。一次 Planner Action
-无论产生一个还是两个 ToolEvent，react_step 都只增加一；这样“最多 6 步”表达调查决策预算，
+MCP 内部 TIMEOUT/SERVICE_UNAVAILABLE 重试仍由 McpToolExecutor 负责。一个 Planner Action
+无论产生一个还是两个 ToolEvent，react_step 都只增加一；这样“最多 8 步”表达调查决策预算，
 不会被传输重试歪曲，同时总网络尝试仍完整可审计。
 
-### 10.4 总超时与最后完整状态
+### 10.4 有界并行工具调用
 
-`DATAOPS_REACT_TOTAL_TIMEOUT_SECONDS` 默认 60 秒，覆盖 LangGraph 调度、Planner 等待和 MCP
+"查 LTS 状态 + 查同一任务日志 + 查依赖拓扑"本来就是三个互不依赖的只读操作，串行执行白等三倍
+延迟，而产品的 P95 目标是 ≤30 秒。因此 `execute_tools` 接受一批 1 到 `max_parallel_tool_actions`
+（默认 3，硬上限 `MAX_PARALLEL_TOOL_ACTIONS = 3`）个 Action，用
+`asyncio.gather(..., return_exceptions=True)` 并发执行，汇总后把任一 `BaseException` 原样重抛，再用
+`zip(actions, observations, strict=True)` 按 Planner 给出的顺序确定性合并状态。并发因此只影响等待
+时间，不影响状态写回顺序，也不会让某个失败被 gather 静默吞掉。
+
+并发安全来自两处既有设计而不是新增锁：`StdioMcpClient` 每次 `call_tool` 都新起子进程、`initialize`
+再拆除，所以一批 Action 跑在彼此隔离的 MCP 会话上；`RunTraceCollector` 在 span 开始时就预留序号、
+结束时按序号回填，并让每个 `asyncio.gather` 任务复制一份 `_CURRENT_PARENT` ContextVar，所以
+`run-trace:v1` 的"序号连续"和"父先于子"两条不变量在并发下仍然成立。遥测形状是一个
+`react.tool_batch` 父 span（属性含 `action_count`、`tool_names`、`react_step`、`ok_count`、
+`failed_count`）包住每个 Action 的 `react.tool_call` 子 span；只要有一个 Action 失败，父 span 标记
+ERROR。
+
+预算语义是这里最关键的产品决定：`react_step += len(actions)`。并行只压缩等待时间，不发放额外取证
+预算，所以把并行度从 1 调到 3 会降低 P95，但不会让模型多看证据，也不需要同步调大
+`max_react_steps`。`app/core/settings.py` 因此额外拒绝 `max_parallel_tool_actions > max_react_steps`
+的配置：那种组合下控制器每轮都要把批次上限压回剩余步数，配置写的值永远不生效，宁可启动失败也
+不要留下"看起来配了 3 实际只能 1"的误导。Prompt 与门禁同源同样由控制器保证——`planner_react` 注入
+`max_parallel_actions=min(config.max_parallel_actions, remaining_tool_calls)`，单元测试断言这个序列
+在 6 步预算下从第 4 步开始收敛为 `[2, 1]`。
+
+对外契约刻意保持向后兼容：`ReactPublicEvent.tool_name` 仍是单值（批次大小 > 1 时为 null），新增
+`parallel_action_count` 说明本轮批量；`run_events` 里两者一起落库，因为回放时间线时"三步串行"和
+"一批三个并行"看起来完全一样，而这正是解释延迟改善的唯一依据。批内每个 Action 各产生一条
+OBSERVATION_RECORDED 事件，单个工具失败依旧单独可见，所以 `diagnosis-resources:v4` 和 `/demo`
+前端都不需要改动。
+
+### 10.5 总超时与最后完整状态
+
+`DATAOPS_REACT_TOTAL_TIMEOUT_SECONDS` 默认 150 秒，覆盖 LangGraph 调度、Planner 等待和 MCP
 执行，独立于单工具 timeout。控制器使用 `asyncio.timeout` 取消超时节点，并以 LangGraph
 `astream(stream_mode="values")` 持续保存最后一个完整 Pydantic 状态。这样第二次工具卡住时，
 第一次已经取得的证据不会因为总超时丢失；终态追加 `total_timeout`，但不会伪造失败节点结果。
 
+步数预算与墙钟预算的默认值都由首次真实模型评测校正过，这里记录校正理由，因为两个数字看起来
+只是"调大一点"，实际各自修掉一类结构性错误。步数从 6 调到 8：Golden 集里跨组件案例的
+`required_tools` 最多 6 个，6 步预算等于零余量，而真实模型总要花一到两步试探，于是每次试探都
+直接换掉一个必需取证——实测跨组件案例执行满 6 步后以 `react_budget_exhausted` 结束，却漏掉
+`bds.get_table_info`，满覆盖在这种配置下是不可达的。墙钟从 60 秒调到 150 秒是步数调整的必然
+后果：实测 Planner 单次决策 8–15 秒，8 步在最坏情况下要四次决策再加工具与检索时间，仍用 60 秒
+只会把"时间不够"伪装成"步数用完"，而这两种终止原因对使用者的含义完全不同（前者要加时间或减
+并发，后者要重新设计取证顺序）。
+
 递归上限按 `max_steps * 2 + 6` 设置，覆盖路由、每次 execute/planner 回边和最终预算检查。
 它是框架死循环的第二道防线，业务停止仍由 react_step 和 stop_reason 决定。
 
-### 10.5 公开事件与审计 ID
+### 10.6 公开事件与审计 ID
 
-`ReactPublicEvent` 只记录稳定 ID、序号、类型、公开摘要、工具名、Observation 引用和停止原因，
-不包含 Thought。终止类事件强制 stop_reason；`ReactRunResult` 强制最终 AgentState 和最后事件都
+`ReactPublicEvent` 只记录稳定 ID、序号、类型、公开摘要、工具名、批次大小、Observation 引用和停止
+原因，不包含 Thought。终止类事件强制 stop_reason；`ReactRunResult` 强制最终 AgentState 和最后事件都
 处于可解释终态，防止条件边错误导致无声结束。
 
 Evidence 与 ToolEvent 的稳定 ID 现在包含规范化请求身份。此前同一 trace 内同一工具查询不同
 资源可能共享事件 ID；加入资源、时间窗、场景和 trace 后，不同参数调用可独立寻址，而完全相同
 请求重放仍稳定。合并状态时若同 ID 的结构化载荷不同，控制器显式失败，不覆盖旧审计事实。
 
-### 10.6 验证范围
+### 10.7 验证范围
 
 单元测试覆盖 capability 注入、Action/Observation 回写、同参拦截、组件越界、trace 漂移、
-无效证据引用、步数耗尽、总超时和不同参数审计 ID。集成测试用 Scripted Planner 发出
+无效证据引用、步数耗尽、总超时和不同参数审计 ID；并行部分额外用一个记录 `max_in_flight` 的探针
+执行器证明一批三个 Action 真的同时在飞（而不是被顺序 await），并断言它消耗三个步数、批内同参调用
+在任何执行前被拦截、超并行上限与超剩余预算分别停在
+`parallel_limit_exceeded` / `parallel_budget_exceeded`。集成测试用 Scripted Planner 发出
 `lts.get_task_status`，Action 必须经过 LangGraph 和真实 stdio MCP，再由第二轮 Planner 读取
-回写证据并 finish。该测试证明控制器闭环真实存在，但不宣称付费模型推理质量。
+回写证据并 finish；另一个集成测试让真实 SDK 适配器一次提交两个 LTS Action，跨两个真实 stdio 子进程
+并发执行后回到模型第二轮，这是并行批次唯一跨真实子进程的证明。这些测试证明控制器闭环真实存在，
+但不宣称付费模型推理质量。
 
 ## 11. OpenAI-compatible Planner Structured Outputs
 
@@ -407,11 +489,50 @@ Evidence 与 ToolEvent 的稳定 ID 现在包含规范化请求身份。此前�
 依赖在 `pyproject.toml` 中声明为 `openai>=2.45,<3`，当前锁定 2.45.0。Provider 设置
 `max_retries=0`，避免 SDK 自动重试隐藏真实调用次数或突破 LangGraph 总超时。
 
-### 11.2 v4 Prompt 的 system/user 隔离、追问上下文与历史解释
+### 11.2 v8 Prompt 的 system/user 隔离、追问上下文、历史解释、并行批次与门禁前提
 
-`planner-react:v4` 使用两个独立文件：system 只包含角色、安全和输出行为；user 承载查询、同会话
+`planner-react:v8` 使用两个独立文件：system 只包含角色、安全和输出行为；user 承载查询、同会话
 上一轮公开报告、raw confirmed 案例、确定性 history_case_matches、工具 Evidence、GraphRAG 和预算。
 历史相似度/差异同样是不可信低优先级 JSON，不能覆盖 system 的实时事实优先规则。
+
+v8 相对 v7 只补齐三处"控制器已经在执行、但模型看不到"的口径，不改变消息角色边界：可引用 ID 白名单
+改由 `collect_reference_sources` 与报告层同源生成并公开每个 ID 的 `source`（此前 Planner 侧更窄，
+模型引用 Bundle 知识证据反而被整批拒绝）；system 侧写明只有 `source` 为 `tool` 的实时 Observation
+引用能把假设升为 `supported`；user 侧新增 `{unexecuted_priority_tools}`，并规定该列表非空且工具
+可能改变结论时不得直接 `evidence_sufficient`。
+
+v5 相对 v4 改两件事：`call_tool` 从"选一个 Action"变成"提交 1 到 `max_parallel_actions` 个互不
+依赖的 Action"，并新增 `remaining_tool_calls` 与 `max_parallel_actions` 两个运行预算占位符。这两个
+数由渲染层直接算出来交给模型，而不是让模型自己做减法：一批 N 个 Action 会消耗 N 个步数，模型算错
+就会提交刚好超预算的批次，而每次被控制器整批拒绝都白花一次模型调用。system 侧对应新增一段批次
+硬约束，明确"并行只缩短等待时间，不增加取证预算"，以阻止模型用广撒网代替假设驱动。
+
+v6 把同一条原则补齐到剩下两个门禁输入 `trace_id` 与 `citable_refs`。这次升版由真实模型实测直接
+逼出来：`live-golden-eval:v1` 首次带真实 `gpt-5.6-sol` 跑三条 Golden 案例时，`executed_tools` 全为
+空，两例停在 `invalid_evidence_reference`、一例停在 `trace_id_mismatch`——一个工具都没执行。原因
+不是模型能力问题，而是 v5 Prompt 缺少判定输入：`react_loop` 要求每个 Action 的
+`arguments.trace_id` 逐字等于当前 `run_id`，可 `run_id` 只存在于 `ReactGraphState` 里；
+`evidence_refs` 只接受 `state.evidence` 的 `evidence_id` 与 `state.retrieved_paths` 的 `path_id`，
+而 Evidence Bundle 里最显眼的标识恰好是不可引用的 `node_id`。确定性脚本替身永远能直接从状态里取
+run_id、也不会去引用 node_id，所以 390 个离线用例全绿也照不出这个缺口——这正是必须有一次真实模型
+冒烟评测的原因。v6 因此显式渲染 `{trace_id}` 与 `{citable_refs}`（首轮为空数组），并在 system 侧
+说明三条：trace_id 逐字复制、evidence_refs 只取白名单、Bundle 的 node_id/文档标识不是 evidence_id。
+
+v7 由同一次真实模型评测的第二轮结果逼出来：工具执行恢复正常之后，三条案例的
+`root_cause_top1_hit_rate` 与 `stop_reason_hit_rate` 仍然实测为 0，`accepted_report_rate` 只有
+0.333。原因同样不是模型能力，而是两个契约缺口。第一个是**结论没有入口**：报告根因由
+`AgentState.hypotheses` 确定性投影而成，而写入它的唯一通道是 `PlannerDecision.hypothesis_updates`；
+v6 的 `HypothesisUpdate` 只有 `hypothesis_id` / `status` / `evidence_refs`，没有任何字段能承载新假设
+的症状与候选根因，`react_loop` 也从未把更新投影回状态。实测运行里模型在 `decision_summary` 写出了
+正确根因（“partition_date 参数值 20260713 不符合 yyyy-MM-dd 格式”）并提交了 `status="new"` 的更新，
+却因为契约无处安放内容而被整体丢弃，于是 `root_causes` 恒为空，Auditor 以 `report_incomplete` 指向
+`$.root_causes` 否决，返工删得更空，第二轮必然 `safe_degraded`。第二个是**停止原因是自由文本**：
+`stop_reason` 原为 `str`，模型给出的是整段中文理由，既让公开事件带上近似结论叙述，又让 Golden 的
+七个分类期望永远无法命中。v7 因此把 `stop_reason` 收成 `PlannerStopReason` 枚举、给
+`HypothesisUpdate` 加上 `symptom` / `candidate_root_cause`（`status="new"` 时必填），并在 system 侧
+明确写出“hypothesis_updates 是结论进入报告的唯一通道，decision_summary 不会被解析”。假设的组件
+范围与置信度都不由模型自述：组件取本次已批准的 capability 组件，置信度由状态确定性映射，
+因此报告里不会出现无法复算的模型自评数字。
 
 `PlannerPromptRenderer` 在构造时用 `string.Formatter` 精确审计占位符集合。新增或删除字段必须同步
 代码和 Prompt，否则 Agent 构造立即失败。所有 Pydantic 载荷使用排序键、保留中文的 UTF-8 JSON，
@@ -442,6 +563,16 @@ FastAPI lifespan 调用 `create_planner_runtime`：disabled 返回 None；启用
 发送付费健康探测。`/health` 只报告 disabled/configured、Provider、模型、endpoint host、超时和
 修复预算；configured 仅表示本地配置可构造，不冒充远端服务已连通。退出时关闭自有 AsyncOpenAI
 连接池，注入测试客户端由测试自行管理。
+
+所有出站客户端共用 `app/core/http_identity.py` 的 `outbound_default_headers()`，把 `User-Agent`
+固定为 `dataops-troubleshooter/1.0`。这不是风格偏好而是实测兼容性结论：OpenAI-compatible 第三方
+网关前常挂 WAF，会按客户端标识拦截。同一密钥、同一模型、同一 strict JSON Schema 下逐项对照的
+结果是——裸 `httpx` 请求返回 200，只把 `User-Agent` 换成 SDK 默认的 `OpenAI/Python 2.9.0` 就返回
+`403 Your request was blocked.`，而 SDK 的 `x-stainless-*` 遥测头全部加上仍然返回 200。因此 403
+既不是密钥、配额问题，也不是 Structured Outputs 不被支持。请求仍带 Bearer 令牌、仍走配置的
+base_url，语义没有任何改变。把它放在单独模块而不是各 Provider 内联，是为了让 Planner、Auditor、
+Embedding、Reranker 四个出站入口不可能漏改：否则下一个新增 Provider 会在真实网关上重现同一个
+难以定位的 403。
 
 ### 11.5 验证范围
 
@@ -773,7 +904,7 @@ completed 必须有 result 且无错误；failed 必须有 error_code/message/co
 语言路由分类器，因此不让 API 猜意图；模型通过 `CapabilitySelectionRequest` 复用单/跨组件数量和
 重复组件校验，无效请求在创建 run 前返回 422。
 
-完整 user_query 最多 4000 字符并原样进入 AgentState；`graphrag-retrieval:v2` 查询字段上限为 2000，
+完整 user_query 最多 4000 字符并原样进入 AgentState；`graphrag-retrieval:v3` 查询字段上限为 2000，
 所以 `PostgresGraphContextRetriever` 在去空白后只截断检索副本，不修改持久化问题或 Planner 输入。
 这样合法长消息不会因 GraphEvidenceBundle Schema 产生 failed run，也不会静默缩短用户上下文。
 
@@ -957,21 +1088,21 @@ unsupported 与风险案例二审接受，持续证据冲突案例二审仍拒�
 ### 16.4 统一作品集评测 manifest 与单命令运行器
 
 四层消融此前各有独立测试和实测文档，但使用者需要记住不同命令，且失败后仍可能手工复制旧数字。
-`portfolio-eval-manifest:v22` 把这些层与 Golden 诊断基线的 suite ID、来源契约、结果文档、PostgreSQL 前置、受限 pytest target 和
+`portfolio-eval-manifest:v23` 把这些层与 Golden 诊断基线的 suite ID、来源契约、结果文档、PostgreSQL 前置、受限 pytest target 和
 已审核指标快照集中到 `data/evals/portfolio_eval_manifest.json`。它只汇总现有实测，不把不同层计算
 成一个没有统计意义的总准确率。
 
 `app/evaluation/portfolio.py` 实现 `portfolio-eval-run:v22`。测试 target 必须是仓库内 `tests/*.py`
 文件或测试节点，manifest 不能加入任意 flags；真实执行使用当前 Python 解释器和
 `subprocess.run(shell=False)`，stdout/stderr 被捕获后只在失败层提供截断摘要。运行器不会输出环境变量、
-数据库 URL、Prompt、Thought 或供应商响应体。默认文件和 CLI 使用五层 v22；v1 精确四层与 v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21
-Golden v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20 来源仍可兼容读取，旧结果不会被静默解释为新完整运行。
+数据库 URL、Prompt、Thought 或供应商响应体。默认文件和 CLI 使用五层 v23；v1 精确四层与 v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22
+Golden v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21 来源仍可兼容读取，旧结果不会被静默解释为新完整运行。
 
 调用链如下：
 
 ```text
 python -m app.evaluation
-  -> load and validate portfolio-eval-manifest:v22
+  -> load and validate portfolio-eval-manifest:v23
   -> verify result documents and pytest targets exist
   -> run each suite with a bounded subprocess timeout
   -> publish snapshots only for status=passed
@@ -995,10 +1126,14 @@ Golden 确定性回归，用于无 Docker 环境的快速反馈；即使退出�
 `all_suites_passed=false`。`tests/integration/test_portfolio_evaluation_cli.py` 会真实启动该 CLI，并验证
 两个 skipped suite 没有 metrics。
 
-`app/evaluation/golden_diagnosis.py` 实现 `golden-diagnosis-eval:v21`。它依赖可替换异步 runner，但评分
+`app/evaluation/golden_diagnosis.py` 实现 `golden-diagnosis-eval:v22`。它依赖可替换异步 runner，但评分
 只读取完整 `DiagnosisRunResult`：意图来自终态 state，必要 Action/重复率/成功率来自 ToolEvent，关键
 来源来自 Evidence，Top-1、引用、最高风险和安全降级来自最终审计报告。合法 `attempt=2` 重试不算重复；
-根因、链路和高风险建议的引用只做稳定 ID 完整性检查，语义支持仍由 Auditor 与人工抽查负责。
+根因、链路和高风险建议的引用做两项稳定 ID 检查——悬空判定直接调用报告层
+`collect_reference_sources`（因此 Bundle 知识节点与文档切片同样合法），实时支撑判定要求至少一条引用
+落在本次 Observation、可引用图路径或已确认案例上——语义支持仍由 Auditor 与人工抽查负责。v21 只有
+一个把两者混起来的 AND 条件，且宇宙不含 Bundle 知识节点，所以"多引用一条合法知识依据"会被误判为
+悬空引用，这是 v22 的唯一行为差异。
 
 `golden-case:v7` 的 `case_category` 当前为 8/10/4/3/3。28 条案例使用 18 个 Fixture；三条记忆案例
 增加 `history_expectation`，逐项保存 required memory ID、历史根因、相似度、冲突标记和 forbidden IDs。
@@ -1251,6 +1386,9 @@ v9 新知识与既有 `sync backlog` 消融查询存在合理语义重叠，因�
 这些数字，是为了要求知识扩展后重新解释上下文组成，而不是把旧快照当成与数据无关的常量。
 v10 结算授权知识没有进入该固定查询的最终候选，PostgreSQL 重跑后仍为 5634 字节/7 节点/4 路径、
 省略 5 个节点和 4 条路径；文档保留相同快照是重新验证后的结果，不是因为版本升级而假定结果不变。
+`document-retrieval:v1` 让计费主体多出 `,"selected_documents":[]` 这 24 字节的规范包装键，因此当前
+实测快照为 5658 字节/7 节点/4 路径、省略 5 个节点和 4 条路径；图证据的选择逐条未变，变化只来自
+共享字节预算新增了第三类证据入口。
 v11 订单水位线知识加入后再次重跑仍保持相同 Bundle 数字和主键冲突完整路径；新检索断言使用
 `dws_order_fulfillment_daily`、`flashsync_order_event_delta` 与“FlashSync 增量窗口静默漏数”，证明
 新知识真实入库，同时不把它包装成固定消融查询的额外收益。
@@ -1278,7 +1416,7 @@ python -m pytest -m postgres
 为了让真实模型可以复用完全相同的评分逻辑，`app/evaluation/live_golden.py` 实现独立
 `live-golden-eval:v1`：它进入 FastAPI lifespan，取得生产 `DiagnosisApplicationRuntime` 与已验证
 Fixture registry，为每条案例创建独立 PostgreSQL session，再顺序运行 GraphRAG、双 Agent、真实
-stdio MCP、Auditor 和 memory staging。它没有加入默认 `portfolio-eval-manifest:v22`，因为离线 CI
+stdio MCP、Auditor 和 memory staging。它没有加入默认 `portfolio-eval-manifest:v23`，因为离线 CI
 没有密钥时应明确不运行，而不是让完整 Portfolio 永久 blocked 或偷偷换回确定性替身。
 
 v1 默认固定三条低成本代表案例：LTS 参数错误单组件、订单水位线时区错配三组件链路，以及 BDS 三个
@@ -1377,12 +1515,18 @@ confirm/reject；不得展示 Thought、Prompt、Provider 响应或凭据。所�
 - `memory-recall-eval:v1` 六条长期记忆召回案例、双模式消融、Recall/Precision/forbidden 指标和 PostgreSQL 实测报告。
 - `history-impact-eval:v1` 三条 Memory off/on 诊断案例、实际 ToolEvent 行为指标、实时事实优先门禁和真实 LangGraph 实测报告。
 - `auditor-impact-eval:v1` 三条语义缺陷案例、规则/Auditor 增量归因、危险残留与安全处置指标和真实报告 LangGraph 实测。
-- `golden-case:v7` Schema/位点/倾斜/参数/限流/授权/水位线反证、补参/降级/跨组件门禁、记忆与冲突标注，以及 `golden-diagnosis-eval:v21` 二十八条案例评测。
-- `portfolio-eval-manifest:v22` 五层受限 pytest 入口、v1–v21 兼容读取、指标发布门禁，以及 `portfolio-eval-run:v22` 单命令 JSON 汇总。
+- `golden-case:v7` Schema/位点/倾斜/参数/限流/授权/水位线反证、补参/降级/跨组件门禁、记忆与冲突标注，以及 `golden-diagnosis-eval:v22` 二十八条案例评测。
+- `portfolio-eval-manifest:v23` 五层受限 pytest 入口、v1–v22 兼容读取、指标发布门禁，以及 `portfolio-eval-run:v22` 单命令 JSON 汇总。
 - `live-golden-eval:v1` 生产路径三案例真实模型入口、Golden 答案隔离、ContextVar 安全遥测和 measured-only 报告契约。
 - `audited-diagnosis-workflow:v2` 按需召回、两阶段案例解释、ReAct、Auditor 和审计后 staging 顶层闭环。
 - `diagnosis-resources:v4` session/message/run/event PostgreSQL 资源 API、取消/恢复、完整相似案例结果和安全失败事件。
 - `session-checkpoint:v1` 同 session 成功快照、追问恢复、版本门禁、失败保护和跨 run Action 去重。
+- `document-retrieval:v1` Runbook/SOP/复盘/FAQ 第二条知识通道、结构感知切片、pgvector + 全文混合召回和 cross-encoder 精排。
+- `run-trace:v1` 七层 per-run 调用链、ContextVar 父指针推导、同事务落库和 `GET /api/v1/runs/{run_id}/trace` 回放。
+- `runtime-metrics:v1` 数据库侧聚合的五组 Prometheus 指标族与 `GET /metrics` 曝光，runtime 未装配时返回 503 而非全零。
+- `api-auth:v1` 前缀 fail-closed 的中间件鉴权、按来源 IP 滑动窗口限流、限流先于鉴权的判定顺序、逐字相同的 401 与两个方向的半配置启动拒绝。
+- `run-stream:v1` 只读 SSE 增量推流、三种命名帧、run 级/连接级终止原因分类、先读快照后读事件的顺序不变量、标准 `Last-Event-ID` 续传与永久保留的轮询回退。
+- 双 Agent 契约的四级降级阶梯、规则对模型的非对称否决权、工作流侧返工预算、Auditor 不可用即降级，以及 run 结果/`run_events`/trace/`/demo` 裁决卡四档暴露粒度。
 
 明确保留的模型接入项：
 
@@ -1409,3 +1553,545 @@ Worker 不引入 Redis/Kafka，也不创建第三个 Agent。它使用 PostgreSQ
 报告完成后，页面读取 `DiagnosisRunResult.memory_stage.memory`。候选的 `memory_id/root_cause/components/status` 是不含 embedding 的领域投影；pending/rejected 时显示 confirm/reject/delete。按钮分别调用有限枚举决策或 `DELETE /api/v1/memories/{memory_id}`，再使用服务端返回结果更新 UI。这样避免前端自行修改状态，也保持“只有显式用户确认才进入 confirmed recall”的长期记忆原则。失败路径保留候选并显示错误，避免把网络失败误报为已确认或已删除。
 
 HTML/CSS 负责信息结构和可访问布局，JavaScript callable 均有 JSDoc，复杂状态转换旁有解释性注释；测试验证 `/demo`、CSS、ES module、path traversal 404、409 active run 和 memory decision endpoint。Docker 健康检查还验证 `/demo` 与 `/demo/static/app.js` 可被容器同源加载。
+
+## 19. 持久化 per-run 调用链与运行时指标
+
+### 19.1 为什么进程内 recorder 不够
+
+第 16.5 节的 `model-call-metric:v1` 只回答“这次评测一共花了多少 token”。生产多 Agent 系统还需要
+回答另一个问题：**这一次 run 的 30 秒具体花在哪一层**。`app/observability/model_calls.py` 的
+`ContextVar` recorder 不落库、不导出、进程级，而真实执行发生在 PostgreSQL Worker 里——Worker 重启、
+多进程部署，或用户第二天回来查看历史 run 时，进程内指标已经不存在。因此本切片新增 `run-trace:v1`：
+span 与 run 终态写在同一事务，并通过 `GET /api/v1/runs/{run_id}/trace` 回放。
+
+两者不是替代关系，而是两个出口：recorder 服务离线评测的成本聚合，span 服务单次 run 的时间轴。
+`ModelCallMeasurement.finish()` 因此同时写两边——即使没有绑定 recorder（普通 API 请求），也会落一条
+`model.chat_completion` span，否则生产 trace 会缺掉整个模型层。
+
+### 19.2 span 契约与安全约束
+
+`app/observability/tracing.py` 定义 `TraceSpan` 与 `RunTrace`：
+
+- `run_id` 本身就是 trace 标识，不引入第二套 trace ID 体系。
+- `span_id` 由 `sha256(f"{run_id}|{sequence}")[:16]` 派生为 `span_*`，与 `run_evt_*` 同一套确定性
+  规则，因此 Golden 回放可以逐字比对；随机 UUID 会让同一次 run 每次导出产生不同引用。
+- `duration_ms` 取 `perf_counter()` 单调差值，墙钟时间戳只用于时间轴展示，系统时间回拨不会产生
+  负耗时。
+- `TraceSpanKind` 固定为 `workflow / node / react_step / tool_call / retrieval / model_call /
+  persistence` 七层，与三层嵌套 LangGraph、MCP 协议边界和两条检索通道一一对应；自由字符串会让
+  同一段耗时在不同 run 里落进不同类别，事后无法比较。
+- `TraceSpanStatus` 只有 `ok / error / cancelled`。取消是外部中断而不是缺陷，与错误混为一谈会让
+  错误率随用户取消行为波动。异常类型与异常消息刻意不进入遥测。
+
+“绝不外泄推理过程”在这里落实为结构性约束而不是评审纪律：span 名称必须匹配
+`^[a-z][a-z0-9_.]{2,63}$`，属性键必须匹配 `^[a-z][a-z0-9_.]{1,39}$`，属性字符串值必须整体匹配
+`^[A-Za-z0-9_.:\-/+]+$` 且不超过 120 字符，单个 span 最多 12 条属性。空格与 CJK 被排除，因此一句
+Prompt、Thought、日志原文或 Provider 原始响应**在类型层面就无法**写进 trace。`None` 保留为“显式
+未知”，不用 0 冒充“没测到”。
+
+### 19.3 采集器：ContextVar 父指针与序号压实
+
+`RunTraceCollector` 在 `DiagnosisApplicationRuntime` 的执行体外层绑定一次，所有插桩点通过
+`ContextVar` 找到它，因此检索、MCP 与 Agent 模块不必互相传递 span 参数：
+
+```text
+runtime binds RunTraceCollector(run_id)
+  -> trace_span(...) reads _CURRENT_COLLECTOR / _CURRENT_PARENT
+  -> collector.open_span reserves a sequence at START
+  -> span body runs; annotate()/mark() may attach safe facts
+  -> _finish freezes an immutable TraceSpan into dict[sequence]
+  -> collector.snapshot() compacts gaps and rebuilds parent pointers
+  -> complete_run/fail_run persists spans inside the terminal-state transaction
+```
+
+两个刻意的设计选择：
+
+1. **父指针放在 `ContextVar` 而不是采集器内部的栈。** `asyncio.gather` 会为每个协程复制上下文，
+   因此并行工具调用天然共享同一个父 span；共享栈会被并发的 push/pop 互相破坏，把两个并发调用
+   伪造成一条不存在的串行依赖链。第 10.4 节的并行 Action 批次正是依赖这个性质才无需额外加锁。
+2. **序号在 span 开始时分配，记录按完成顺序写入字典。** 并发 span 的完成顺序与开始顺序不同，
+   直接 `append` 会让父 span 排在子 span 之后，违反“父先于子”契约。被强制中断的 span 会留下序号
+   空洞，`snapshot()` 在导出阶段压实：保留开始顺序、重新派生 `span_id`、用旧新映射修正父指针。
+   正常路径下该映射是恒等的，压实不产生任何差异。
+
+`MAX_SPANS_PER_RUN = 512` 是失控保护而非正常上界；超限时丢弃并把数量公开为 `dropped_span_count`，
+让残缺 trace 自我暴露，而不是让一次失控的诊断把无界数据写进数据库。
+
+### 19.4 插桩点覆盖与两种写入方式
+
+节点级插桩用装饰器在 `graph.add_node(...)` 注册处包一层（`traced_node`），既不必给九个节点体缩进
+`with` 块，也不让节点逻辑与遥测耦合。需要写属性的位置直接用 `trace_span`：
+
+| 层级 | span 名称 | 关键属性 |
+|---|---|---|
+| `workflow` | `diagnosis.run`（根）、`workflow.audited_diagnosis` | `intent`、`history_trigger`、`attempt`、`resumed`、`stop_reason`、`audit_status`、`react_steps`、`tool_events` |
+| `node` | `diagnosis.recall_memories`、`diagnosis.run_react`、`diagnosis.explain_matches`、`diagnosis.run_report`、`diagnosis.stage_memory`、`report.draft`、`report.audit`、`report.revise`、`report.degrade` | —（由 `traced_node` 自动包裹） |
+| `react_step` | `react.planner_decision` | `react_step`、`remaining_time_ms`、`decision_status`、`action_count`、`evidence_ref_count` |
+| `tool_call` | `react.tool_batch`（每轮一批）、`react.tool_call`（批内每个 Action，含执行器内部重试）、`mcp.tool_attempt`（每次尝试一条） | `action_count`、`tool_names`、`ok_count`、`failed_count`、`tool_name`、`ok`、`error_code`、`attempt`、`attempt_count`、`evidence_count` |
+| `retrieval` | `retrieval.evidence_bundle`、`retrieval.graph_channel`、`retrieval.document_channel` | `retrieval_mode`、`candidate_count`、`chunk_count`、`used_bytes`、`reranker_model` |
+| `model_call` | `auditor.review`、`model.chat_completion`、`embedding.embed_batch`、`reranker.rerank` | `role`、`model`、`prompt_contract_id`、`call_status`、`input_tokens`、`output_tokens`、`batch_size` |
+
+`persistence` 层级已在契约里声明但当前没有插桩点：数据库写入都在短事务里、不构成用户等待的主要
+成分，先声明层级可以让后续补插桩时不必升版本，同时避免现在制造无人查看的 span。
+
+`mcp.tool_attempt` 单独嵌在 `react.tool_call` 之下，因为“第一次超时、第二次成功”是可靠性分析的
+关键事实；只给整个 Action 一个 span 会把重试延迟平均掉而无法归因。`react.planner_decision` 与
+`auditor.review` 都只包住模型往返，确定性门禁与规则校验留在 span 之外，否则两个 Agent 的延迟会看
+起来比实际更高。两条检索通道分开计时，才能回答“文档 RAG 与图召回哪一条值得继续投入预算”。
+
+`record_completed_span()` 是第二种写入方式，专供“开始与结束分散在不同方法”的既有计时器：
+`ModelCallMeasurement.finish` 有多个分支，为遥测重构这段可靠性关键路径不划算，因此它接受外部测得的
+`duration_ms`，开始时间由结束时间回推、仅用于展示。父指针同样取自 `ContextVar`，桥接进来的 span 仍
+挂在正确的 Agent 节点下，而不是在 trace 里平铺成一层与调用关系不符的模型调用。
+
+未绑定采集器时 `trace_span` 与 `record_completed_span` 都是零成本 no-op，所以插桩可以无条件写；
+如果 no-op 路径会抛错，每个插桩点就都要写分支判断，最终一定有人漏写。
+
+### 19.5 落库、表级约束与 `/metrics`
+
+Alembic `20260716_0009` 创建 `run_trace_spans`：主键 `span_id`，`run_id` 外键 `ON DELETE CASCADE`
+（没有 run 的 span 树无法解释，留着只会让表无界增长），`UNIQUE(run_id, sequence)`，以及复刻遥测契约的
+表级 CheckConstraint——`kind` / `status` 白名单、`sequence >= 1`、`duration_ms >= 0`、
+`ended_at >= started_at`、`parent_span_id <> span_id`。绕过应用层的手工写入同样无法产生负耗时、未知
+层级或自引用父指针的残树。`parent_span_id` 刻意不加自引用外键：span 按开始顺序落库，父 span 通常晚于
+子 span 结束，同一批 `INSERT` 内的顺序无法保证满足外键。
+
+`complete_run` / `fail_run` 接受可选 `trace` 参数，与 run 终态、事件、checkpoint 共用同一事务：要么
+都可见，要么都不可见，不会出现“run 成功但 trace 缺失”这种事后无法解释的状态。失败 run 的 trace 价值
+最高——它是唯一能说明“失败前已经走到哪一层”的结构化证据。仓储在写入前校验 `trace.run_id`，因为外键
+只能证明 run 存在，无法阻止把 A run 的 span 写到 B run 名下。
+
+`runtime-metrics:v1`（`app/observability/metrics.py`）把两条 `GROUP BY` 聚合渲染成 Prometheus 文本
+曝光格式，通过 `GET /metrics` 暴露五个指标族：`dataops_runs_total{status}`、
+`dataops_span_count{kind,name}`、`dataops_span_error_count{kind,name}`、
+`dataops_span_duration_ms_sum{kind,name}`、`dataops_span_duration_ms_max{kind,name}`。
+
+- **聚合放在数据库而不是进程内计数器。** API 与 Worker 是不同进程且都会重启，进程内计数器归零会在
+  监控面板上伪造“错误率突然下降”这一最危险的假象。按 `kind` + `name` 分组正好命中
+  `ix_run_trace_spans_kind_name`，抓取成本不随 span 总量线性劣化。
+- **不依赖 `prometheus_client`。** 需要暴露的只有几个计数器和一个 max gauge，而全局注册表在反复
+  进入 lifespan 的测试里会出现重复注册错误。
+- 标签值在 Pydantic 校验期就被限制为 `^[a-z][a-z0-9_.]{1,63}$`，因此渲染函数无需转义；非法标签会让
+  抓取端丢弃**整个 job** 的全部指标，故障范围远大于拒绝单条记录。
+- 耗时单位写进指标名（`_ms`），避免与 Prometheus 生态默认的秒制静默混用；空快照仍输出全部五组
+  HELP/TYPE 声明，让新部署实例表现为“尚无样本”而不是“指标消失”。
+- runtime 未装配时 `/metrics` 与 trace 路由都返回 503，而不是全零曝光：全零会被看板渲染成“零错误”，
+  把“没部署”伪装成“很健康”。
+
+### 19.6 验证方式
+
+```powershell
+.venv\Scripts\python -m pytest -q tests/unit/test_run_tracing.py tests/unit/test_runtime_metrics.py
+.venv\Scripts\python -m pytest -q tests/integration/test_diagnosis_api.py
+$env:DATAOPS_TEST_DATABASE_URL='postgresql+asyncpg://...'
+.venv\Scripts\python -m pytest -m postgres tests/integration/test_run_trace_postgres.py
+```
+
+单元测试覆盖 `span_id` 确定性与序号从 1 起、唯一根与父指针推导、`asyncio.gather` 并发子 span 共享
+同一父 span、序号空洞压实、超上限截断并公开 `dropped_span_count`、error/cancelled 分类与原样重抛、
+`mark()` 记录“未抛异常但已降级”，以及 CJK/空格/超长属性在写入时即被拒绝。`/metrics` 的曝光文本
+逐字比对：顺序不稳定会让两次抓取的 diff 充满噪声，缺少末行换行会让部分抓取端丢弃最后一个样本。
+
+PostgreSQL 集成测试（`tests/integration/test_run_trace_postgres.py`）验证 span 与 failed 终态同事务
+落库、带时区读回、JSONB 属性往返、六条表级约束真的拦住绕过 ORM 的原始 SQL 写入、`aggregate_metrics`
+的错误数与 span 明细一致，以及 run 删除后 span 被级联清理。API 层测试则只验证 200/404/503 映射与
+Content-Type，不重复断言聚合正确性——混在一起会让 HTTP 测试在 SQL 变更时误报失败。
+
+契约版本 `run-trace:v1` 同时写在 `app/core/settings.py` 的 `run_trace_contract_id`、
+`app/observability/tracing.py` 的模块常量、`/health` 的 `contracts.run_trace` 与 lifespan 断言里，
+任一处不一致都会拒绝启动。`runtime-metrics:v1` 由 `RuntimeMetricsSnapshot.contract_id` 固定为
+`Literal`，随响应模型一起校验。
+
+## 20. 资源 API 鉴权、限流与降级边界
+
+### 20.1 为什么这不是"以后再加的加固项"
+
+这个服务的每个 `POST /api/v1/sessions/{id}/messages` 都可能触发 Planner、Auditor、Embedding 和
+Reranker 四类付费调用，加上一次 GraphRAG 检索与九个 MCP 工具的子进程往返。一个无鉴权、无配额的
+公开端口不是"演示方便"，而是把账单和数据库连接池交给任何扫描器。因此鉴权与限流和 tracing 一样属于
+运行时契约，而不是部署说明里的一句建议。
+
+同时要承认边界：本项目只需要"这个实例是否允许被调用"，不需要账号、角色和多租户。因此实现是单一
+共享 Bearer 令牌 + 按来源 IP 的进程内滑动窗口，不引入用户表、JWT 签发、OAuth 或 Redis 计数器。把
+它写成 `api-auth:v1` 契约的目的，是让这个取舍可被审阅，而不是让它看起来像一个完整的身份系统。
+
+### 20.2 `api-auth:v1`：两个开关、一个判定顺序
+
+`app/api/security.py` 只暴露两个协作对象。`ApiSecurityGuard` 持有鉴权模式与令牌摘要，
+`SlidingWindowRateLimiter` 持有按身份的时间戳窗口。守卫的 `authorize()` 返回
+`ApiSecurityRejection | None`，而不是抛 `HTTPException`：强制点是 ASGI 中间件，它位于路由之外，
+FastAPI 的异常处理器捕获不到那里抛出的异常，返回值语义让中间件与单元测试共享同一份判定。
+
+判定顺序是被测试固定的实现细节：**先限流，后鉴权**。若顺序相反，错误令牌会在 401 之前离开限流路径，
+猜令牌就完全不受配额约束；反过来，把限流放在前面意味着即使请求最终是 401，它也已经消耗了这个来源
+的配额。`tests/unit/test_api_security.py` 用 `max_requests=2` 断言第三次错误令牌返回 429 而不是
+第三个 401，这样顺序被改动时测试会失败，而不是只有代码评审能发现。
+
+令牌比较用 `hashlib.sha256` 摘要加 `hmac.compare_digest`：摘要让内存转储里不出现令牌原文，定长
+比较让响应时间不随匹配前缀长度变化。解析保持严格——必须是 `Bearer <token>` 两段结构，scheme 按
+RFC 7235 大小写不敏感，令牌部分只做 strip，因此"末尾多一个字符也算通过"这类隐式宽松不存在。
+
+401 响应对"缺令牌"、"错方案"和"错令牌"完全一致：同一状态码、同一 `error_code`、同一 message、同一
+`WWW-Authenticate`。任何差异都会把"这个实例是否配置了令牌"变成可探测信息，甚至帮助攻击者确认令牌
+前缀。测试用集合断言 `len({rejection.message}) == 1` 锁定这一点。
+
+### 20.3 强制点：前缀 fail-closed 的中间件
+
+强制点是 `app/api/main.py` 的 `enforce_api_security` HTTP 中间件，判定依据是路径前缀
+`("/api/v1", "/metrics")`。选择中间件而不是给每个路由加 `Depends`，是因为前者对**将来新增的路由
+默认生效**：漏写一个依赖不会让新端点静默裸奔。代价是保护范围以前缀而不是路由为单位表达，所以前缀
+集合本身必须被测试锁定，`tests/unit/test_api_security.py` 因此逐项断言它。
+
+`/health` 和 `/demo` 刻意留在保护之外。`/health` 是容器存活探针，给它加鉴权意味着 healthcheck 需要
+携带凭据，一旦令牌轮换容器就会被自己判定为不健康；它的响应也已经只含公开状态。`/demo` 只是无数据的
+静态 HTML/CSS/JS，页面里的数据全部来自受保护的 `/api/v1`。
+
+`/metrics` 在保护内，因为它不是探针而是运维接口：即使只有聚合数字，run 数量与各层错误数仍然会泄露
+使用规模。Prometheus 抓取端支持 `bearer_token`，所以这个选择不会让指标变得无法采集。
+
+守卫缺失时中间件返回 503 而不是放行。lifespan 未完成的实例不应该把"没有守卫"理解成"不需要守卫"，
+这是与 `/api/v1` 在 runtime 未装配时返回 503（而不是伪造 200）一致的降级方向。
+
+### 20.4 限流：滑动窗口、按 IP 计数、内存有界
+
+限流器用滑动窗口而不是固定窗口计数器。固定窗口在边界处允许两倍突发——窗口末尾和下一窗口开头各打满
+一次——而这里的配额本来就是为了保护付费调用与连接池。单个身份的时间戳数量天然被 `max_requests`
+限制，因此无需额外裁剪。
+
+配额按来源 IP 计数，**即使请求已经通过鉴权**。原因是本项目只有一个共享令牌：用令牌当键会让一个客户端
+的突发耗尽所有合法客户端的配额。ASGI scope 在部分传输下没有 client 地址，这类请求归入固定的
+`ip:unknown` 桶——牺牲精度，但"没有 IP"不能成为绕过配额的方法。
+
+限流表的键来自不可信输入，它本身就是一个内存放大面。`MAX_TRACKED_IDENTITIES = 4096` 用 LRU 淘汰
+最久未活动的身份，代价是极端情况下冷身份的配额被提前重置，这比 API 进程被限流表 OOM 更可接受。
+淘汰只在成功记录请求之后执行，这样被限流来源的重试不会把正常来源挤出表外。
+
+超限返回 429 并附带整数 `Retry-After`：值向上取整且至少为 1 秒，因为该头只接受整数秒，返回 0 会让
+客户端立刻重试从而放大压力。超限时**不追加**时间戳，否则持续重试会不断把窗口向后推，把限流变成
+永久封禁。
+
+默认配额是 120 次 / 60 秒。这个数字不是随手取的：Demo 前端每轮轮询发两个请求、最短间隔 600ms 并
+逐步退避到 4s，正常演示的峰值稳定低于该配额，而脚本化的暴力调用会立刻撞上它。
+
+### 20.5 半配置拒绝启动与容器端口边界
+
+配置面只有四个键：`DATAOPS_API_AUTH_MODE`（`disabled` | `bearer`）、`DATAOPS_API_AUTH_TOKEN`、
+`DATAOPS_API_RATE_LIMIT_REQUESTS`、`DATAOPS_API_RATE_LIMIT_WINDOW_SECONDS`。校验分两层，与
+`_validate_retrieval_providers` 同一个思路：任何"半配置"实例都必须拒绝启动，而不是降级运行。
+
+`Settings._validate_api_security()` 拦两个方向。`bearer` 缺令牌会让每个请求都 401，等于服务不可用；
+`disabled` 却配了令牌更危险——部署者会据此以为接口已受保护并把端口暴露出去。令牌强度和字符集由
+`ApiSecurityGuard.__init__` 在 lifespan 阶段校验：至少 `MINIMUM_API_TOKEN_CHARS = 32` 个可见 ASCII
+字符且不含空格。32 字符是 256 位随机令牌 base64 编码后的量级，低于此长度的"演示口令"在公网上等于
+没有鉴权。最小长度只存在于守卫这一处，Settings 不复制它，避免两份常量漂移。
+
+带空格或 CJK 的令牌同样在构造期失败：它们不能安全进入 HTTP 头，放宽只会造出"看起来配好了、实际永不
+匹配"的实例。守卫在任何 Provider、MCP 子进程和数据库连接之前构造，所以这些错误等价于"拒绝开放端口"。
+
+`compose.yaml` 的 API 端口绑定改成 `127.0.0.1:${DATAOPS_API_PORT:-18000}:8000`。默认部署的鉴权是
+关闭的，绑到 `0.0.0.0` 等于把可触发付费模型调用的接口暴露到同网段。同一切片给 api 服务补上
+`env_file: .env`：在此之前 `.env` 只参与 Compose 变量插值，容器内仍然跑仓库默认值，也就是说"在 .env
+里配好令牌"根本不会生效。`.env.example` 明确要求令牌行保持注释而不是留空——空串会被解析成"已配置的
+空令牌"，正好触发 disabled + token 的启动拒绝。
+
+`/health` 增加 `security` 段，公开 `mode`、`contract_id`、受保护前缀列表和配额（次数与窗口成对给出，
+只给"120"无法判断是每分钟还是每秒）。不公开令牌，也不公开令牌摘要：摘要虽不可逆，却会把"令牌是否
+变更过"变成可观测信号，对排障没有价值，反而给离线字典攻击提供校验目标。
+
+### 20.6 验证方式
+
+```powershell
+.venv\Scripts\python -m ruff check .
+.venv\Scripts\python -m pytest -q tests/unit/test_api_security.py
+.venv\Scripts\python -m pytest -q tests/integration/test_api_authentication.py tests/integration/test_health.py
+docker compose config
+```
+
+单元测试用可控时钟覆盖判定逻辑：受保护前缀集合、disabled 模式仍限流、精确令牌放行与五种变体返回逐字
+相同的 401、限流先于鉴权、配额按身份独立且窗口滚出后恢复、匿名桶、LRU 淘汰后表大小收敛，以及五种
+半配置/弱令牌组合在构造期抛错。集成测试则证明这些判定真的挂在请求路径上：bearer 模式下 `/api/v1` 与
+`/metrics` 返回 401 且响应体不含令牌，`/health` 与 `/demo` 仍然公开，带正确令牌的请求得到 503（无数据库
+时 runtime 未装配）——恰好说明它已穿过鉴权进入路由；配额耗尽返回 429 且 `Retry-After` 可解析为正整数。
+
+契约版本 `api-auth:v1` 同时写在 `app/core/settings.py` 的 `api_auth_contract_id`、
+`app/api/security.py` 的 `API_AUTH_CONTRACT_ID`、`/health` 的 `contracts.api_auth` 与 lifespan 断言里，
+任一处不一致都会拒绝启动。
+
+## 21. 运行状态 SSE 增量推流
+
+### 21.1 为什么加推流，以及为什么轮询必须保留
+
+一次真实诊断要串起 Planner 决策、九个 MCP 子进程往返、两条检索通道和一次独立 Auditor 审计，P95 目标是
+≤30 秒。纯轮询的问题不是"技术落后"，而是它把延迟下限锁在轮询间隔上：间隔调小就放大数据库读放大，
+调大则用户在一段明显的空白里看不到任何进展。SSE 解决的正是这段"已经发生但还没被读到"的延迟。
+
+但推流**不是第二条执行路径**。run 依旧由 PostgreSQL Worker 用 `FOR UPDATE SKIP LOCKED` + 租约执行，
+`GET /api/v1/runs/{run_id}/stream` 只做只读增量投递。这条边界被写进类型：`iter_run_stream` 只接受
+`RunStreamSource` 协议——两个只读方法 `get_run` 与 `get_events_after`，没有 workflow、没有写事务、
+没有 Worker 接口。因此"一条挂着的浏览器连接推进了 run"在结构上不可能发生，而不是靠评审纪律避免。
+
+也因此轮询是**永久保留的等价通道**而不是过渡方案：断流不改变任何结论，前端任何时候都可以退回
+`GET /api/v1/runs/{run_id}` + `/events`。这一点在 `api-auth:v1` 下从"可选"变成"必需"，见 21.5。
+
+### 21.2 三种帧与终止原因分类
+
+`app/api/streaming.py` 定义 `run-stream:v1`，帧只有三种，由 SSE 的 `event:` 字段命名：
+
+| 帧 | 何时发送 | 载荷 |
+|---|---|---|
+| `run_snapshot` | 状态**发生变化**时（含首跳） | `status` |
+| `run_event` | 每条新的公开事件 | `event`（`RunPublicEvent`） |
+| `stream_end` | 收尾，恰好一次 | `end_reason` |
+
+`run_snapshot` 只在状态变化时发，而不是每 0.5 秒重复一遍 `running`——否则一次 30 秒的 run 会产生
+六十帧无信息内容的噪声。`RunStreamFrame` 是 `extra="forbid"` + `frozen=True` 的模型，`model_validator`
+强制两条交叉约束：`run_event` 必须带 `event` 且 `event.run_id == run_id`、`event.sequence == cursor`；
+非 `run_event` 帧带 `event` 直接失败。把游标和已投递事件绑死在类型层面，是因为这两者一旦分叉，
+重连续传就会静默丢事件或重放事件，而这类 bug 在时间线上只表现为"偶尔少一行"，极难复现。
+
+`end_reason` 刻意分成两类，这是整个契约里最值得讲的产品判断：
+
+- `completed` / `failed` / `cancelled` —— **run 级**终态，客户端应停止重连；
+- `stream_timeout` / `run_disappeared` —— **连接级**终止，客户端应带最后游标重连或退回轮询。
+
+如果把两者合并成一个 `closed`，前端就无法区分"诊断结束了"和"连接断了"，只能二选一地犯错：要么把
+超时渲染成失败（用户以为诊断挂了），要么在真正失败后无限重连。
+
+### 21.3 每跳的读取顺序：一条被测试钉住的不变量
+
+`iter_run_stream` 每一跳严格按 **先读 run 快照 → 再读增量事件 → 最后用那个较早的快照判定终态** 执行：
+
+```python
+run = await source.get_run(run_id)            # 1. 先拍快照
+...
+events = await source.get_events_after(run_id, after_sequence=cursor)   # 2. 再取增量
+for event in events or ():
+    cursor = event.sequence
+    yield ...
+if run.status in TERMINAL_RUN_STATUSES:       # 3. 用第 1 步的快照判定
+    yield _end_frame(...)
+    return
+```
+
+原因是 `complete_run` 把终态与最后一批事件放在**同一事务**提交。若先读事件再读快照，就存在这样的
+交错：读事件（拿到旧的一批）→ Worker 提交（终态 + 最后几条事件）→ 读快照（已是终态）→ 立刻发
+`stream_end`。结果是时间线缺了最后几条事件却宣称流已正常结束。反过来按现在的顺序，最坏情况只是
+终态那一跳读到的还是 `running`，于是多轮询一跳再收尾——多一次 0.5 秒轮询换取"`stream_end` 之前
+时间线一定完整"。`tests/unit/test_run_stream.py::test_stream_reads_run_before_events_so_terminal_tick_keeps_final_events`
+用脚本化替身把这个顺序固定住：终态那一跳同时给出三条事件，断言它们全部先被投递、`cursor == 3`。
+
+`get_events_after` 用 `None` 表示"run 不存在"、用空元组表示"这一跳没有新事件"，两者驱动完全不同的
+分支（前者 `run_disappeared` 收尾，后者继续轮询）。过滤下推到 SQL（`sequence > after_sequence`），
+因此一条长连接的每次轮询只取真正的新增行，而不是每跳把整条时间线搬进内存再切片——领域模型
+`RunEventList` 要求序号恰好覆盖 1..N，本来也无法承载增量结果，所以仓储层另开
+`list_events_after` 返回裸元组。
+
+### 21.4 `Last-Event-ID` 续传：不发明协议
+
+`cursor` 被写进标准 SSE `id:` 字段，浏览器因此在自动重连时带上 `Last-Event-ID` 头，**不需要任何自定义
+续传协议**。`resolve_stream_cursor` 规定 `Last-Event-ID` 优先于 `?after_sequence=`；非整数或负值回退到
+查询参数值，而不是从 0 重放——把损坏的头部当成"从头再来"会让用户在时间线上看到重复事件。
+
+单连接寿命由三个预算约束，`Settings._validate_run_stream()` 强制它们依次递增：
+
+```
+run_stream_poll_seconds (0.5) < run_stream_keepalive_seconds (15) < run_stream_max_seconds (300)
+run_stream_max_seconds > react_total_timeout_seconds (150)
+```
+
+最后一条最容易被忽略：如果最长寿命不大于 ReAct 总超时，一个**只是跑满预算的正常 run** 会在结束前
+被推流截断，看起来像系统不稳定。心跳交给 `EventSourceResponse(..., ping=int(keepalive_seconds))`，
+不自己发注释帧——反向代理需要的只是"连接上有字节流动"，重复实现只会多一处可写错的地方。
+
+`RunStreamConfig` 在路由里构造而不是加一个 `Settings.run_stream_config()` 工厂方法：后者会让
+`app.core` 反向导入 `app.api`，把分层依赖倒过来。
+
+### 21.5 鉴权模式下的诚实限制
+
+浏览器 `EventSource` 无法设置请求头，因此 `api-auth:v1` 切到 `bearer` 后，`/api/v1` 前缀中间件一定拒绝
+推流请求。这是被接受的限制而不是缺陷——绕过它需要把令牌放进查询字符串（会进日志和 Referer）或
+额外引入一层 cookie 会话，两者都比"退回轮询"更糟。系统的做法是把它变成可观测事实：`/health` 的
+`stream.available_under_auth` 随鉴权模式变化而不是硬编码 `true`，前端 `app.js` 在推流被拒时把
+`poll-message` 写成"…，已退回轮询"并继续正常工作。
+
+帧内禁止出现 Thought、原始思维链、Prompt、embedding、凭据或 Provider 原始响应。这里不需要新的过滤
+规则：帧只承载 `RunPublicEvent`，那已经是过滤后的公开投影，推流的义务是**不旁路它另开字段**。
+前端 `appendTimelineEvent` 复用 `createTimelineItem` 并按 `sequence` 去重（`state.renderedSequences`），
+因此重连重放同一事件不会在页面上出现两行，也不会用不可信数据赋值 `innerHTML`。
+
+### 21.6 验证方式
+
+```powershell
+.venv\Scripts\python -m ruff check .
+.venv\Scripts\python -m pytest -q tests/unit/test_run_stream.py
+.venv\Scripts\python -m pytest -q tests/integration/test_diagnosis_api.py tests/integration/test_health.py
+```
+
+单元测试覆盖判定逻辑：状态只在变化时推一帧、事件按序投递且游标随之推进、终态跳先投完事件再收尾、
+带游标续传不重放已知事件、run 消失收成 `run_disappeared` 而不是 `failed`、寿命耗尽在**仍然活着**的 run
+上收成 `stream_timeout`（用可无限轮询的替身并断言 `polls > 1`，证明是预算而不是数据枯竭停下了循环）、
+三种帧的可选载荷交叉校验，以及三个预算的有序性。集成测试则用手写的 `event:`/`id:`/`data:` 行解析器
+证明这些判定真的挂在 HTTP 上：帧名依次为 `run_snapshot` / `run_event` / `stream_end`、`id` 字段确实
+承载游标、`Last-Event-ID` 让重连不再收到 `run_event`、未知 run 返回真正的 404（而不是流内一帧）、
+runtime 未装配返回 503，且响应体不含 `Thought` 与 `reasoning_process`。
+
+契约版本 `run-stream:v1` 同时写在 `app/core/settings.py` 的 `run_stream_contract_id`、
+`app/api/streaming.py` 的 `RUN_STREAM_CONTRACT_ID`、`/health` 的 `contracts.run_stream` 与 lifespan
+断言里，任一处不一致都会拒绝启动。
+
+## 22. 双 Agent 契约：否决权、返工预算与降级阶梯
+
+第 12 节讲的是 Auditor 这条链路怎么实现，本节讲的是**两个 Agent 之间的契约本身**：谁能否决谁、
+返工预算属于谁、失败时往哪一级降级，以及这条阶梯在 API、trace 和前端各暴露到什么程度。这是整个
+系统里最容易被做成"装饰性审计"的地方——加一个 Auditor 节点很容易，让它真的拥有否决权很难。
+
+### 22.1 为什么是两个 Agent，而不是让 Planner 自评
+
+自评的失效模式是结构性的，不是提示词能修的：同一次调用里生成结论和评价结论，模型的目标函数是
+自洽而不是正确，它会为已经写下的根因寻找支持，而不是寻找反例。所以本系统把审计做成**独立
+Agent**，且独立性落在四个可检查的地方：
+
+| 隔离维度 | Planner | Auditor |
+|---|---|---|
+| Prompt 契约 | `planner-react:v8` | `auditor-report:v2` |
+| Provider 契约 | `openai-compatible-planner:v1` | `openai-compatible-auditor:v1` |
+| 输出 Schema | `PlannerDecision`（actions 数组） | `AuditResult`（accept/revise + 有限问题码） |
+| Schema 修复预算 | `planner_schema_repair_count` | `auditor_schema_repair_count` |
+
+两者共用同一份 Chat 端点配置（同一个模型也可以），但**不共享上下文**：Auditor 看到的是终态报告、
+实时 Evidence/ToolEvent、GraphRAG Bundle、confirmed 案例和确定性问题，看不到 Planner 的决策过程。
+反向也成立：Planner 不知道审计规则的判定结果，因此无法反向拟合门禁。
+
+Auditor 的输出空间被刻意限制为 `accept | revise` 加七个问题码，不允许自由文本状态。这条限制的作用
+是让**控制流不依赖自然语言解析**：`_route_after_audit` 只读结构化 `AuditStatus` 与 `retry_count`，
+从不读 `revision_instructions`。模型可以写修订建议，但它无法用措辞改变图的走向。
+
+### 22.2 否决权矩阵：确定性规则可以推翻模型的 accept
+
+审计有两层，且优先级是明确的**非对称**关系：
+
+| 层 | 实现 | 擅长判定 | 能否否决对方 |
+|---|---|---|---|
+| 确定性规则 | `app/reporting/policy.py` | ID 是否存在、字段是否齐全、案例是否 confirmed、high 风险是否带引用与前置条件 | **能**：任何规则问题非空即强制 `revise` |
+| 独立 Auditor | `auditor-report:v2` | 引用文本是否真的支持结论、实时结果与历史/知识是否语义冲突 | 不能推翻规则，只能追加语义问题 |
+
+合并发生在 `_merge_audit_result`：规则问题非空时，无论模型返回什么，结果一律是 `revise`，规则问题
+排在前面，并追加一条通用指令"先修复全部确定性引用、冲突和风险问题，再重新提交独立审计"。去重键
+是 `(code, claim_path, evidence_refs)`——**故意不含 `message`**，否则同一个问题因为 Auditor 换了措辞
+就会重复计数，让"问题数"这个可观测数字失去意义。
+
+反过来，规则全过而 Auditor 返回 `revise` 时，报告同样不能放行。所以放行条件是**两层都同意**，
+而降级条件是**任一层不同意且预算耗尽**。这条不对称是有意的：漏放一份正确报告的代价是用户多看
+一次"需要补证"，误放一份错误报告的代价是有人按它去动生产系统。
+
+七个问题码（`invalid_evidence_ref` / `unsupported_claim` / `evidence_conflict` /
+`missing_risk_control` / `unconfirmed_case` / `report_incomplete` / `auditor_unavailable`）是封闭集合，
+模型不能自造新码。这不是为了整洁，而是因为每个码都对应下游一个确定性动作；允许模型扩张码集，
+等于允许它新增工作流分支。
+
+### 22.3 降级阶梯：四级，每一级都有明确的触发条件与终态
+
+```
+draft_report ──▶ audit_report ──accept + 无规则问题──▶ accepted（唯一放行出口）
+                     │
+                     ├─ revise 且 retry_count < max_revisions ──▶ revise_report ──▶ 回到 audit_report
+                     │
+                     ├─ revise 且 预算耗尽 ─────────────────────▶ degrade_report ──▶ degraded
+                     │
+                     └─ AuditorAgentError（Provider/refusal/Schema）─▶ 立即 degraded（不消耗返工预算）
+```
+
+| 级别 | 触发 | 动作 | 终态 |
+|---|---|---|---|
+| 0 放行 | 两层都 accept | 不改报告 | `accepted` |
+| 1 返工 | `revise` 且还有预算 | `SafeReportReviser.revise`：只删不加 | 回到审计，`retry_count += 1` |
+| 2 降级 | `revise` 且预算为 0 | `SafeReportReviser.degrade`：清空未放行结论 | `degraded` |
+| 3 不可用降级 | Auditor 抛错 | 合成 `auditor_unavailable` 问题后直接 degrade | `degraded` |
+
+三条被代码断言钉住的不变量：
+
+1. **`accept` 必须已经把工作流标成 completed。** `_route_after_audit` 对"accept 却还在路由"直接
+   `raise RuntimeError`，而不是宽容地当成结束——静默容错会让"放行"多出一条没被测试覆盖的路径。
+2. **返工只能在预算内进入。** `_revise_report` 入口再次校验 `retry_count < max_revisions`，即使路由
+   写错也不会出现第二次返工。预算属于**工作流**而不是模型：`ReportWorkflowConfig.max_revisions`
+   被 Pydantic 限制在 0–1 且模型冻结，运行中 Agent 无法扩大它。
+3. **返工后必须重新走完整审计。** `_revise_report` 把 `audit_result` 置为 `None`，因此新草稿不可能
+   沿用上一轮的 accept/revise；`_audit_report` 每轮都**重新**跑一遍确定性规则，而不是复用首轮
+   issues——否则修订把引用改对了，旧问题仍会把它误判为不合格。
+
+第 1 级的"只删不加"是这条阶梯的安全基础：`SafeReportReviser` 只过滤悬空引用、删除不被支持或与
+证据冲突的根因、移除未确认案例、把 high 风险建议收窄为只读补证。它**永远不会**新增事实或提高
+置信度。因此返工在数学上不可能把一份错报告改成一份更自信的错报告，最坏结果只是收窄到降级。
+
+删除的**粒度**由 `AuditIssue.claim_path` 决定：`$.root_causes[1]` 只删第二条根因，`[i:j]` 是半开
+区间，`summary` / `risks` / `evidence_refs` 这类派生字段被指向时不删任何结论而是重算，路径无法解析
+或指向未知字段时退回整类删除（根因 + 链路 + 相似案例）。首次真实模型评测暴露了整类清空的自我
+拆台效应：案例 1 的 ReAct 状态里已经有两条 `supported` 假设（含 Golden 根因），首轮把根因和链路
+全部清空后，第二轮 Auditor 对修订稿自己写下的"证据不足"表述提出 `evidence_conflict`，一次返工
+预算耗尽后只能 `safe_degraded`。定位删除只改粒度不改性质——修订稿仍要重新通过确定性规则和
+独立 Auditor，所以更精确的删除不可能放行不合格报告，`audited-report-workflow:v2` 的拓扑与状态
+Schema 也无需升版本。
+
+第 3 级刻意**不消耗返工预算、也不重跑报告**。Auditor 不可用不是报告的问题，重跑同一份草稿只会
+再撞一次同样的故障，并把一次外部故障放大成两次付费调用。系统的选择是立即合成一条
+`auditor_unavailable` 问题并降级——"审计不可用"绝不等于"审计通过"。
+
+正因为第 3 级不消耗预算就直接降级，Auditor 的超时必须单独配置。首次真实模型评测把这条依赖关系
+暴露得很清楚：两个角色共用 `DATAOPS_CHAT_TIMEOUT_SECONDS=30` 时，Planner 单次实测 8–15 秒安全
+通过，Auditor 单次实测 22–30 秒（它要读完整草稿并逐条核对引用，输出接近 1100 token），四次审计
+调用有三次超时，三次超时全部按第 3 级降级，于是三个案例的 `accepted_report_rate` 实测为 0——审计
+阶梯的第 0 和第 1 级根本没有机会执行。修复是新增 `DATAOPS_AUDITOR_TIMEOUT_SECONDS`（默认 90 秒）
+而不是放宽共用值：Planner 跑在 `react_total_timeout_seconds` 预算内，一次挂死就吃掉整轮取证，必须
+保持紧超时；Auditor 不在该预算内，放宽它不会拖长 ReAct 循环。`/health` 的 `planner.timeout_seconds`
+与 `auditor.timeout_seconds` 分别暴露这两个值，部署者不读代码也能确认它们不是同一个旋钮。
+
+`degraded` 的下游后果是硬性的：`stage_case_memory` 只接收 accepted 且含根因的报告，因此**降级
+报告永远不会进入长期记忆**。这条链路保证了错误结论不会通过"学习"变成下一次诊断的历史证据。
+
+### 22.4 当前明确保留的边界
+
+返工只覆盖**报告级收窄**。如果 Auditor 判断必须补充新的实时 Observation 才能放行，本版本返回降级
+报告加只读补证步骤，而**没有**把边重新接回 Planner ReAct。这是有意保留而不是遗漏：把审计结论接回
+ReAct 会引入"审计驱动取证"的新回路，它需要自己的步数预算、循环检测和成本上限，否则两个 Agent
+可以互相触发调查直到打满预算。用同一批旧证据重复推理没有信息增益，所以当前版本宁可诚实降级。
+
+### 22.5 这条阶梯在四个出口暴露到什么程度
+
+同一条审计轨迹按"读者需要多少"分四档暴露，粒度不同是刻意设计：
+
+| 出口 | 暴露内容 | 不暴露 |
+|---|---|---|
+| `GET /api/v1/runs/{run_id}` | 完整 `report.outcome`、`state.audit_result`（含 `issues[].message` 与 `revision_instructions`）、`report.events` | Prompt、Thought、Provider 原始响应 |
+| `GET /api/v1/runs/{run_id}/events` | 四类报告事件 + `audit_status` + `issue_codes` + `revision_number` | 问题的自然语言 message |
+| `GET /api/v1/runs/{run_id}/trace` | `report.draft` / `report.audit` / `report.revise` / `report.degrade` 节点 span，以及 `auditor.review` 模型 span 上的 `audit_status`、`deterministic_issue_count`、`model_issue_count` | 任何非 ASCII 标识符的属性值 |
+| `/demo` 审计裁决卡 | outcome、Auditor 结论、`已用返工 n / 1`、问题码与被否决的 `claim_path`、`evidence_refs` | `issues[].message`、`revision_instructions` |
+
+`run_events` 与前端刻意只保留问题码而不保留 message，理由同一条：**未经放行的表述不应以"审计
+意见"的形式重新出现在页面上**。message 是模型对"为什么不能放行"的解释，它本身没有经过审计；把它
+渲染成审计结论，等于让被否决的自然语言从侧门回到读者眼前。API 仍完整返回它，因为调试和评测需要
+它——区别在于那是显式请求单个 run 的开发者行为，不是演示页面的默认视觉输出。
+
+`auditor.review` 的 span 只包住**模型往返**，确定性规则校验在它之外完成。这不是实现细节：把规则
+耗时算进 Auditor，会让"Auditor 有多慢"这个数字系统性偏大，从而误导后续的性能取舍。
+
+前端把裁决卡放在报告正文**之前**，并让 `degraded` 使用与失败态相同的红色语义。理由是阅读顺序即
+风险顺序：读者必须先知道这份结论有没有被放行，再去读它写了什么；如果降级报告和放行报告长得一样，
+"安全降级"这个机制在演示中就等于不存在。
+
+### 22.6 验证方式
+
+```powershell
+.venv\Scripts\python -m ruff check .
+.venv\Scripts\python -m pytest -q tests/unit/test_report_workflow.py tests/unit/test_reporting.py
+.venv\Scripts\python -m pytest -q tests/integration/test_openai_compatible_auditor.py tests/integration/test_demo_frontend.py
+.venv\Scripts\python -m app.evaluation --skip-postgres
+```
+
+`auditor-impact-eval:v1`（第 16.3 节）是这条契约的量化验证：三条语义缺陷案例分别在"只有规则"和
+"规则 + Auditor"两种配置下运行，归因增量拦截、危险残留与安全处置。当前成绩来自确定性脚本替身的
+小样本，**不能外推为真实 LLM 的审计质量**；这条限制必须保留在报告和任何对外材料里。
+
+
+
+
+

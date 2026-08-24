@@ -44,9 +44,14 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/persistence/seed.py"),
     Path("app/retrieval/repository.py"),
     Path("app/retrieval/embeddings.py"),
+    Path("app/retrieval/reranker.py"),
     Path("app/retrieval/budget.py"),
     Path("app/retrieval/ablation.py"),
     Path("app/retrieval/service.py"),
+    Path("app/retrieval/chunking.py"),
+    Path("app/retrieval/document_repository.py"),
+    Path("app/retrieval/document_service.py"),
+    Path("app/persistence/migrations/versions/20260716_0008_documents.py"),
     Path("app/memory/service.py"),
     Path("app/memory/repository.py"),
     Path("app/memory/runtime.py"),
@@ -56,6 +61,12 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/persistence/migrations/versions/20260715_0004_diagnosis_resources.py"),
     Path("app/persistence/migrations/versions/20260716_0005_diagnosis_worker.py"),
     Path("app/persistence/run_repository.py"),
+    Path("app/observability/tracing.py"),
+    Path("app/observability/metrics.py"),
+    Path("app/persistence/migrations/versions/20260716_0009_run_trace_spans.py"),
+    Path("app/api/security.py"),
+    Path("app/api/streaming.py"),
+    Path("app/core/http_identity.py"),
     Path("mcp_server/repository.py"),
 )
 REQUIRED_GUIDE_SECTIONS = (
@@ -75,6 +86,11 @@ REQUIRED_GUIDE_SECTIONS = (
     "测试分层",
     "真实模型 Golden 冒烟评测",
     "必需单页 Demo",
+    "文档 RAG：第二条知识通道",
+    "持久化 per-run 调用链与运行时指标",
+    "资源 API 鉴权、限流与降级边界",
+    "运行状态 SSE 增量推流",
+    "双 Agent 契约：否决权、返工预算与降级阶梯",
 )
 
 
@@ -175,7 +191,10 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
     assert "独立 Auditor 增量影响消融评测" in guide
     assert "auditor-impact-eval:v1" in guide
     assert "golden-case:v7" in guide
-    assert "golden-diagnosis-eval:v21" in guide
+    assert "golden-diagnosis-eval:v22" in guide
+    # v22 的唯一行为差异是引用判定拆成悬空/实时支撑两条独立规则，文档必须显式记录，
+    # 否则口径会在下一次改动里悄悄漂回 v21。
+    assert "悬空判定直接调用报告层" in guide
     assert "GoldenEvidenceConflictExpectation" in guide
     assert "统一作品集评测 manifest 与单命令运行器" in guide
     assert "portfolio-eval-run:v22" in guide
@@ -192,17 +211,128 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
     assert "callable 级 docstring" in guide
 
 
-def test_live_golden_status_document_separates_runnable_contract_from_measurement() -> None:
-    """确认真实模型评测文档明确无当前成绩、答案隔离和安全 token 遥测边界。
+def test_observability_documents_pin_trace_contract_and_no_reasoning_leak_boundary() -> None:
+    """确认调用链与指标文档锁定两个契约 ID、七层 span、两个读取入口和不外泄推理的结构性理由。
 
-    该门禁防止作品集把可执行 CLI 或 MockTransport 测试包装成真实模型实测；同时要求默认三案例、
-    生产运行路径、measured-only、usage 缺失和不保存 Prompt/Thought 的约束保持可见。
+    可观测性最容易退化成“加了埋点就算完事”：一旦文档不写清楚属性值被限制为 ASCII 才使得
+    Prompt/Thought 无法进入 trace，后续维护者会顺手加一个自由文本字段而破坏这条保证。同时锁定
+    “未装配返回 503 而不是全零曝光”，防止把“没部署”渲染成“零错误”这类最危险的监控假象。
+    """
+
+    guide = Path("docs/implementation-guide.md").read_text(encoding="utf-8")
+    contracts = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert "run-trace:v1" in guide
+    assert "runtime-metrics:v1" in guide
+    assert "workflow / node / react_step / tool_call / retrieval / model_call /" in guide
+    assert "GET /api/v1/runs/{run_id}/trace" in guide
+    assert "dataops_span_error_count{kind,name}" in guide
+    assert "MAX_SPANS_PER_RUN = 512" in guide
+    assert "dropped_span_count" in guide
+    assert "在类型层面就无法" in guide
+    assert "全零会被看板渲染成“零错误”" in guide
+    assert "run-trace:v1" in contracts
+    assert "runtime-metrics:v1" in contracts
+    assert "run-trace:v1" in readme
+    assert "runtime-metrics:v1" in readme
+
+
+def test_api_auth_documents_pin_failclosed_scope_and_indistinguishable_rejection() -> None:
+    """确认鉴权文档锁定前缀 fail-closed 范围、限流先于鉴权的顺序和不可区分的 401 边界。
+
+    鉴权最容易退化成"加了个令牌就算有安全边界"：只要文档不写清判定顺序，后续维护者会顺手把
+    401 提前到限流之前，令牌猜测就重新变成免费操作；只要文档不写清三种失败必须逐字相同，
+    有人会为了"更友好的报错"把"缺令牌"和"令牌错误"分开，从而泄露该实例是否已配置令牌。
+    """
+
+    guide = Path("docs/implementation-guide.md").read_text(encoding="utf-8")
+    contracts = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
+    design = Path("docs/product-design.md").read_text(encoding="utf-8")
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert "api-auth:v1" in guide
+    assert "api-auth:v1" in contracts
+    assert "api-auth:v1" in design
+    assert "api-auth:v1" in readme
+    assert '("/api/v1", "/metrics")' in contracts
+    assert "先限流再鉴权" in contracts
+    assert 'WWW-Authenticate: Bearer realm="dataops-api"' in contracts
+    assert "MINIMUM_API_TOKEN_CHARS = 32" in contracts
+    assert "hmac.compare_digest" in contracts
+    assert "fail closed" in contracts
+    assert "9.4 资源 API 鉴权与限流" in design
+    assert "127.0.0.1" in design
+
+
+def test_run_stream_documents_pin_read_only_boundary_and_end_reason_taxonomy() -> None:
+    """确认推流文档锁定"只读投递、顺序不变量、终止原因分类"和轮询永久回退四条边界。
+
+    推流最容易退化成"顺手让长连接也能推进 run"：只要文档不写清生成器仅持有两个只读方法，
+    后续维护者会把重试或补偿逻辑塞进流里，于是断流开始改变诊断结论。同样地，只要不写清
+    "先读快照再读增量事件"，有人会为了少一次轮询把顺序反过来，`stream_end` 就会发在时间线
+    缺最后几条事件的位置上；而把 run 级终态与连接级超时混成一个原因，前端只能二选一地犯错。
+    """
+
+    guide = Path("docs/implementation-guide.md").read_text(encoding="utf-8")
+    contracts = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
+    design = Path("docs/product-design.md").read_text(encoding="utf-8")
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert "run-stream:v1" in guide
+    assert "run-stream:v1" in contracts
+    assert "run-stream:v1" in design
+    assert "run-stream:v1" in readme
+    assert "GET /api/v1/runs/{run_id}/stream" in guide
+    assert "先读 run 快照 → 再读增量事件" in guide
+    assert "run_snapshot" in contracts
+    assert "stream_end" in contracts
+    assert "run_disappeared" in contracts
+    assert "stream_timeout" in contracts
+    assert "Last-Event-ID" in contracts
+    assert "不是第二条执行路径" in contracts
+    assert "run_stream_max_seconds > react_total_timeout_seconds" in contracts
+    assert "available_under_auth" in design
+    assert "轮询是永久保留的等价通道" in design
+
+
+def test_dual_agent_documents_pin_veto_asymmetry_revision_budget_and_degrade_ladder() -> None:
+    """确认双 Agent 文档锁定四级降级阶梯、规则对模型的非对称否决权和四个出口的暴露粒度。
+
+    审计最容易退化成"装饰性审计"：只要文档不写清确定性问题非空就强制 revise，后续维护者会让
+    模型的 accept 直接放行；只要不写清"Auditor 不可用不消耗返工预算且不等于通过"，有人会把
+    Provider 故障当成 accept。同时锁定"前端只显示问题码与字段路径"，防止未经放行的模型措辞
+    以"审计意见"的形式回到页面上。
+    """
+
+    guide = Path("docs/implementation-guide.md").read_text(encoding="utf-8")
+
+    assert "双 Agent 契约：否决权、返工预算与降级阶梯" in guide
+    assert "auditor_unavailable" in guide
+    assert "任何规则问题非空即强制 `revise`" in guide
+    assert "放行条件是**两层都同意**" in guide
+    assert "不消耗返工预算" in guide
+    assert '"审计不可用"绝不等于"审计通过"' in guide
+    assert "降级" in guide
+    assert "永远不会进入长期记忆" in guide
+    assert "只删不加" in guide
+    assert "从不读 `revision_instructions`" in guide
+    assert "未经放行的表述不应以" in guide
+    assert "不能外推为真实 LLM 的审计质量" in guide
+
+
+def test_live_golden_status_document_separates_runnable_contract_from_measurement() -> None:
+    """确认真实模型评测文档标明 smoke 范围、答案隔离、安全 token 遥测与未达标项。
+
+    该门禁防止作品集把三案例 smoke 包装成完整真实模型成绩；文档必须保留默认三案例、生产运行路径、
+    measured-only、usage 缺失、不保存 Prompt/Thought，以及"未达成 P95 目标"和评分口径缺陷的自述。
     """
 
     report = Path("docs/live-golden-eval-results.md").read_text(encoding="utf-8")
 
     assert "live-golden-eval:v1" in report
-    assert "没有发布真实模型测量成绩" in report
+    assert "只发布三案例 smoke 的实测成绩" in report
+    assert "planner-react:v8" in report
     assert "golden_lts_invalid_partition_parameter_single" in report
     assert "golden_cross_lts_bds_flashsync_watermark_timezone_mismatch" in report
     assert "golden_bds_conflicting_partition_evidence" in report
@@ -211,6 +341,10 @@ def test_live_golden_status_document_separates_runnable_contract_from_measuremen
     assert "unreported_usage_call_count" in report
     assert "Prompt、模型原始响应或 Thought" in report
     assert "不能把三案例 smoke 外推到 28 条" in report
+    # 未达标项与口径缺陷必须留在文档里：删掉它们等于把设计目标当成实测成绩对外宣称。
+    assert "不能宣称达成 P95 ≤ 30 s" in report
+    assert "评分口径缺陷而非报告质量下降" in report
+
 
 
 def test_frontend_design_is_mandatory_and_defines_safe_async_demo_acceptance() -> None:
@@ -301,7 +435,7 @@ def test_portfolio_eval_report_documents_publish_gate_and_complete_golden_scope(
 
     report = Path("docs/portfolio-eval-results.md").read_text(encoding="utf-8")
 
-    assert "portfolio-eval-manifest:v22" in report
+    assert "portfolio-eval-manifest:v23" in report
     assert "portfolio-eval-run:v22" in report
     assert "只有" in report and "status=`passed`" in report
     assert "failed、skipped、blocked" in report
@@ -326,7 +460,7 @@ def test_golden_diagnosis_report_documents_scoring_and_twenty_eight_case_boundar
     report = Path("docs/golden-diagnosis-eval-results.md").read_text(encoding="utf-8")
 
     assert "golden-case:v7" in report
-    assert "golden-diagnosis-eval:v21" in report
+    assert "golden-diagnosis-eval:v22" in report
     assert "28/28 = 100%" in report
     assert "target_coverage_complete=true" in report
     assert "确定性脚本" in report
@@ -392,18 +526,39 @@ def test_golden_diagnosis_report_documents_scoring_and_twenty_eight_case_boundar
 
 
 def test_prompt_contract_versions_budgeted_retrieval_inputs() -> None:
-    """确认 Prompt 契约区分完整检索 v2 与预算化 Evidence Bundle v1 输入。
+    """确认 Prompt 契约区分完整检索 v3、预算化 Evidence Bundle v2 与文档检索 v1 输入。
 
-    Planner Prompt 文本未改变，但两个占位符的数据语义已经版本化；测试防止后续代码升级 contract ID
-    后文档仍声称旧结构，或遗漏路径原子选择和 truncated 的解释。
+    Planner Prompt 文本未改变，但三个占位符的数据语义已经版本化；测试防止后续代码升级 contract ID
+    后文档仍声称旧结构，或遗漏路径原子选择、文档切片预算和 truncated 的解释。
     """
 
     prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
 
-    assert "graphrag-retrieval:v2" in prompt_contract
-    assert "graphrag-evidence-bundle:v1" in prompt_contract
+    assert "graphrag-retrieval:v3" in prompt_contract
+    assert "graphrag-evidence-bundle:v2" in prompt_contract
+    assert "document-retrieval:v1" in prompt_contract
     assert "路径只有在其全部节点、边和来源能一起进入预算" in prompt_contract
     assert "truncated=true" in prompt_contract
+    assert "omitted_chunk_ids" in prompt_contract
+    assert '"semantic": 0.60, "lexical": 0.25, "authority": 0.15' in prompt_contract
+
+
+def test_document_rag_channel_is_documented_with_honesty_boundaries() -> None:
+    """确认实现指南把文档 RAG 讲成独立通道，并保留切片、评分与建议提升的边界说明。
+
+    文档通道最容易退化成"把整份 Runbook 塞进 Prompt"，因此测试锁定三条关键约束：切片是唯一
+    引用单元、评分刻意只用三因子、只有 Runbook/SOP 的步骤小节能变成处置建议。任何一条被删除
+    都说明实现或文档已经偏离产品设计，而不是单纯的措辞调整。
+    """
+
+    guide = Path("docs/implementation-guide.md").read_text(encoding="utf-8")
+
+    assert "文档 RAG：第二条知识通道" in guide
+    assert "切片而不是文档是检索与引用单元" in guide
+    assert "三因子评分，刻意不复用图侧的五因子" in guide
+    assert "只有 Runbook/SOP 的步骤小节能变成处置建议" in guide
+    assert "document_chunks_embedded != document_chunks_loaded" in guide
+    assert "6000 个 UTF-8 JSON 字节、8 个唯一节点、4 条路径和 3 个文档切片" in guide
 
 
 def test_runtime_capability_prompt_contract_is_versioned_and_bounded() -> None:
@@ -426,36 +581,47 @@ def test_runtime_capability_prompt_contract_is_versioned_and_bounded() -> None:
 
 
 def test_langgraph_react_runtime_contract_is_versioned_and_explicit() -> None:
-    """确认 Prompt 文档记录真实 LangGraph 循环、停止原因和 Action 计数口径。
+    """确认 Prompt 文档记录真实 LangGraph 循环、停止原因、Action 计数口径和并行批次语义。
 
     该门禁防止实现退化为手写单轮函数，或把 MCP 内部重试误算成 Planner 步数；同时要求文档
-    明确模型适配器仍是独立边界，不能把测试 Scripted Planner 宣传成生产 Agent。
+    明确模型适配器仍是独立边界，不能把测试 Scripted Planner 宣传成生产 Agent。并行相关断言
+    锁定"一批 N 个 Action 记 N 步"与"整批拒绝不截断"两条决定，避免文档把并行说成额外取证预算。
     """
 
     prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
 
-    assert "langgraph-react-loop:v2" in prompt_contract
-    assert "Planner → execute_tool → Observation → Planner" in prompt_contract
+    assert "langgraph-react-loop:v3" in prompt_contract
+    assert "Planner → execute_tools → Observation → Planner" in prompt_contract
     assert "MCP 执行器内部的瞬时重试不增加 `react_step`" in prompt_contract
+    assert "一批 N 个 Action 记 N 步" in prompt_contract
+    assert "任一门禁不通过都整批拒绝而不截断执行" in prompt_contract
     assert "duplicate_action_blocked" in prompt_contract
+    assert "parallel_limit_exceeded" in prompt_contract
+    assert "parallel_budget_exceeded" in prompt_contract
+    assert "react.tool_batch" in prompt_contract
     assert "planner_provider_error" in prompt_contract
     assert "planner_refusal" in prompt_contract
     assert "planner_output_invalid" in prompt_contract
 
 
-def test_planner_v4_and_structured_output_repair_are_documented() -> None:
-    """确认 Prompt 契约记录 v4 会话/历史上下文、角色隔离和一次修复语义。
+def test_planner_v5_and_structured_output_repair_are_documented() -> None:
+    """确认 Prompt 契约记录 v5 会话/历史上下文、并行批次上限、角色隔离和一次修复语义。
 
     测试锁定安全与可复现边界而非自然语言全文：用户数据不能进入 system，SDK 不发送 API tools，
-    refusal 不修复，第二次失败停止；同时保留官方文档链接便于学习者核对原理。
+    refusal 不修复，第二次失败停止；同时保留官方文档链接便于学习者核对原理。批次上限断言额外
+    钉住"strict Schema 不接受 maxItems"这条实现约束，防止有人把校验挪回 Field 后文档失真。
     """
 
     prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
 
-    assert "planner-react:v4" in prompt_contract
+    assert "planner-react:v8" in prompt_contract
     assert "session_context" in prompt_contract
     assert "history_case_matches" in prompt_contract
     assert "system/user 两条消息" in prompt_contract
+    assert "{remaining_tool_calls}" in prompt_contract
+    assert "{max_parallel_actions}" in prompt_contract
+    assert "{unexecuted_priority_tools}" in prompt_contract
+    assert "strict Schema 不接受" in prompt_contract
     assert "openai-compatible-planner:v1" in prompt_contract
     assert "chat.completions.parse(response_format=PlannerDecision)" in prompt_contract
     assert "Provider 不传 `tools` 或 `tool_choice`" in prompt_contract
@@ -558,7 +724,8 @@ def test_diagnosis_resource_contract_documents_persistence_events_and_failure_se
     assert "FOR UPDATE SKIP LOCKED" in prompt_contract
     assert "HTTP 409" in prompt_contract
     assert "不保存 Thought" in prompt_contract
-    assert "portfolio-eval-manifest:v22" in prompt_contract
+    assert "portfolio-eval-manifest:v23" in prompt_contract
+    assert "实时支撑判定" in prompt_contract
     assert "portfolio-eval-run:v22" in prompt_contract
     assert "subprocess.run(shell=False)" in prompt_contract
     assert "failed、skipped 或 blocked 必须隐藏 metrics" in prompt_contract
@@ -589,7 +756,7 @@ def test_ablation_report_labels_measured_values_and_honest_zero_gain() -> None:
     assert "path_4f6638ec28f7073d" in report
     assert "graph-seed:v11" in report
     assert "54 个节点、71 条边" in report
-    assert "5634 字节" in report
+    assert "5658 字节" in report
     assert "7 个去重节点" in report
     assert "5 个节点和 4 条路径" in report
     assert "LTS 参数校验失败 partition_date" in report

@@ -1,6 +1,6 @@
 # Golden 诊断确定性回归实测报告
 
-本文记录 `golden-diagnosis-eval:v21` 在当前 28 条 `golden-case:v7` 合成案例上的可重复实测。产品目标是 28
+本文记录 `golden-diagnosis-eval:v22` 在当前 28 条 `golden-case:v7` 合成案例上的可重复实测。产品目标是 28
 条，因此当前覆盖率为 `28/28 = 100%`，`target_coverage_complete=true`。下列满分项只证明确定性
 脚本、强类型诊断结果和评分管线遵守当前标注，不能外推为真实 LLM 的意图识别或根因诊断准确率。
 

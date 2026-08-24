@@ -1,7 +1,7 @@
 services:
-  # PostgreSQL is the project's single state service. The pgvector image keeps
-  # vector storage, full-text search, graph edges, and future case memory in one
-  # infrastructure boundary instead of adding a separate graph/vector database.
+  # PostgreSQL 是本项目唯一的状态服务。pgvector 镜像把向量存储、全文检索、图边和长期案例记忆
+  # 收在同一个基础设施边界内，而不是再引入独立的图数据库或向量库——多一个有状态组件就多一份
+  # 备份、迁移和一致性成本，而本项目的检索规模完全用不上。
   database:
     image: pgvector/pgvector:pg16
     environment:
@@ -24,6 +24,11 @@ services:
   api:
     build:
       context: .
+    # `.env` 里的 DATAOPS_* 配置（Provider、维度、鉴权模式、限流配额）需要真正进入容器，否则
+    # 宿主上改完 .env 只影响 Compose 变量插值，容器内仍在跑仓库默认值。缺省的键保持未设置而不是
+    # 空字符串，这一点对 DATAOPS_API_AUTH_TOKEN 尤其重要：空串会被解析成"已配置的空令牌"。
+    env_file:
+      - .env
     environment:
       DATAOPS_ENVIRONMENT: docker
       DATAOPS_DATABASE_URL: "postgresql+asyncpg://dataops:${DATAOPS_DB_AUTH}@database:5432/dataops"
@@ -34,8 +39,10 @@ services:
       - sh
       - -c
       - "alembic upgrade head && python -m app.persistence.seed && uvicorn app.api.main:app --host 0.0.0.0 --port 8000"
+    # 端口只绑定回环地址：默认部署的鉴权是关闭的，绑到 0.0.0.0 等于把可触发付费模型调用的接口
+    # 暴露到同网段。需要对外演示时应显式配置 bearer 令牌并放在反向代理之后。
     ports:
-      - "${DATAOPS_API_PORT:-18000}:8000"
+      - "127.0.0.1:${DATAOPS_API_PORT:-18000}:8000"
     healthcheck:
       test:
         - CMD

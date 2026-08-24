@@ -2,6 +2,14 @@
 
 迁移 URL 只从 pydantic-settings 的 SecretStr 获取，不写入 alembic.ini。在线模式通过
 异步引擎运行迁移，离线模式保留生成 SQL 的能力，两种模式共享 ORM metadata。
+
+两条约束记录在这里而不是 alembic.ini：
+1. 数据库 URL 刻意不写进 ini。凭据只经 `DATAOPS_DATABASE_URL` 进入进程，因此不会被提交进
+   版本控制，也不会出现在迁移日志或 `alembic history` 输出里。
+2. alembic.ini 必须保持纯 ASCII。Alembic 自身用 `encoding="locale"` 读取该文件，`fileConfig`
+   也再读一遍，所以在中文 Windows（cp936）终端下，ini 里任何 CJK 字节都会让
+   `alembic upgrade head` 在连接数据库之前就抛 UnicodeDecodeError；本文件是 Python 源码，
+   永远按 UTF-8 解码，才是放中文说明的正确位置。
 """
 
 from __future__ import annotations

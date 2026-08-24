@@ -1,20 +1,25 @@
 # 五层作品集评测统一实测报告
 
-本文汇总 `portfolio-eval-manifest:v22` 当前登记的四层小样本消融和一层 Golden 确定性回归，并说明
+本文汇总 `portfolio-eval-manifest:v23` 当前登记的四层小样本消融和一层 Golden 确定性回归，并说明
 `portfolio-eval-run:v22` 如何验证后再发布指标。Golden 数量已达到 28 条产品目标，但该层仍是确定性
 脚本数据流成绩，不是模型诊断质量总成绩；统一报告也不计算跨层
 “总准确率”；每个数字仍受各自数据、Provider、脚本和实验条件限制。代码可读取精确四层的历史 v1
-Golden v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20 来源的五层 v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21 manifest，但默认 CLI 只运行五层 v22。
+Golden v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21 来源的五层 v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22 manifest，但默认 CLI 只运行五层 v23。
+
+`golden-diagnosis-eval:v21 → v22` 只改引用完整性的判定口径（悬空判定与实时支撑判定分离，详见
+`docs/prompt-contracts.md` 第 8 节），案例集合与其余十八个指标定义不变。升版后五层已完整重跑：
+`run_success=true`、`complete=true`、`all_suites_passed=true`，五个 suite 全部 `passed`，十九个指标快照
+逐项与本文表格一致，Golden 层仍为 28/28。
 
 ## 1. 统一执行范围
 
 | Suite | 来源契约 | PostgreSQL | 详细实测文档 | 指标数 |
 |---|---|---|---|---:|
-| `graphrag_ablation` | `graphrag-retrieval:v2` | 必需 | `docs/graphrag-ablation-results.md` | 2 |
+| `graphrag_ablation` | `graphrag-retrieval:v3` | 必需 | `docs/graphrag-ablation-results.md` | 2 |
 | `memory_recall_ablation` | `memory-recall-eval:v1` | 必需 | `docs/memory-recall-eval-results.md` | 2 |
 | `history_impact_ablation` | `history-impact-eval:v1` | 不需要 | `docs/history-impact-eval-results.md` | 2 |
 | `auditor_impact_ablation` | `auditor-impact-eval:v1` | 不需要 | `docs/auditor-impact-eval-results.md` | 3 |
-| `golden_diagnosis_baseline` | `golden-diagnosis-eval:v21` | 不需要 | `docs/golden-diagnosis-eval-results.md` | 10 |
+| `golden_diagnosis_baseline` | `golden-diagnosis-eval:v22` | 不需要 | `docs/golden-diagnosis-eval-results.md` | 10 |
 
 manifest 固定测试节点而不是自由命令。CLI 使用当前 Python 解释器和 `shell=False` 运行 pytest；只有
 本次 status=`passed` 的 suite 才把相应 measured snapshot 放进 JSON。failed、skipped、blocked 的

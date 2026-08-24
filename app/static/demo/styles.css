@@ -68,11 +68,40 @@ input:focus, textarea:focus, select:focus, button:focus-visible { outline: 3px s
 .timeline-meta { color: var(--accent-dark); font-size: .72rem; font-weight: 800; margin-bottom: 5px; }
 .timeline-summary { font-size: .86rem; line-height: 1.5; margin: 0; }
 .report-grid { display: grid; gap: 12px; }
+.trace { display: grid; gap: 6px; list-style: none; margin: 14px 0 0; padding: 0; }
+.trace-item { border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; background: #fbfcfd; }
+.trace-item[data-status="error"] { border-color: #e2b3b8; background: #fff5f6; }
+.trace-item[data-status="cancelled"] { border-color: #d9d2b3; background: #fffdf3; }
+.trace-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.trace-name { font-size: .82rem; font-weight: 700; overflow-wrap: anywhere; }
+.trace-kind { color: var(--muted); font-size: .7rem; font-weight: 700; letter-spacing: .04em; }
+.trace-duration { color: var(--accent-dark); font-size: .76rem; font-weight: 800; white-space: nowrap; }
+.trace-bar { background: #e8eef1; border-radius: 99px; height: 5px; margin-top: 7px; overflow: hidden; }
+.trace-bar span { display: block; height: 100%; background: var(--accent); border-radius: inherit; }
+.trace-item[data-status="error"] .trace-bar span { background: var(--failed); }
+.trace-attributes { color: var(--muted); font-size: .72rem; line-height: 1.5; margin: 6px 0 0; overflow-wrap: anywhere; }
 .report-card { border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: #fbfcfd; }
 .report-card h3 { font-size: .82rem; margin: 0 0 8px; color: var(--accent-dark); }
 .report-card p, .report-card li { font-size: .86rem; line-height: 1.55; }
 .report-card ul { margin: 0; padding-left: 20px; }
 .memory-card { margin-top: 18px; border: 1px solid #c8dfe2; border-radius: 14px; padding: 16px; background: #f4fbfb; }
+/* 裁决卡片排在报告正文之前，且 degraded 用与失败态相同的红色语义：一份被降级的报告在视觉上
+   不能和放行报告长得一样，否则演示者会把"安全降级"当成"审计通过"。 */
+.audit-card { margin: 0 0 18px; border: 1px solid #c8dfe2; border-radius: 14px; padding: 16px; background: #f7fafc; }
+.audit-card[data-outcome="degraded"] { border-color: #e2b6ba; background: #fff6f7; }
+.audit-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.audit-heading h3 { margin: 0; font-size: .98rem; }
+.audit-outcome { border-radius: 999px; padding: 5px 9px; color: var(--completed); background: #e6f6ec; font-size: .72rem; font-weight: 800; }
+.audit-card[data-outcome="degraded"] .audit-outcome { color: var(--failed); background: #fff0f1; }
+.audit-facts { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin: 0 0 12px; }
+.audit-facts div { min-width: 0; }
+.audit-facts dt { color: var(--muted); font-size: .72rem; margin-bottom: 5px; }
+.audit-facts dd { margin: 0; font-size: .82rem; font-weight: 700; overflow-wrap: anywhere; }
+.audit-issues { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 8px; }
+.audit-issue { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-size: .78rem; }
+.audit-issue-code { border-radius: 6px; padding: 3px 7px; color: var(--failed); background: #fff0f1; font-weight: 800; }
+.audit-issue-path { color: var(--ink); font-weight: 700; overflow-wrap: anywhere; }
+.audit-issue-refs { color: var(--muted); overflow-wrap: anywhere; }
 .memory-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
 .memory-heading h3 { margin: 0; font-size: .98rem; }
 .memory-status { border-radius: 999px; padding: 5px 9px; color: var(--accent-dark); background: #e1f2f3; font-size: .72rem; font-weight: 800; }
@@ -88,4 +117,4 @@ input:focus, textarea:focus, select:focus, button:focus-visible { outline: 3px s
 .empty-state { color: var(--muted); font-size: .84rem; padding: 12px 0; }
 .footer-note { text-align: center; padding: 24px 0 0; }
 @media (max-width: 760px) { .hero { align-items: flex-start; flex-direction: column; } .workspace-grid { grid-template-columns: 1fr; } .health-grid { grid-template-columns: 1fr 1fr; } }
-@media (max-width: 460px) { .shell { width: min(100% - 20px, 1180px); padding-top: 24px; } .panel { padding: 18px; } .health-grid, .form-row, .run-facts, .memory-facts { grid-template-columns: 1fr; } .memory-actions { flex-direction: column; } .memory-action { width: 100%; } }
+@media (max-width: 460px) { .shell { width: min(100% - 20px, 1180px); padding-top: 24px; } .panel { padding: 18px; } .health-grid, .form-row, .run-facts, .memory-facts, .audit-facts { grid-template-columns: 1fr; } .memory-actions { flex-direction: column; } .memory-action { width: 100%; } }

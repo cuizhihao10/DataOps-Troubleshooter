@@ -25,7 +25,7 @@
 
 ## 3. 页面信息架构
 
-单页按从输入到证据、再到结论的阅读顺序分为六区：
+单页按从输入到证据、再到结论与自身可观测性的阅读顺序分为七区：
 
 1. **服务状态栏**：显示 `/health` 的数据库、Planner、Auditor、MCP、知识节点/边和契约版本；密钥、
    数据库 URL 和内部异常永不显示。
@@ -39,8 +39,10 @@
    卡片按 node/edge 顺序显示故障链，并标记最终报告是否引用该 `path_id`。
 6. **已审计报告与记忆区**：展示 summary、Top-1/候选根因、引用、处置步骤、风险、不确定性、相似
    confirmed 案例；pending memory 只能由用户显式 confirm/reject。
+7. **分层调用链区**：终态后展示 `run-trace:v1` 的 span 树（层级、名称、状态、耗时占比）；该区只承载
+   数字与 ASCII 标识符，是“系统自身可被排障”的证据，而不是第二个报告区。
 
-窄屏时六区按上述顺序纵向排列；宽屏可把输入/状态与证据/报告分栏，但 DOM 阅读顺序保持不变，保证
+窄屏时七区按上述顺序纵向排列；宽屏可把输入/状态与证据/报告分栏，但 DOM 阅读顺序保持不变，保证
 键盘和屏幕阅读器不会因视觉布局改变证据因果顺序。
 
 ## 4. 前端状态机与 API 依赖
@@ -108,6 +110,9 @@ idle
 - queued/running 显示取消按钮；cancelled 显示“从检查点恢复”，恢复后用新 run_id 继续轮询，避免覆盖旧审计时间线。
 - 按 `RunPublicEvent.sequence` 展示公开 Action/Observation 时间线；所有文本写入 DOM 使用 `textContent`，避免合成 Evidence 被当成 HTML 执行。
 - 报告 summary、root cause、risk 和 uncertainty 摘要；不展示 Prompt、Thought、embedding 或 Provider 原始响应。
+- run 进入终态后自动读取 `GET /runs/{run_id}/trace`，把 `run-trace:v1` 的 span 树按父指针缩进展示层级、状态、耗时占比与 ASCII 属性；`dropped_span_count` 非零时明确标注“调用链不完整”，不把截断后的时间轴当作完整执行过程。轮询期间不读取 trace，因为 span 与 run 终态同事务写入，提前读取必然为空。
+- 报告面板顶部先渲染"独立审计裁决"卡：outcome（accepted/degraded）、Auditor 结论、`已用返工 n / 1`、问题码与被否决的 `claim_path` / `evidence_refs`。`degraded` 使用与失败态相同的红色语义，因为阅读顺序即风险顺序——读者必须先知道结论有没有被放行，再去读它写了什么。卡片只显示稳定问题码与字段路径，不显示 `AuditIssue.message` 与 `revision_instructions`：未经放行的模型措辞不应以"审计意见"的形式重新出现在页面上。
 - `memory_stage.memory` 的 pending/rejected 候选显示 confirm/reject/delete；按钮调用对应服务端 API，以服务端返回状态为准，删除成功后隐藏卡片。
+- 实时更新优先走 `run-stream:v1` 的 `EventSource`：`run_snapshot` 触发状态刷新、`run_event` 按 `sequence` 去重后追加到时间线、`stream_end` 收尾。`stream_timeout` 与 `run_disappeared` 属于连接级终止，前端退回退避轮询并在 `poll-message` 写明"已退回轮询"；已经收到过帧的中途断线交给浏览器用 `Last-Event-ID` 自动重连，不重复渲染同一序号。轮询代码路径永久保留——浏览器 `EventSource` 无法携带 Authorization 头，`api-auth:v1` 的 bearer 模式下推流必然被拒，这是正常路径而不是故障。
 
 这段实现对应学习型验收闭环：浏览器只保存 `sessionId/runId/memoryId` 等可恢复标识，后端 PostgreSQL Worker 才是队列和记忆状态真相；网络失败只显示错误，不伪造 completed、cancelled 或自动确认案例记忆。`tests/integration/test_demo_frontend.py` 覆盖静态资源、路径穿越防护、409 错误提示、取消/恢复和记忆决策入口。

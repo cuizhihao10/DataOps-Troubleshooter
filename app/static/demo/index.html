@@ -121,13 +121,47 @@
         </ol>
       </section>
 
+      <section class="panel trace-panel" aria-labelledby="trace-title">
+        <div class="panel-heading">
+          <div>
+            <p class="section-kicker">05 / TRACE</p>
+            <h2 id="trace-title">分层调用链</h2>
+          </div>
+          <button class="quiet-button" id="refresh-trace" type="button" disabled>刷新调用链</button>
+        </div>
+        <p class="muted" id="trace-summary">run 进入终态后展示每一层的耗时占比；此处只有层级、名称与数字，不含任何推理正文。</p>
+        <ol class="trace" id="trace-list" aria-live="polite">
+          <li class="empty-state">提交诊断后，workflow / node / tool_call / retrieval / model_call 各层 span 会出现在这里。</li>
+        </ol>
+      </section>
+
       <section class="panel report-panel" aria-labelledby="report-title">
         <div class="panel-heading">
           <div>
-            <p class="section-kicker">05 / REPORT</p>
+            <p class="section-kicker">06 / REPORT</p>
             <h2 id="report-title">审计报告</h2>
           </div>
         </div>
+        <section class="audit-card" id="audit-card" data-outcome="unknown" aria-labelledby="audit-title" hidden>
+          <div class="audit-heading">
+            <div>
+              <p class="section-kicker">AUDIT / VERDICT</p>
+              <h3 id="audit-title">独立审计裁决</h3>
+            </div>
+            <span class="audit-outcome" id="audit-outcome">unknown</span>
+          </div>
+          <dl class="audit-facts">
+            <div><dt>Auditor 结论</dt><dd id="audit-status">—</dd></div>
+            <div><dt>已用返工</dt><dd id="audit-revisions">—</dd></div>
+            <div><dt>否决问题</dt><dd id="audit-issue-count">—</dd></div>
+          </dl>
+          <ol class="audit-issues" id="audit-issues"></ol>
+          <p class="form-note" id="audit-help">
+            这里只显示稳定问题码与被否决的报告字段路径，不显示 Auditor 的自然语言措辞：未经放行的
+            表述不应以"审计意见"的形式重新出现在页面上。degraded 表示报告未通过独立审计，未放行的
+            根因已被删除，且不会暂存任何案例记忆。
+          </p>
+        </section>
         <div class="report-grid" id="report-grid">
           <p class="empty-state">完成 run 后展示 summary、根因引用、风险与不确定性。</p>
         </div>

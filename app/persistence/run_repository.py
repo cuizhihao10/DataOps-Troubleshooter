@@ -15,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.capabilities import DiagnosisIntent, HistoryTrigger
 from app.domain.models import Component
 from app.memory.checkpoint import SessionCheckpoint
+from app.observability.metrics import RuntimeMetricsSnapshot, SpanMetric
+from app.observability.tracing import RunTrace, TraceSpan, TraceSpanKind, TraceSpanStatus
 from app.orchestration.diagnosis_models import DiagnosisRunResult
 from app.orchestration.run_models import (
     ActiveRunConflictError,
@@ -30,6 +32,7 @@ from app.persistence.models import (
     AgentRunRecord,
     DiagnosisSessionRecord,
     RunEventRecord,
+    RunTraceSpanRecord,
     SessionCheckpointRecord,
 )
 
@@ -283,12 +286,14 @@ class PostgresDiagnosisRunRepository:
         checkpoint: SessionCheckpoint,
         worker_id: str,
         now: datetime,
+        trace: RunTrace | None = None,
     ) -> AgentRunSnapshot:
-        """把 running run 原子转换为 completed，并写事件与最新会话 checkpoint。
+        """把 running run 原子转换为 completed，并写事件、最新会话 checkpoint 与调用链 span。
 
-        ``result``、events 与 checkpoint 必须属于同一 run/session；三者和 run 终态共用外层事务，
-        因而轮询者不会看到 completed 但追问仍读取旧快照。非 running、版本跳跃或身份不一致显式
-        失败，防止并发/重放覆盖更新的会话上下文。
+        ``result``、events、checkpoint 与 trace 必须属于同一 run/session；四者和 run 终态共用外层
+        事务，因而轮询者不会看到 completed 但缺少时间线或 trace。非 running、版本跳跃或身份不一致
+        显式失败，防止并发/重放覆盖更新的会话上下文。trace 允许缺省，因为离线评测与旧测试并不绑定
+        采集器，此时只是没有可落库的 span，而不是缺陷。
         """
 
         # 先锁定并验证 running，再批量加入事件；外层事务让终态与时间线一起 commit/rollback。
@@ -303,6 +308,7 @@ class PostgresDiagnosisRunRepository:
         record.lease_owner = None
         record.lease_expires_at = None
         self._session.add_all([_event_record(event) for event in events])
+        self._add_trace_spans(run_id, trace)
         await self._save_checkpoint(checkpoint)
         await self._session.flush()
         return _run_from_record(record)
@@ -328,11 +334,13 @@ class PostgresDiagnosisRunRepository:
         event: RunPublicEvent,
         worker_id: str,
         now: datetime,
+        trace: RunTrace | None = None,
     ) -> AgentRunSnapshot:
-        """把 running run 原子转换为 failed，并保存一条净化 system 事件。
+        """把 running run 原子转换为 failed，并保存一条净化 system 事件与已采集的 span。
 
         只接受非空稳定错误码/公开摘要；原异常通过 Python exception chaining 留给调用日志，不进入
-        数据库。事件必须为目标 run 的 sequence=1 system 事件，防止部分成功时间线被伪造成失败。
+        数据库。事件必须为目标 run 的 sequence=1 system 事件，防止部分成功时间线被伪造成失败。失败
+        run 的 trace 尤其重要：它是唯一能说明"失败前已经走到哪一层"的结构化证据。
         """
 
         if not error_code.strip() or not error_message.strip():
@@ -348,8 +356,88 @@ class PostgresDiagnosisRunRepository:
         record.lease_owner = None
         record.lease_expires_at = None
         self._session.add(_event_record(event))
+        self._add_trace_spans(run_id, trace)
         await self._session.flush()
         return _run_from_record(record)
+
+    def _add_trace_spans(self, run_id: str, trace: RunTrace | None) -> None:
+        """把 trace 的 span 加入当前事务，缺省 trace 视为"本次未开启采集"而不是错误。
+
+        归属校验放在这里而不是依赖数据库外键，是因为外键只能证明 run 存在，无法阻止把 A run 的
+        span 写到 B run 名下——那种错误会让两次诊断的耗时混在一张火焰图上，且事后完全无法分辨。
+        """
+
+        if trace is None:
+            return
+        if trace.run_id != run_id:
+            raise ValueError("trace must belong to the persisted run")
+        self._session.add_all([_trace_span_record(span) for span in trace.spans])
+
+    async def list_trace_spans(self, run_id: str) -> RunTrace | None:
+        """按序号读回一次 run 的完整调用链；run 不存在返回 None，无 span 返回空 trace。
+
+        "run 存在但没有 span"与"run 不存在"必须区分：前者说明该 run 在未开启采集的部署下执行，
+        后者是调用方用错了 ID。读回时重新通过 ``RunTrace`` 校验，损坏或人工篡改的层级会显式失败，
+        而不是让前端渲染出一棵悄悄缺枝的树。
+        """
+
+        exists = await self._session.scalar(
+            select(AgentRunRecord.run_id).where(AgentRunRecord.run_id == run_id)
+        )
+        if exists is None:
+            return None
+        records = (
+            await self._session.scalars(
+                select(RunTraceSpanRecord)
+                .where(RunTraceSpanRecord.run_id == run_id)
+                .order_by(RunTraceSpanRecord.sequence)
+            )
+        ).all()
+        return RunTrace(
+            run_id=run_id,
+            spans=tuple(_trace_span_from_record(record) for record in records),
+        )
+
+    async def aggregate_metrics(self) -> RuntimeMetricsSnapshot:
+        """用两条 GROUP BY 聚合出 run 状态计数与 span 层级耗时，供 /metrics 直接渲染。
+
+        聚合放在数据库而不是进程内计数器，是因为 Worker 与 API 可以是不同进程、还会重启：进程内
+        计数器在重启后归零，会让"错误率突然下降"这种最危险的假象出现在监控面板上。span 聚合按
+        ``kind`` + ``name`` 分组，正好命中 ``ix_run_trace_spans_kind_name``，因此抓取频率不会随
+        span 总量线性劣化。
+        """
+
+        run_rows = (
+            await self._session.execute(
+                select(AgentRunRecord.status, func.count()).group_by(AgentRunRecord.status)
+            )
+        ).all()
+        span_rows = (
+            await self._session.execute(
+                select(
+                    RunTraceSpanRecord.kind,
+                    RunTraceSpanRecord.name,
+                    func.count(),
+                    func.sum(RunTraceSpanRecord.duration_ms),
+                    func.max(RunTraceSpanRecord.duration_ms),
+                    func.count().filter(RunTraceSpanRecord.status != TraceSpanStatus.ERROR.value),
+                ).group_by(RunTraceSpanRecord.kind, RunTraceSpanRecord.name)
+            )
+        ).all()
+        return RuntimeMetricsSnapshot(
+            run_counts={str(status): int(count) for status, count in run_rows},
+            spans=tuple(
+                SpanMetric(
+                    kind=str(kind),
+                    name=str(name),
+                    count=int(count),
+                    duration_ms_sum=float(duration_sum or 0.0),
+                    duration_ms_max=float(duration_max or 0.0),
+                    error_count=int(count) - int(ok_count),
+                )
+                for kind, name, count, duration_sum, duration_max, ok_count in span_rows
+            ),
+        )
 
     async def cancel_run(
         self,
@@ -449,6 +537,34 @@ class PostgresDiagnosisRunRepository:
             await self._session.scalars(
                 select(RunEventRecord)
                 .where(RunEventRecord.run_id == run_id)
+                .order_by(RunEventRecord.sequence)
+            )
+        ).all()
+        return tuple(_event_from_record(record) for record in records)
+
+    async def list_events_after(
+        self,
+        run_id: str,
+        *,
+        after_sequence: int,
+    ) -> tuple[RunPublicEvent, ...] | None:
+        """确认 run 存在后按 sequence 返回序号大于游标的增量事件，未知 run 返回 None。
+
+        推流需要的是切片而不是全量：领域 ``RunEventList`` 要求 sequence 恰好覆盖 1..N，无法承载
+        增量结果，因此这里直接返回元组而不包装成列表模型。过滤放在 SQL 层，一条长连接的每次轮询
+        只取真正的新增行，而不是每次都把整条时间线搬进内存再切。
+        """
+
+        exists = await self._session.get(AgentRunRecord, run_id)
+        if exists is None:
+            return None
+        records = (
+            await self._session.scalars(
+                select(RunEventRecord)
+                .where(
+                    RunEventRecord.run_id == run_id,
+                    RunEventRecord.sequence > after_sequence,
+                )
                 .order_by(RunEventRecord.sequence)
             )
         ).all()
@@ -596,6 +712,50 @@ def _event_from_record(record: RunEventRecord) -> RunPublicEvent:
         summary=record.summary,
         payload=dict(record.payload),
         created_at=record.created_at,
+    )
+
+
+def _trace_span_record(span: TraceSpan) -> RunTraceSpanRecord:
+    """把不可变 span 映射为 ORM 行，枚举以字符串值落库以便 SQL 直接聚合。
+
+    属性做浅复制后写入 JSONB：值已在遥测层被限制为标量与 ASCII 标识符，因此不存在需要深拷贝的
+    嵌套结构，也不可能夹带 Prompt、Thought 或凭据正文。
+    """
+
+    return RunTraceSpanRecord(
+        span_id=span.span_id,
+        run_id=span.run_id,
+        sequence=span.sequence,
+        parent_span_id=span.parent_span_id,
+        kind=span.kind.value,
+        name=span.name,
+        status=span.status.value,
+        started_at=span.started_at,
+        ended_at=span.ended_at,
+        duration_ms=span.duration_ms,
+        attributes=dict(span.attributes),
+    )
+
+
+def _trace_span_from_record(record: RunTraceSpanRecord) -> TraceSpan:
+    """把 span ORM 行恢复为冻结契约模型，未知层级或状态显式失败。
+
+    读回时重新走一遍 Pydantic 校验（含 span_id 可推导性），因此人工改库、迁移遗漏或跨 run 错误
+    关联都会在接口层暴露，而不是让前端画出一棵看起来合理却错误的调用树。
+    """
+
+    return TraceSpan(
+        run_id=record.run_id,
+        sequence=record.sequence,
+        span_id=record.span_id,
+        parent_span_id=record.parent_span_id,
+        kind=TraceSpanKind(record.kind),
+        name=record.name,
+        status=TraceSpanStatus(record.status),
+        started_at=record.started_at,
+        ended_at=record.ended_at,
+        duration_ms=record.duration_ms,
+        attributes=dict(record.attributes),
     )
 
 

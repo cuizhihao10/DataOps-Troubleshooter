@@ -48,6 +48,29 @@ async def test_demo_page_serves_static_assets_and_documents_safe_async_flow() ->
     assert "delete-memory" in page.text
     assert "/api/v1/runs/" in script.text and "/cancel" in script.text and "/resume" in script.text
     assert "DELETE" in script.text
+    # 调用链面板是本项目对外可见的可观测性证据；它必须在终态自动读取，而不是只留一个手动按钮。
+    assert "refresh-trace" in page.text
+    assert "trace-list" in page.text
+    assert "/trace`" in script.text
+    assert "async function refreshTrace" in script.text
+    assert "await refreshTrace(runId)" in script.text
+    assert ".trace-item" in styles.text
+    # 实时更新走 SSE，但轮询函数必须继续存在：bearer 鉴权下 EventSource 一定被拒，
+    # 退回轮询是正常路径而不是故障处理。
+    assert "new EventSource(" in script.text
+    assert "stream_end" in script.text
+    assert "Last-Event-ID" in script.text
+    assert "async function fallbackToPolling" in script.text
+    # 审计裁决必须先于报告正文出现，否则演示者会先读结论、再才发现它其实被降级了。
+    assert "audit-card" in page.text
+    assert "audit-issues" in page.text
+    assert "独立审计裁决" in page.text
+    assert "function renderAuditVerdict" in script.text
+    assert 'card.dataset.outcome = outcome' in script.text
+    assert '.audit-card[data-outcome="degraded"]' in styles.text
+    # 页面只展示稳定问题码与字段路径；模型措辞与修订指令不允许作为"审计意见"重新出现。
+    assert "issue.message" not in script.text
+    assert ".revision_instructions" not in script.text
 
 
 @pytest.mark.asyncio

@@ -105,7 +105,7 @@ class HistoryAwareScriptedPlanner:
             return PlannerDecision(
                 status=PlannerStatus.CALL_TOOL,
                 decision_summary="选择一项只读工具补充当前 Observation。",
-                action=action,
+                actions=[action],
                 evidence_refs=[context.state.evidence[0].evidence_id],
             )
         if context.state.react_step == 1:

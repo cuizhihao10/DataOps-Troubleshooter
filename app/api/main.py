@@ -10,9 +10,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Header, HTTPException, Query, Request, status
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
+from sse_starlette import EventSourceResponse
 
 from app import __version__
 from app.agents.auditor_chat import AUDITOR_PROVIDER_CONTRACT_ID
@@ -23,6 +24,18 @@ from app.agents.prompts import (
     PLANNER_PROMPT_ID,
     load_auditor_prompt,
     load_planner_prompt,
+)
+from app.api.security import (
+    API_AUTH_CONTRACT_ID,
+    PROTECTED_PATH_PREFIXES,
+    ApiSecurityGuard,
+    is_protected_path,
+)
+from app.api.streaming import (
+    RUN_STREAM_CONTRACT_ID,
+    RunStreamConfig,
+    iter_run_stream,
+    resolve_stream_cursor,
 )
 from app.capabilities import CAPABILITY_CONTRACT_ID, get_capability_registry
 from app.core.fixture_registry import FixtureRegistry, load_golden_cases
@@ -39,6 +52,11 @@ from app.memory import (
     PostgresMemoryRuntime,
 )
 from app.memory.checkpoint import SESSION_CHECKPOINT_CONTRACT_ID
+from app.observability import (
+    RUN_TRACE_CONTRACT_ID,
+    RunTrace,
+    render_prometheus_text,
+)
 from app.orchestration import (
     AUDITED_REPORT_WORKFLOW_CONTRACT_ID,
     DIAGNOSIS_API_CONTRACT_ID,
@@ -68,6 +86,11 @@ from app.persistence.database import (
     create_database_engine,
     create_session_factory,
 )
+from app.retrieval.document_repository import PostgresDocumentRepository
+from app.retrieval.documents import (
+    DOCUMENT_RETRIEVAL_CONTRACT_ID,
+    DocumentScoringWeights,
+)
 from app.retrieval.embeddings import create_embedding_provider
 from app.retrieval.models import (
     GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID,
@@ -76,13 +99,16 @@ from app.retrieval.models import (
     HybridScoringWeights,
 )
 from app.retrieval.repository import PostgresGraphRepository
+from app.retrieval.reranker import create_reranker
 
 
 class ContractVersions(BaseModel):
-    """描述健康检查公开的 Prompt、工具、工作流、资源 API 与 GraphRAG 契约标识。
+    """描述健康检查公开的 Prompt、工具、工作流、资源 API 与两条检索通道的契约标识。
 
     客户端可判断 Planner、MCP、Golden Case、固定能力、三个 LangGraph 层和资源/检索上下文是否
-    与预期环境一致；严格额外字段策略避免展示脚本静默依赖已经漂移的响应。
+    与预期环境一致；文档检索单独列出契约，因为图通道与文档通道可以独立升版，把两者合成一个字段
+    会让部署方无法判断"到底哪条知识通道发生了漂移"。严格额外字段策略避免展示脚本静默依赖
+    已经漂移的响应。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -102,6 +128,10 @@ class ContractVersions(BaseModel):
     case_memory: str
     graph_retrieval: str
     graph_evidence_bundle: str
+    document_retrieval: str
+    run_trace: str
+    api_auth: str
+    run_stream: str
 
 
 class RuntimeLimits(BaseModel):
@@ -114,6 +144,9 @@ class RuntimeLimits(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_react_steps: int
+    # 并行上限和步数上限一起公开：只看 max_react_steps 无法判断这个实例是"六步串行"还是
+    # "两轮各三个并行"，而这两者的 P95 延迟完全不同。
+    max_parallel_tool_actions: int
     react_total_timeout_seconds: float
     max_graph_hops: int
     max_audit_revisions: int
@@ -121,17 +154,29 @@ class RuntimeLimits(BaseModel):
 
 
 class RetrievalConfiguration(BaseModel):
-    """公开当前 Embedding 空间、混合评分和 Evidence Bundle 预算，不含模型凭据。
+    """公开当前 Embedding 空间、重排配置、两条通道的评分权重和 Evidence Bundle 预算，不含模型凭据。
 
-    Provider ID、维度、权重和预算让演示者解释检索空间、排序公式和上下文上限；响应只来自经过
-    Settings/Provider 工厂校验的值，避免健康接口报告运行时无法创建或无法满足的配置。
+    Provider ID、维度、权重和预算让演示者解释检索空间、排序公式和上下文上限；重排字段说明第二
+    阶段是否启用、用哪个模型以及融合权重，使"名次为何变化"可以被外部核对。文档权重与图权重并列
+    公开而不是合并，是因为两者因子集合本来不同（文档没有 path/freshness），合并展示会让人误以为
+    文档片段也参与了关系路径打分。响应只来自经过 Settings/Provider 工厂校验的值，避免健康接口
+    报告运行时无法创建或无法满足的配置。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     embedding_provider: str
     embedding_dimensions: int
+    embedding_model: str
+    embedding_endpoint_host: str
+    rerank_provider: str
+    rerank_model: str
+    rerank_endpoint_host: str
+    rerank_candidate_multiplier: int
+    rerank_blend_weight: float
     score_weights: HybridScoringWeights
+    document_score_weights: DocumentScoringWeights
+    document_chunk_limit: int
     evidence_budget: EvidenceBundleBudget
 
 
@@ -211,6 +256,41 @@ class DiagnosisApiConfiguration(BaseModel):
     retrieval_seed_limit: int
 
 
+class RunStreamConfiguration(BaseModel):
+    """公开 SSE 推流的契约、轮询/心跳/寿命预算，以及鉴权模式下的已知限制。
+
+    三个时间预算让演示者在打开前端之前就能解释"事件延迟大概多少、连接能活多久"；
+    `available_under_auth` 则显式承认浏览器 `EventSource` 无法携带 Authorization 头，因此 bearer
+    模式下推流一定会被鉴权中间件拒绝、前端必须退回轮询。把这个限制写进健康响应而不是只写在文档里，
+    是为了避免演示时出现"说好有流式却一直在轮询"的解释成本。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    contract_id: str
+    poll_seconds: float
+    keepalive_seconds: float
+    max_seconds: float
+    available_under_auth: bool
+
+
+class ApiSecurityConfiguration(BaseModel):
+    """公开资源 API 的鉴权模式、受保护前缀与限流配额，不包含令牌或其摘要。
+
+    `mode` 让运维在不试探接口的前提下确认这个实例是否需要令牌；受保护前缀显式列出，避免文档说
+    保护 `/metrics` 而代码只保护 `/api/v1` 这类漂移。配额同时公开次数与窗口长度，因为只给出
+    "120" 无法判断它是每分钟还是每秒。`/health` 自身不在受保护前缀内，否则容器存活探针需要凭据。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["disabled", "bearer"]
+    contract_id: str
+    protected_path_prefixes: list[str]
+    rate_limit_requests: int
+    rate_limit_window_seconds: float
+
+
 class HealthResponse(BaseModel):
     """定义 `/health` 返回的已验证依赖、数据规模与契约快照。
 
@@ -233,6 +313,9 @@ class HealthResponse(BaseModel):
     knowledge_nodes_loaded: int
     knowledge_edges_loaded: int
     knowledge_nodes_embedded: int
+    documents_loaded: int
+    document_chunks_loaded: int
+    document_chunks_embedded: int
     contracts: ContractVersions
     limits: RuntimeLimits
     planner: PlannerConfiguration
@@ -240,6 +323,8 @@ class HealthResponse(BaseModel):
     memory: MemoryConfiguration
     diagnosis_api: DiagnosisApiConfiguration
     retrieval: RetrievalConfiguration
+    security: ApiSecurityConfiguration
+    stream: RunStreamConfiguration
 
 
 class SessionCreateRequest(BaseModel):
@@ -290,6 +375,20 @@ class RunResponse(BaseModel):
 
     contract_id: str
     run: AgentRunSnapshot
+
+
+class RunTraceResponse(BaseModel):
+    """封装单次 run 的 per-run 调用链，供前端渲染时间轴与瓶颈定位。
+
+    trace 契约与 run 快照分开返回，因为两者的消费者不同：run 面向诊断结论，trace 面向性能与可靠性
+    分析。`dropped_span_count` 非零表示插桩超过上限被截断，必须原样暴露而不是让残缺 trace 看起来
+    完整。响应结构由 `RunTrace` 再次校验父子顺序与唯一根。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    contract_id: str
+    trace: RunTrace
 
 
 class MemoryDecisionRequest(BaseModel):
@@ -382,6 +481,23 @@ async def lifespan(app: FastAPI):
         raise ValueError(
             "configured GraphRAG evidence bundle contract ID does not match the package"
         )
+    if settings.document_retrieval_contract_id != DOCUMENT_RETRIEVAL_CONTRACT_ID:
+        raise ValueError("configured document retrieval contract ID does not match the package")
+    if settings.run_trace_contract_id != RUN_TRACE_CONTRACT_ID:
+        raise ValueError("configured run trace contract ID does not match the package")
+    if settings.api_auth_contract_id != API_AUTH_CONTRACT_ID:
+        raise ValueError("configured API auth contract ID does not match the package")
+    if settings.run_stream_contract_id != RUN_STREAM_CONTRACT_ID:
+        raise ValueError("configured run stream contract ID does not match the package")
+
+    # 守卫在任何 Provider、MCP 子进程和数据库连接之前构造：弱令牌或非法配额必须让进程拒绝开放
+    # 端口，而不是等第一个请求到达时才发现"鉴权其实没生效"。
+    api_security = ApiSecurityGuard(
+        mode=settings.api_auth_mode,
+        token=settings.api_auth_token,
+        max_requests=settings.api_rate_limit_requests,
+        window_seconds=settings.api_rate_limit_window_seconds,
+    )
 
     # capability 注册表是 Planner 的策略边界，必须在模型或工具初始化前完成固定集合审计。
     capability_registry = get_capability_registry()
@@ -406,6 +522,20 @@ async def lifespan(app: FastAPI):
     embedding_provider = create_embedding_provider(
         settings.embedding_provider,
         dimensions=settings.embedding_dimensions,
+        model=settings.embedding_model,
+        base_url=str(settings.embedding_base_url),
+        api_key=settings.embedding_api_key,
+        timeout_seconds=settings.embedding_timeout_seconds,
+        batch_size=settings.embedding_batch_size,
+    )
+    # 重排是可选第二阶段：`disabled` 返回 None，检索结果里的 reranker_model 因此真实为空，
+    # 报告和评测不会把一阶段排序说成精排结果。未知 provider ID 在此立即失败。
+    reranker = create_reranker(
+        settings.rerank_provider,
+        model=settings.rerank_model,
+        base_url=str(settings.rerank_base_url),
+        api_key=settings.rerank_api_key,
+        timeout_seconds=settings.rerank_timeout_seconds,
     )
 
     # 工具发现必须跨真实 stdio MCP 握手；直接比较本地枚举会掩盖服务进程注册失败。
@@ -421,6 +551,9 @@ async def lifespan(app: FastAPI):
     knowledge_nodes_loaded = 0
     knowledge_edges_loaded = 0
     knowledge_nodes_embedded = 0
+    documents_loaded = 0
+    document_chunks_loaded = 0
+    document_chunks_embedded = 0
     planner_runtime = None
     auditor_runtime = None
     memory_runtime = None
@@ -444,6 +577,20 @@ async def lifespan(app: FastAPI):
                 if knowledge_nodes_embedded != knowledge_nodes_loaded:
                     raise ValueError(
                         "all knowledge nodes must be embedded in the configured provider space"
+                    )
+                document_repository = PostgresDocumentRepository(session)
+                documents_loaded, document_chunks_loaded = (
+                    await document_repository.count_documents()
+                )
+                document_chunks_embedded = await document_repository.count_embedded_chunks(
+                    provider_id=embedding_provider.provider_id,
+                    dimensions=embedding_provider.dimensions,
+                )
+                # 与知识节点同样是全有或全无：部分切片缺向量时语义通道只会少召回而不报错，
+                # 那种"看起来正常但永远查不到某份 Runbook"的状态在演示中几乎不可能被发现。
+                if document_chunks_embedded != document_chunks_loaded:
+                    raise ValueError(
+                        "all document chunks must be embedded in the configured provider space"
                     )
             memory_runtime = PostgresMemoryRuntime(
                 session_factory,
@@ -474,6 +621,11 @@ async def lifespan(app: FastAPI):
                 budget=settings.evidence_bundle_budget(),
                 seed_limit=settings.diagnosis_retrieval_seed_limit,
                 max_hops=settings.max_graph_hops,
+                reranker=reranker,
+                rerank_candidate_multiplier=settings.rerank_candidate_multiplier,
+                rerank_blend_weight=settings.rerank_blend_weight,
+                document_score_weights=settings.document_scoring_weights(),
+                document_chunk_limit=settings.document_retrieval_chunk_limit,
             )
             diagnosis_workflow = AuditedDiagnosisWorkflow(
                 react=BoundedReactLoop(
@@ -484,6 +636,7 @@ async def lifespan(app: FastAPI):
                     ),
                     config=ReactLoopConfig(
                         max_steps=settings.max_react_steps,
+                        max_parallel_actions=settings.max_parallel_tool_actions,
                         total_timeout_seconds=settings.react_total_timeout_seconds,
                     ),
                     registry=capability_registry,
@@ -516,6 +669,7 @@ async def lifespan(app: FastAPI):
 
         # 只有全部检查完成后才发布共享状态，避免路由观察到半初始化的依赖集合。
         app.state.settings = settings
+        app.state.api_security = api_security
         app.state.fixture_registry = fixture_registry
         app.state.golden_cases = golden_cases
         app.state.mcp_tools_available = mcp_tools_available
@@ -531,6 +685,9 @@ async def lifespan(app: FastAPI):
         app.state.knowledge_nodes_loaded = knowledge_nodes_loaded
         app.state.knowledge_edges_loaded = knowledge_edges_loaded
         app.state.knowledge_nodes_embedded = knowledge_nodes_embedded
+        app.state.documents_loaded = documents_loaded
+        app.state.document_chunks_loaded = document_chunks_loaded
+        app.state.document_chunks_embedded = document_chunks_embedded
         if diagnosis_worker is not None:
             # Worker 在所有 app.state 依赖发布后再启动，避免后台 task 观察到半初始化的 runtime。
             diagnosis_worker.start()
@@ -544,6 +701,12 @@ async def lifespan(app: FastAPI):
             await auditor_runtime.aclose()
         if planner_runtime is not None:
             await planner_runtime.aclose()
+        # 检索侧 Provider 也可能持有远程连接池与 Authorization 头；用 hasattr 而不是 isinstance，
+        # 是为了让离线确定性实现和测试替身无需实现空的 aclose 就能通过同一条关闭路径。
+        if reranker is not None and hasattr(reranker, "aclose"):
+            await reranker.aclose()
+        if hasattr(embedding_provider, "aclose"):
+            await embedding_provider.aclose()
         if database_engine is not None:
             await database_engine.dispose()
 
@@ -556,6 +719,43 @@ app = FastAPI(
 
 DEMO_ASSET_ROOT = (Path(__file__).resolve().parent.parent / "static" / "demo").resolve()
 DEMO_INDEX_PATH = DEMO_ASSET_ROOT / "index.html"
+
+
+@app.middleware("http")
+async def enforce_api_security(request: Request, call_next):
+    """在路由之前对受保护前缀执行鉴权与限流，未受保护路径零开销放行。
+
+    用中间件而不是逐路由 `Depends` 是刻意的：前缀判定让今后新增的 `/api/v1/...` 路由默认就在
+    保护内（fail closed），不会因为漏写依赖而裸奔。中间件位于 FastAPI 异常处理器之外，所以这里
+    直接构造 JSONResponse；`detail` 用对象形式携带稳定 `error_code`，与 409 冲突响应保持同一
+    结构，浏览器 Demo 的错误分支无需为鉴权单独写解析。守卫缺失时按 503 拒绝而不是放行，避免
+    lifespan 未完成的实例把"没有守卫"当成"不需要守卫"。
+    """
+
+    if not is_protected_path(request.url.path):
+        return await call_next(request)
+    guard = getattr(request.app.state, "api_security", None)
+    if guard is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": {
+                    "error_code": "security_unavailable",
+                    "message": "api security guard is not initialised",
+                }
+            },
+        )
+    rejection = guard.authorize(
+        authorization_header=request.headers.get("Authorization"),
+        client_host=request.client.host if request.client else None,
+    )
+    if rejection is not None:
+        return JSONResponse(
+            status_code=rejection.status_code,
+            content={"detail": {"error_code": rejection.error_code, "message": rejection.message}},
+            headers=rejection.headers,
+        )
+    return await call_next(request)
 
 
 def _resolve_demo_asset(asset_name: str) -> Path:
@@ -638,6 +838,9 @@ async def health(request: Request) -> HealthResponse:
         knowledge_nodes_loaded=request.app.state.knowledge_nodes_loaded,
         knowledge_edges_loaded=request.app.state.knowledge_edges_loaded,
         knowledge_nodes_embedded=request.app.state.knowledge_nodes_embedded,
+        documents_loaded=request.app.state.documents_loaded,
+        document_chunks_loaded=request.app.state.document_chunks_loaded,
+        document_chunks_embedded=request.app.state.document_chunks_embedded,
         contracts=ContractVersions(
             planner_prompt=settings.planner_prompt_id,
             planner_provider=settings.planner_provider_contract_id,
@@ -654,9 +857,14 @@ async def health(request: Request) -> HealthResponse:
             case_memory=settings.case_memory_contract_id,
             graph_retrieval=settings.graphrag_retrieval_contract_id,
             graph_evidence_bundle=settings.graphrag_evidence_bundle_contract_id,
+            document_retrieval=settings.document_retrieval_contract_id,
+            run_trace=settings.run_trace_contract_id,
+            api_auth=settings.api_auth_contract_id,
+            run_stream=settings.run_stream_contract_id,
         ),
         limits=RuntimeLimits(
             max_react_steps=settings.max_react_steps,
+            max_parallel_tool_actions=settings.max_parallel_tool_actions,
             react_total_timeout_seconds=settings.react_total_timeout_seconds,
             max_graph_hops=settings.max_graph_hops,
             max_audit_revisions=settings.max_audit_revisions,
@@ -675,7 +883,7 @@ async def health(request: Request) -> HealthResponse:
             provider=settings.chat_provider,
             model=settings.chat_model,
             endpoint_host=settings.chat_base_url.host or "",
-            timeout_seconds=settings.chat_timeout_seconds,
+            timeout_seconds=settings.auditor_timeout_seconds,
             schema_repair_count=settings.auditor_schema_repair_count,
         ),
         memory=MemoryConfiguration(
@@ -708,9 +916,49 @@ async def health(request: Request) -> HealthResponse:
         retrieval=RetrievalConfiguration(
             embedding_provider=settings.embedding_provider,
             embedding_dimensions=settings.embedding_dimensions,
+            embedding_model=settings.embedding_model,
+            embedding_endpoint_host=settings.embedding_base_url.host or "",
+            rerank_provider=settings.rerank_provider,
+            rerank_model=settings.rerank_model,
+            rerank_endpoint_host=settings.rerank_base_url.host or "",
+            rerank_candidate_multiplier=settings.rerank_candidate_multiplier,
+            rerank_blend_weight=settings.rerank_blend_weight,
             score_weights=settings.hybrid_scoring_weights(),
+            document_score_weights=settings.document_scoring_weights(),
+            document_chunk_limit=settings.document_retrieval_chunk_limit,
             evidence_budget=settings.evidence_bundle_budget(),
         ),
+        security=ApiSecurityConfiguration(
+            mode=request.app.state.api_security.mode,
+            contract_id=settings.api_auth_contract_id,
+            protected_path_prefixes=list(PROTECTED_PATH_PREFIXES),
+            rate_limit_requests=request.app.state.api_security.limiter.max_requests,
+            rate_limit_window_seconds=request.app.state.api_security.limiter.window_seconds,
+        ),
+        stream=RunStreamConfiguration(
+            contract_id=settings.run_stream_contract_id,
+            poll_seconds=settings.run_stream_poll_seconds,
+            keepalive_seconds=settings.run_stream_keepalive_seconds,
+            max_seconds=settings.run_stream_max_seconds,
+            available_under_auth=request.app.state.api_security.mode == "disabled",
+        ),
+    )
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics(request: Request) -> PlainTextResponse:
+    """以 Prometheus 文本格式曝光 run 状态与各层 span 耗时聚合。
+
+    指标来自数据库聚合而不是进程内计数器，因此 API 与 Worker 分进程部署、或任一进程重启后数字都
+    保持连续；这一点比"少一次查询"重要得多。诊断 runtime 未装配（无数据库）时返回 503 而不是一份
+    全零文本，避免监控面板把"未部署"显示成"零错误"。
+    """
+
+    runtime = _require_diagnosis_runtime(request)
+    snapshot = await runtime.get_runtime_metrics()
+    return PlainTextResponse(
+        render_prometheus_text(snapshot),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
     )
 
 
@@ -801,6 +1049,60 @@ async def get_diagnosis_run_events(run_id: str, request: Request) -> RunEventLis
     if events is None:
         raise HTTPException(status_code=404, detail="diagnosis run not found")
     return events
+
+
+@app.get("/api/v1/runs/{run_id}/stream", include_in_schema=False)
+async def stream_diagnosis_run(
+    run_id: str,
+    request: Request,
+    after_sequence: int = Query(default=0, ge=0),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+) -> EventSourceResponse:
+    """以 `run-stream:v1` 增量推送该 run 的状态与公开事件，未知 run 在开流前返回 404。
+
+    推流是轮询的替代读法而不是另一条执行路径：run 仍由 Worker 执行，本路由只按游标读已落库数据，
+    因此客户端断开或不支持 SSE 都不会改变任何结论。存在性检查刻意放在返回 `EventSourceResponse`
+    之前——一旦响应体开始，HTTP 状态码就已发出，未知 run 只能以一条"流内错误"表达，而客户端几乎
+    一定会把它当成网络抖动去重连。心跳交给 sse-starlette 的 `ping`，避免手写心跳与帧编码。
+
+    注意浏览器 `EventSource` 无法设置请求头：`api-auth:v1` 处于 bearer 模式时这条路由会被鉴权中间件
+    拒绝，前端必须退回轮询，`/health` 的 `stream.available_under_auth` 会如实报告这一点。
+    """
+
+    runtime = _require_diagnosis_runtime(request)
+    # 先确认 run 存在再开流，让 404 仍然是一个真正的 HTTP 状态码而不是流内的一帧。
+    if await runtime.get_run(run_id) is None:
+        raise HTTPException(status_code=404, detail="diagnosis run not found")
+    settings = get_settings()
+    config = RunStreamConfig(
+        poll_seconds=settings.run_stream_poll_seconds,
+        keepalive_seconds=settings.run_stream_keepalive_seconds,
+        max_seconds=settings.run_stream_max_seconds,
+    )
+    cursor = resolve_stream_cursor(
+        last_event_id=last_event_id,
+        after_sequence=after_sequence,
+    )
+    return EventSourceResponse(
+        iter_run_stream(runtime, run_id, after_sequence=cursor, config=config),
+        ping=int(config.keepalive_seconds),
+    )
+
+
+@app.get("/api/v1/runs/{run_id}/trace", response_model=RunTraceResponse)
+async def get_diagnosis_run_trace(run_id: str, request: Request) -> RunTraceResponse:
+    """返回该 run 已落库的 span 树，用于回答"这 30 秒到底花在哪一层"。
+
+    trace 与 run 终态写在同一事务，因此能取到 run 就一定能取到它当时的 trace；空 spans 表示该 run
+    在插桩上线前执行或仍在队列中，不代表零耗时。响应只包含结构化层级、状态、耗时和 ASCII 属性，
+    不含 Prompt、Thought 或供应商响应，因此可以直接给演示前端渲染火焰图。
+    """
+
+    runtime = _require_diagnosis_runtime(request)
+    trace = await runtime.get_run_trace(run_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="diagnosis run not found")
+    return RunTraceResponse(contract_id=RUN_TRACE_CONTRACT_ID, trace=trace)
 
 
 @app.post("/api/v1/runs/{run_id}/cancel", response_model=RunResponse)

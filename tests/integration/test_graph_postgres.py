@@ -617,7 +617,10 @@ async def test_postgres_graph_seed_search_expansion_and_key_edge_ablation() -> N
             assert causal_path.evidence_id == causal_path.path_id
             # 固定 Provider/seed/预算下锁定当前实测快照，使文档中的字节数和省略数量不能在图扩展后
             # 静默漂移；若知识内容合理变化，应重跑本测试并同步解释新候选排序，而不是放宽断言。
-            assert evidence_bundle.used_bytes == 5634
+            # 5658 = 旧的 5634 加上 `,"selected_documents":[]` 这 24 字节：文档通道接入后计费主体
+            # 多了一个规范包装键。图证据的选择结果逐条未变（仍 7 节点/4 路径/省略 5+4），因此这里
+            # 只更新快照而不是重新解释排序。
+            assert evidence_bundle.used_bytes == 5658
             assert len(evidence_bundle.selected_nodes) == 7
             assert len(evidence_bundle.selected_paths) == 4
             assert len(evidence_bundle.omitted_node_ids) == 5

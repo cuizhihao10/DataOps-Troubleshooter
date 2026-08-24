@@ -113,6 +113,7 @@
 | P0 | Planner ReAct 闭环 | 每轮基于当前假设和 Observation 生成结构化 Action，执行工具后更新证据并继续或停止。 | 主演示场景至少包含一次有效循环；无无界循环和无理由重复调用。 |
 | P0 | MCP 工具层 | 通过协议访问 LTS/BDS/FlashSync Mock 工具。 | Agent 不直接读取 Fixture；调用有 trace。 |
 | P0 | GraphRAG | 向量种子召回、图扩展、路径评分和证据打包。 | 跨组件用例返回并引用 1–2 跳路径。 |
+| P0 | 文档 RAG | Runbook/SOP/复盘/FAQ 按小节切片入库，双通道召回、重排并作为处置步骤来源。 | 报告的处置建议引用具体 `dc_*` 切片，且只提升 Runbook/SOP 的步骤小节。 |
 | P0 | 长期案例记忆 | 暂存、确认、去重、更新和跨会话召回。 | 相似案例可在下一会话命中。 |
 | P0 | 历史案例匹配 capability | 推理阶段按需召回已确认的同类故障，输出相似点、差异点、参考方案和避坑提示。 | 命中案例带 ID、相似度和证据；不会覆盖本次实时 Observation。 |
 | P0 | 审计与报告 | 引用检查、矛盾检查、风险分级、结构化报告。 | 无依据结论被拒绝或降级。 |
@@ -139,8 +140,8 @@
 - **可复现性**：Mock 场景由 `scenario_id` 驱动，固定输入得到稳定工具结果。
 - **可观测性**：每次运行生成 `run_id`，记录节点耗时、工具调用、检索路径、模型 token 和错误。
 - **可替换性**：通过统一 LLM/Embedding 接口切换模型，不把供应商 SDK 传播到领域层。
-- **性能目标**：演示模式下端到端 P95 不高于 30 秒；超时后返回已有证据和可继续操作。
-- **成本约束**：限制 ReAct 最多 6 步工具行动、2 跳图扩展和 1 次审计返工，均可配置。
+- **性能目标**：演示模式下端到端 P95 不高于 30 秒（目标值，成立前提是确定性替身路径）；接入真实模型后单案例实测约 90 秒，主要花在 Planner 单次 8–15 秒的决策和 Auditor 单次 22–30 秒的逐条引用核对上，因此 30 秒目标在真实模型下尚未达成，不得当作实测结论引用。超时后返回已有证据和可继续操作。
+- **成本约束**：限制 ReAct 最多 8 步工具行动、2 跳图扩展和 1 次审计返工，均可配置。步数上限必须严格大于 Golden 集里最长的必需工具集（跨组件案例 6 个），否则真实模型的一到两步试探会直接挤掉必需取证。
 - **学习与求职可解释性**：所有人工编写的代码、配置、测试和脚本必须通过模块级说明、每个类/函数/异步函数/方法/测试函数的 callable 级 docstring、复杂函数关键步骤旁的内联注释和 `docs/implementation-guide.md`，解释文件职责、技术原理、输入输出、数据流、设计取舍、失败路径与验证方式。文件开头的统一说明不能替代函数级说明；注释重点说明“为什么”和“边界”，不得仅逐行复述代码。对于 JSON、锁文件、图片和 DOCX 等无法内嵌注释或机器生成的文件，使用相邻文档、Schema 测试和实现指南说明其结构与生成方式。
 
 # 4. 系统架构
@@ -155,9 +156,9 @@
 
 **工具层**：独立本地 MCP Mock 服务暴露 LTS、BDS 和 FlashSync 只读工具，使用合成 Fixture 提供稳定场景和失败注入。
 
-**知识与记忆层**：PostgreSQL + pgvector 同时保存知识节点、关系边、向量、历史案例、会话检查点和运行事件。使用关系表与递归查询/应用层遍历实现轻量 GraphRAG，不额外引入图数据库。
+**知识与记忆层**：PostgreSQL + pgvector 同时保存知识节点、关系边、向量、运维文档切片、历史案例、会话检查点和运行事件。使用关系表与递归查询/应用层遍历实现轻量 GraphRAG，并在同一套基础设施内提供文档 RAG 通道，不额外引入图数据库或独立向量库。
 
-**模型层**：使用 OpenAI-compatible Chat Model 适配器；Embedding 默认可选本地中文模型或兼容 API，具体供应商由环境配置决定。
+**模型层**：使用 OpenAI-compatible Chat Model 适配器；Embedding 与 Reranker 默认走 OpenAI-compatible API（`BAAI/bge-m3` 与 `BAAI/bge-reranker-v2-m3`），未配置时回退到确定性哈希 Provider 以保证离线可测。
 
 ## 4.2 技术选型
 
@@ -193,7 +194,7 @@ app/
     react_loop.py
     workflow.py
   mcp/                 # MCP 客户端、工具白名单与 Observation 适配
-  retrieval/           # vector / graph / hybrid 检索
+  retrieval/           # vector / graph / hybrid 检索、文档切片与重排
   memory/              # short_term / long_term 记忆服务
   domain/              # Evidence、Hypothesis、Action、Report 等模型
   persistence/         # SQLAlchemy 模型、仓储和迁移
@@ -204,6 +205,7 @@ mcp_server/
 data/
   fixtures/            # 合成工具返回和异常场景
   knowledge/           # 脱敏知识种子、SOP 和案例
+    documents/         # Runbook/SOP/复盘/FAQ Markdown 与 manifest
 tests/
   unit/
   integration/
@@ -235,7 +237,7 @@ Planner 的每轮行为固定为以下三部分：
 
 结构化决策至少包含：`status`（`call_tool` / `finish` / `need_user_input`）、`decision_summary`、`hypothesis_updates`、`action`、`evidence_refs` 和 `stop_reason`。不得要求模型生成工具的 Observation，也不得在状态、日志或 API 中保存完整 `Thought` 文本。
 
-ReAct 循环默认最多 6 步，并满足以下停止条件之一：证据已支持可审计结论、需要用户补充关键参数、继续调用预期信息增益过低、工具预算或总超时耗尽。除上一次调用为可重试的瞬时错误外，不得使用相同参数重复调用同一工具。
+ReAct 循环默认最多 8 步，并满足以下停止条件之一：证据已支持可审计结论、需要用户补充关键参数、继续调用预期信息增益过低、工具预算或总超时耗尽。除上一次调用为可重试的瞬时错误外，不得使用相同参数重复调用同一工具。
 
 可执行的 Planner Prompt 模板、输出 Schema 和运行时防护见 `docs/prompt-contracts.md`。Prompt 必须版本化并纳入 Golden Case 回归，不得把自由文本 `Thought / Action` 解析作为生产工具调用接口。
 
@@ -245,7 +247,7 @@ ReAct 循环默认最多 6 步，并满足以下停止条件之一：证据已�
 
 主流程为：校验输入 → 读取会话 → GraphRAG/案例检索 → Planner ReAct 决策 → MCP Action 执行 → Observation 标准化 → Planner 更新假设并继续或停止 → 生成草稿 → Auditor 审计 → 最多一次返工 → 暂存案例记忆 → 返回报告。
 
-Planner 每轮只输出结构化决策：当前假设变化、下一项 Action、参数、预期证据和停止原因。工具执行节点负责真正调用 MCP 并将 Observation 转换为 `Evidence`。当证据充分、达到调用预算或继续调用无价值时，Planner 结束调查。
+Planner 每轮只输出结构化决策：当前假设变化、下一批 Action、参数、预期证据和停止原因。单轮可提交 1 到 3 个互不依赖的只读 Action，由工具执行节点并发调用 MCP 并把 Observation 标准化为 `Evidence`；一批 N 个 Action 仍消耗 N 个调用预算，并行只压缩等待时间以服务 P95 ≤ 30 秒目标，不增加取证机会。当证据充分、达到调用预算或继续调用无价值时，Planner 结束调查。
 
 ## 5.4 审计规则
 
@@ -255,6 +257,12 @@ Planner 每轮只输出结构化决策：当前假设变化、下一项 Action�
 - 高风险操作缺少前置检查或回滚提示时，不允许通过。
 - 证据不足时允许输出低置信度或无法判断，不为追求完整报告而编造事实。
 - 首版最多返工一次；二次仍不通过时，返回降级报告和缺失证据清单。
+
+审计的否决权是**非对称**的：确定性规则与独立 Auditor 都能要求返工，但只有规则问题非空能强制推翻
+模型的 `accept`，模型无法推翻规则。因此放行需要两层同时同意，降级只需任一层不同意且返工预算耗尽。
+Auditor 不可用（Provider 故障、拒答、Schema 二次失败）时直接返回降级报告，不消耗返工预算也不重跑
+草稿——"审计不可用"不等于"审计通过"。降级报告不进入长期记忆，因此错误结论无法通过"学习"变成
+下一次诊断的历史证据。
 
 ## 5.5 核心状态字段
 
@@ -338,6 +346,20 @@ Mock 服务必须支持正常、空结果、超时、权限拒绝和服务异常
 - 删除关键边后，相应用例的链路完整性下降，证明图关系真正参与推理。
 - 评测中对比 vector-only 与 vector+graph，记录根因命中和链路完整性差异。
 
+## 7.5 文档 RAG：第二条知识通道
+
+知识图擅长解释“故障如何沿依赖传播”，但排障最终要交付**可执行的处置步骤**，而这些步骤只写在 Runbook、SOP、复盘和 FAQ 里。因此系统在同一套 PostgreSQL 基础设施内建设第二条独立通道，契约 `document-retrieval:v1`，与 GraphRAG 并列而不是取代它。
+
+**切片而不是文档是检索与引用单元。** Markdown 按标题层级切片，切片保留完整祖先标题路径；引用 ID 为 `dc_` + `sha256(f"{doc_id}|{ordinal}")` 前 16 位十六进制，同时充当 `document_chunks` 主键、报告脚注和 Auditor 核对标识。切片上界 1200 字符，确保被提升为处置建议时不会撑破 `RemediationStep.action` 的长度约束；重新导入采用“先删该文档全部切片再整批插入”，避免旧尾部切片以过时正文继续参与召回。
+
+**三因子评分，刻意不复用图侧的五因子。** 语义 0.60、全文 0.25、权威度 0.15，其中权威度直接取文档声明的 `reliability`。路径相关性对文档没有意义，新鲜度则会让一份稳定多年的 SOP 被一篇新复盘挤掉，因此两者被显式排除而不是设成 0。两路召回都在数据库内完成排序：全文用 `ts_rank` 加标题/正文 LIKE bonus，语义用 pgvector cosine 且必须同时匹配 Provider ID 与向量维度，两个向量空间即使维度相同也不放进同一次排序。
+
+**两阶段检索。** 一阶段按倍数多召回候选，二阶段用 `BAAI/bge-reranker-v2-m3` 交叉编码器重排，`final_score = (1 - w) * hybrid + w * rerank`。重排器不可用或返回分数条数与候选不符时整体降级为一阶段排序，并把 `reranker_model` 留空——绝不把一阶段排序说成精排结果。
+
+**只有 Runbook/SOP 的步骤小节能变成处置建议。** 复盘的“改进项”是长期治理动作，FAQ 是判断依据，Runbook 的“禁止操作”更是明确不能做的事；它们被召回后只能作为证据存在。未被提升的切片不进入报告级引用，否则会暗示它支撑了某项结论。
+
+文档切片与图证据共用同一个 Evidence Bundle 字节预算，但拥有独立条数上限（默认 3），加载顺序为路径 → 种子节点 → 文档切片，保证预算紧张时先保住本系统区别于普通 RAG 的关系可解释性；被裁掉的切片 ID 出现在 `omitted_chunk_ids`，让 Planner 能区分“没查到”和“查到了但没放进上下文”。
+
 # 8. 记忆系统设计
 
 ## 8.1 记忆分层
@@ -381,11 +403,20 @@ Mock 服务必须支持正常、空结果、超时、权限拒绝和服务异常
 | `POST /api/v1/sessions/{session_id}/messages` | 提交故障或追问，返回 `run_id`。 |
 | `GET /api/v1/runs/{run_id}` | 获取当前状态和最终结构化报告。 |
 | `GET /api/v1/runs/{run_id}/events` | 获取节点、ReAct Action / Observation、检索和审计事件时间线。 |
+| `GET /api/v1/runs/{run_id}/trace` | 获取该次 run 的分层调用链（span 树、层级、状态、耗时）。 |
+| `GET /api/v1/runs/{run_id}/stream` | 以 SSE 按事件序号增量推送 run 状态与公开事件时间线。 |
+| `GET /metrics` | 以 Prometheus 文本格式曝光 run 状态计数与 span 层级耗时/错误数。 |
 | `POST /api/v1/memories/{memory_id}/confirm` | 确认或拒绝案例记忆。 |
 | `GET /api/v1/memories/search` | 查询相似的已确认案例。 |
 | `GET /health` | 检查 API、数据库、MCP 和模型连接。 |
 
-首版可使用轮询读取运行状态；只有确实改善演示体验时再增加 SSE，不把实时流式作为核心依赖。
+`run-stream:v1` 让前端不必靠轮询等待，但它只是同一份 run 状态与 `run_events` 的另一种读法：run 仍由
+PostgreSQL Worker 执行，断流不改变任何结论。因此轮询是永久保留的等价通道而不是过渡方案——浏览器
+`EventSource` 无法携带 Authorization 头，`api-auth:v1` 切到 bearer 后推流必然被拒，此时前端只能走轮询，
+`/health` 的 `stream.available_under_auth` 会如实报告这一点。
+
+表中 `/api/v1` 全部路径与 `/metrics` 由 `api-auth:v1` 按前缀强制鉴权与限流；`/health` 与 `/demo`
+保持公开，因为前者是容器存活探针、后者是无数据静态页。详见 9.4。
 
 ## 9.2 关键数据表
 
@@ -393,10 +424,50 @@ Mock 服务必须支持正常、空结果、超时、权限拒绝和服务异常
 |---|---|
 | `diagnosis_sessions` | 会话标识、用户输入摘要、创建和更新时间。 |
 | `agent_runs` / `run_events` | 节点状态、耗时、模型使用、工具和错误轨迹。 |
+| `run_trace_spans` | 每次 run 的分层 span：层级、名称、父指针、状态、单调耗时和 ASCII 属性。 |
 | `knowledge_nodes` | 节点类型、内容、embedding、来源和可靠性。 |
 | `knowledge_edges` | 起点、终点、关系类型、权重和来源。 |
+| `documents` | 文档类型、标题、涉及组件、来源、修订版本和可靠性。 |
+| `document_chunks` | 标题路径、切片正文、字符数、向量与 Provider/维度溯源。 |
 | `case_memories` | 结构化案例、确认状态、向量、出现次数和时间。 |
 | `memory_evidence` | 案例与证据之间的可追溯关联。 |
+
+## 9.3 可观测性：per-run 调用链与运行时指标
+
+排障系统本身也必须可被排障。仅有 `run_events` 只能回答“做了哪些步骤”，无法回答“30 秒花在哪一层”，
+因此系统在 `run_events` 之外增加 `run-trace:v1`：每次 run 产出一棵单根 span 树，层级固定为
+`workflow / node / react_step / tool_call / retrieval / model_call / persistence`，覆盖三层嵌套
+LangGraph 的每个节点、每次 Planner 决策、每个 Action（含 MCP 内部重试）、两条检索通道和每次模型/
+Embedding/Reranker 调用。span 与 run 终态写在同一事务，因此不会出现“run 有结果但 trace 缺失”。
+
+`runtime-metrics:v1` 在此基础上通过 `GET /metrics` 曝光 run 状态计数、span 次数、错误数、耗时总和与
+最大耗时五组指标。聚合在数据库侧完成而不是用进程内计数器：API 与 Worker 是不同进程且都会重启，
+进程内计数器归零会在看板上伪造“错误率突然下降”。runtime 未装配时该端点返回 503，而不是全零曝光，
+避免把“没部署”渲染成“很健康”。
+
+遥测的安全边界是结构性的而不是流程性的：span 名称、属性键与属性值都被正则限制为 ASCII 标识符并
+有长度上限，空格与中文直接被拒绝，因此 Prompt、思维链、日志原文、embedding 向量与凭据在类型层面
+就无法进入 trace 或指标标签。单次 run 的 span 数量有上限，超出部分被丢弃并公开丢弃数量，让残缺的
+时间轴自我暴露而不是静默截断。
+
+## 9.4 资源 API 鉴权与限流
+
+一次匿名 `POST message` 会触发 Planner、Auditor、Embedding、Reranker 四类付费调用与九个 MCP 子进程
+往返，因此鉴权与限流是运行时契约而不是可选加固：没有它，任何能访问端口的人都能持续消耗他人密钥
+额度并占满数据库连接池。`api-auth:v1` 只提供单一共享 Bearer 令牌与按来源 IP 的滑动窗口配额，明确
+不做用户体系、JWT、OAuth 或分布式限流——作品集需要展示的是边界被显式声明并被测试固定，而不是复刻
+一套账号系统。
+
+强制点是 ASGI 中间件而不是逐路由依赖，保护范围由前缀 `("/api/v1", "/metrics")` 决定，因此新增
+`/api/v1/...` 路由默认在鉴权内（fail closed），不会因为漏写一个依赖声明而静默裸奔。`/metrics` 必须
+受保护，因为聚合 run 数与错误率仍会泄露使用规模。判定顺序是先限流再鉴权：顺序相反会让 401 在配额
+之前返回，猜令牌就完全不受限流约束。缺头、错 scheme 与错令牌返回逐字相同的 401，避免把"该实例是否
+配置了令牌"变成可探测信息；令牌只以 SHA-256 摘要参与定长比较，`/health` 只公开模式与配额而从不公开
+令牌或其摘要。
+
+半配置在启动阶段即拒绝：`bearer` 缺令牌等于开放端口，`disabled` 却配了令牌会让部署者误以为接口已
+受保护，两个方向都拒绝构造守卫，因此等价于拒绝开放端口。默认部署保持 `disabled` 以便 `docker
+compose up` 之后可直接演示，代价由 Compose 把端口只绑定到 `127.0.0.1` 来承担。
 
 # 10. 评测与质量体系
 
@@ -499,6 +570,8 @@ Mock 服务必须支持正常、空结果、超时、权限拒绝和服务异常
 - [ ] 长期记忆支持候选、确认、去重、更新、召回和撤销。
 - [ ] 历史案例匹配 capability 能按需返回共同点、差异点、参考方案和避坑提示，且不会覆盖实时证据。
 - [ ] API 返回结构化报告，Demo 展示证据和时间线，不展示原始思维链。
+- [ ] 每次 run 的分层调用链可落库并回放，`/metrics` 可被抓取，且 span 与指标标签不含任何自然语言正文。
+- [ ] `/api/v1` 与 `/metrics` 默认受前缀鉴权与按来源限流保护，半配置的鉴权组合会拒绝启动，401 响应不泄露令牌是否已配置。
 - [ ] 28 个 Golden Cases 可重复运行，目标值与实测值明确区分。
 - [ ] Docker Compose 可从干净环境启动，核心失败场景有测试。
 - [ ] 仓库不包含真实生产数据、凭据、内部域名或不可公开信息。

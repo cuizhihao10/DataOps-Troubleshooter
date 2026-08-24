@@ -31,9 +31,21 @@ class Base(DeclarativeBase):
 
     Alembic 从 `Base.metadata` 发现表结构，运行时仓储则使用具体 Record；基类不承载领域行为，
     从而保持 Pydantic 领域模型与数据库持久化模型分离。
+
+    `eager_defaults=True` 是异步栈的正确性要求而不是性能开关：带 `server_default` / `onupdate`
+    的列在 flush 之后会被标记为过期，下一次读取会触发一次隐式 SELECT。同步代码里这只是多一次
+    查询，但在 asyncio 下属性读取无法 await，SQLAlchemy 只能抛 `MissingGreenlet`，于是"先写后读
+    同一行"的仓储方法（例如领取 run 后立刻把 ORM 行转成公开快照）会在真实 PostgreSQL 上直接崩。
+    开启后 PostgreSQL 用 RETURNING 在同一条 INSERT/UPDATE 里取回生成值，属性永不过期，也不会多
+    一次往返。
+
+    与之配套，所有 `updated_at` 只保留 `server_default` 而**不使用** `onupdate=func.now()`：写入方
+    全部显式传入注入的 `now`，而 `onupdate` 只在该列没有净变化时才触发，届时数据库事务时钟会悄悄
+    覆盖应用时间戳。这既让"租约必须晚于本次更新"这类跨字段校验随机失败，也让 checkpoint 的
+    `updated_at` 一致性比对无法复现。审计时间戳的真相应由注入时钟决定，不由数据库时钟决定。
     """
 
-    pass
+    __mapper_args__ = {"eager_defaults": True}
 
 
 class KnowledgeNodeRecord(Base):
@@ -90,7 +102,6 @@ class KnowledgeNodeRecord(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
-        onupdate=func.now(),
     )
 
 
@@ -151,7 +162,103 @@ class KnowledgeEdgeRecord(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
-        onupdate=func.now(),
+    )
+
+
+class DocumentRecord(Base):
+    """把运维文档（Runbook/SOP/复盘/FAQ）的元数据映射到 PostgreSQL。
+
+    文档本身不参与检索，只承载切片共享的类型、权威度与来源标识：`reliability` 直接充当文档检索
+    的 authority 因子，因此这里用 CheckConstraint 兜住取值区间，避免手工写库的 1.5 让融合分数越界。
+    正文一律存在 `document_chunks`，本表只保留可在报告脚注中安全展示的公开字段。
+    """
+
+    __tablename__ = "documents"
+    __table_args__ = (
+        CheckConstraint(
+            "doc_type IN ('runbook','sop','postmortem','faq')",
+            name="ck_documents_type",
+        ),
+        CheckConstraint(
+            "reliability >= 0 AND reliability <= 1",
+            name="ck_documents_reliability",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(components) = 'array' AND jsonb_array_length(components) >= 1",
+            name="ck_documents_components",
+        ),
+        Index("ix_documents_type", "doc_type"),
+        Index("ix_documents_source", "source_id"),
+    )
+
+    doc_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    doc_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    components: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    source_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    revision: Mapped[str] = mapped_column(String(50), nullable=False)
+    reliability: Mapped[float] = mapped_column(Float, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class DocumentChunkRecord(Base):
+    """把确定性切分后的文档片段与其向量映射到 PostgreSQL，作为文档 RAG 的唯一检索单元。
+
+    `(doc_id, ordinal)` 唯一约束让"同一文档内切片连续且不重复"在数据库层成立，重新导入同一文档时
+    仓储先删后插即可保持序号语义；embedding 三元组沿用知识节点的全有或全无约束，使 128 维基线与
+    1024 维 bge-m3 向量不会混进同一次 cosine 比较。GIN 全文索引由迁移用表达式创建。
+    """
+
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        CheckConstraint("ordinal >= 0", name="ck_document_chunks_ordinal"),
+        CheckConstraint("char_count >= 1", name="ck_document_chunks_char_count"),
+        CheckConstraint(
+            "(embedding IS NULL AND embedding_provider IS NULL AND "
+            "embedding_dimensions IS NULL) OR "
+            "(embedding IS NOT NULL AND embedding_provider IS NOT NULL AND "
+            "embedding_dimensions >= 8 AND vector_dims(embedding) = embedding_dimensions)",
+            name="ck_document_chunks_embedding_metadata",
+        ),
+        UniqueConstraint("doc_id", "ordinal", name="uq_document_chunks_doc_ordinal"),
+        Index("ix_document_chunks_doc", "doc_id"),
+        Index(
+            "ix_document_chunks_embedding_space",
+            "embedding_provider",
+            "embedding_dimensions",
+        ),
+    )
+
+    chunk_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    doc_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.doc_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    heading_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    char_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(), nullable=True)
+    embedding_provider: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    embedding_dimensions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
 
 
@@ -204,7 +311,6 @@ class CaseMemoryRecord(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
-        onupdate=func.now(),
     )
 
 
@@ -253,7 +359,6 @@ class DiagnosisSessionRecord(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
-        onupdate=func.now(),
     )
 
 
@@ -293,7 +398,6 @@ class SessionCheckpointRecord(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
-        onupdate=func.now(),
     )
 
 
@@ -387,7 +491,6 @@ class AgentRunRecord(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
-        onupdate=func.now(),
     )
 
 
@@ -424,3 +527,51 @@ class RunEventRecord(Base):
         nullable=False,
         server_default=func.now(),
     )
+
+
+class RunTraceSpanRecord(Base):
+    """映射每次 run 的持久化调用链 span：层级、耗时、状态与结构化属性。
+
+    进程内内存指标在 Worker 重启后即消失，因此 span 与 run 终态写在同一事务里落库，事后仍可回放
+    "30 秒花在哪"。CheckConstraint 复刻 Pydantic 契约的关键约束（层级枚举、非负耗时、序号从 1 起、
+    父不自引用），保证绕过应用层的手工写入不会产生无法渲染的残树；attributes 只允许存放 ASCII 标识符
+    级别的值，Prompt、Thought 与凭据在写入前已被遥测层的正则拒绝。
+    """
+
+    __tablename__ = "run_trace_spans"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('workflow','node','react_step','tool_call','retrieval',"
+            "'model_call','persistence')",
+            name="ck_run_trace_spans_kind",
+        ),
+        CheckConstraint(
+            "status IN ('ok','error','cancelled')",
+            name="ck_run_trace_spans_status",
+        ),
+        CheckConstraint("sequence >= 1", name="ck_run_trace_spans_sequence"),
+        CheckConstraint("duration_ms >= 0", name="ck_run_trace_spans_duration"),
+        CheckConstraint("ended_at >= started_at", name="ck_run_trace_spans_interval"),
+        CheckConstraint(
+            "parent_span_id IS NULL OR parent_span_id <> span_id",
+            name="ck_run_trace_spans_parent",
+        ),
+        UniqueConstraint("run_id", "sequence", name="uq_run_trace_spans_run_sequence"),
+        Index("ix_run_trace_spans_run_sequence", "run_id", "sequence"),
+        Index("ix_run_trace_spans_kind_name", "kind", "name"),
+    )
+
+    span_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_runs.run_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    parent_span_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    duration_ms: Mapped[float] = mapped_column(Float, nullable=False)
+    attributes: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
