@@ -1,14 +1,16 @@
 # 五层作品集评测统一实测报告
 
-本文汇总 `portfolio-eval-manifest:v23` 当前登记的四层小样本消融和一层 Golden 确定性回归，并说明
-`portfolio-eval-run:v22` 如何验证后再发布指标。Golden 数量已达到 28 条产品目标，但该层仍是确定性
+本文汇总 `portfolio-eval-manifest:v24` 当前登记的四层小样本消融和一层 Golden 确定性回归，并说明
+`portfolio-eval-run:v23` 如何验证后再发布指标。Golden 数量已达到 28 条产品目标，但该层仍是确定性
 脚本数据流成绩，不是模型诊断质量总成绩；统一报告也不计算跨层
 “总准确率”；每个数字仍受各自数据、Provider、脚本和实验条件限制。代码可读取精确四层的历史 v1
-Golden v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21 来源的五层 v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22 manifest，但默认 CLI 只运行五层 v23。
+Golden v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21 来源的五层 v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22/v23 manifest，但默认 CLI 只运行五层 v24。
 
-`golden-diagnosis-eval:v21 → v22` 只改引用完整性的判定口径（悬空判定与实时支撑判定分离，详见
-`docs/prompt-contracts.md` 第 8 节），案例集合与其余十八个指标定义不变。升版后五层已完整重跑：
-`run_success=true`、`complete=true`、`all_suites_passed=true`，五个 suite 全部 `passed`，十九个指标快照
+`golden-diagnosis-eval:v22 → v23` 只新增一个指标，一个字都没有改动既有十九个指标的定义，因此两代
+manifest 的同名数字可以直接对比。新增的 `golden_root_cause_anchor` 读 Top-1 根因引用的
+`kn_root_cause_*` 节点 ID，与文本相等的 `golden_root_cause_top1` 是分母不同的两个独立指标（14 条声明
+锚点案例对 21 条有根因案例），必须并列阅读，不能相减也不能互相替换。升版后五层已完整重跑：
+`run_success=true`、`complete=true`、`all_suites_passed=true`，五个 suite 全部 `passed`，二十个指标快照
 逐项与本文表格一致，Golden 层仍为 28/28。
 
 ## 1. 统一执行范围
@@ -19,7 +21,7 @@ Golden v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v2
 | `memory_recall_ablation` | `memory-recall-eval:v1` | 必需 | `docs/memory-recall-eval-results.md` | 2 |
 | `history_impact_ablation` | `history-impact-eval:v1` | 不需要 | `docs/history-impact-eval-results.md` | 2 |
 | `auditor_impact_ablation` | `auditor-impact-eval:v1` | 不需要 | `docs/auditor-impact-eval-results.md` | 3 |
-| `golden_diagnosis_baseline` | `golden-diagnosis-eval:v22` | 不需要 | `docs/golden-diagnosis-eval-results.md` | 10 |
+| `golden_diagnosis_baseline` | `golden-diagnosis-eval:v23` | 不需要 | `docs/golden-diagnosis-eval-results.md` | 11 |
 
 manifest 固定测试节点而不是自由命令。CLI 使用当前 Python 解释器和 `shell=False` 运行 pytest；只有
 本次 status=`passed` 的 suite 才把相应 measured snapshot 放进 JSON。failed、skipped、blocked 的
@@ -41,6 +43,7 @@ manifest 固定测试节点而不是自由命令。CLI 使用当前 Python 解�
 | Golden Diagnosis | 28 条目标集覆盖率 | 1.0000 | 1.0000 | 0.0000 | 28 条类别配额完整，数量目标已达成 |
 | Golden Diagnosis | 当前子集意图命中率 | 0.9000 | 1.0000 | +0.1000 | 28 条确定性脚本，不是模型准确率 |
 | Golden Diagnosis | 当前有根因子集 Top-1 | 0.8000 | 1.0000 | +0.2000 | 21 条有根因案例 |
+| Golden Diagnosis | 当前有锚点子集根因锚点命中率 | 0.8000 | 1.0000 | +0.2000 | 14 条声明锚点案例，与上一行分母不同，不可相减 |
 | Golden Diagnosis | 当前子集必要 Action 覆盖 | 0.9000 | 1.0000 | +0.1000 | Action 按标注确定性回放 |
 | Golden Diagnosis | 当前有路径子集故障链完整率 | 0.8500 | 1.0000 | +0.1500 | 20 条案例、36 条路径，必须检索并报告 |
 | Golden Diagnosis | 当前子集引用完整率 | 1.0000 | 1.0000 | 0.0000 | 只验证引用 ID 完整性 |
@@ -63,11 +66,11 @@ $env:DATAOPS_TEST_DATABASE_URL='postgresql+asyncpg://...'
 .venv\Scripts\python -m app.evaluation
 ```
 
-成功时五个 suite 均为 `passed`，共发布 19 个指标，并满足：
+成功时五个 suite 均为 `passed`，共发布 20 个指标，并满足：
 
 ```json
 {
-  "contract_id": "portfolio-eval-run:v22",
+  "contract_id": "portfolio-eval-run:v23",
   "metric_kind": "measured",
   "run_success": true,
   "complete": true,

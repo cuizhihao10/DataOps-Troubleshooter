@@ -191,6 +191,8 @@ async def test_twenty_eight_golden_cases_complete_versioned_measured_diagnosis_b
     }
     assert report.intent_accuracy == 1
     assert report.root_cause_top1_hit_rate == 1
+    assert report.root_cause_anchor_hit_rate == 1
+    assert report.anchored_case_count == 14
     assert report.necessary_action_coverage == 1
     assert report.evidence_source_coverage == 1
     assert report.fault_path_completeness == 1
@@ -753,6 +755,11 @@ async def test_golden_diagnosis_credits_graph_paths_that_only_exist_in_evidence_
         budget=EvidenceBundleBudget(),
         used_bytes=0,
         selected_paths=bundled_paths,
+        # 基线报告的根因引用了 Bundle 里的根因锚点节点，替换 Bundle 时必须把它们带过来：否则本测试
+        # 会顺带制造一条悬空引用，断言失败的原因就不再是"路径来源"这件被测的事。
+        selected_nodes=list(baseline.evidence_bundle.selected_nodes)
+        if baseline.evidence_bundle is not None
+        else [],
     )
     # 清空 state 路径是刻意的：只有两个来源互斥时，断言才能证明分数确实来自 Bundle 而不是 state。
     bundle_only_state = baseline.react.state.model_copy(update={"retrieved_paths": []})
@@ -809,7 +816,11 @@ async def test_golden_diagnosis_accepts_bundle_knowledge_node_alongside_live_obs
         retrieval_mode=RetrievalMode.HYBRID_GRAPH,
         budget=EvidenceBundleBudget(),
         used_bytes=0,
-        selected_nodes=[knowledge_node],
+        # 基线锚点节点必须保留，被测的增量只有 `kn_pk_conflict_root` 这一条额外知识引用。
+        selected_nodes=[
+            *(baseline.evidence_bundle.selected_nodes if baseline.evidence_bundle else ()),
+            knowledge_node,
+        ],
     )
     enriched_roots = [
         root.model_copy(
@@ -893,6 +904,111 @@ async def test_golden_diagnosis_rejects_root_cause_supported_only_by_static_know
 
     assert result.unsupported_critical_claim_count == 1
     assert result.citation_completeness == 0
+    # 根因锚点也必须一起失败：这条结论把案例锚点整体换成了一个非 root_cause 前缀的知识节点，既没有
+    # 命中锚点 ID，也没有任何实时支撑，两道闸门都不放行。
+    assert result.root_cause_anchor_hit is False
+    assert result.cited_root_cause_anchors == []
+
+
+@pytest.mark.asyncio
+async def test_root_cause_anchor_requires_live_support_on_the_same_conclusion() -> None:
+    """确认根因引用了正确锚点但整条结论没有实时 Observation 时，锚点仍然不算命中。
+
+    锚点判定的价值在于"精确"，不在于"宽松"：如果只要报告里出现正确的 `kn_root_cause_*` 就算命中，
+    模型复述一遍知识库即可刷满这个指标，它会重复 `root_cause_top1_hit` 衡量措辞的老毛病，只是把
+    措辞换成了节点 ID。这里保留正确锚点、删掉全部 `ev_*`，命中必须为 False。
+    """
+
+    cases = load_golden_cases(GOLDEN_CASE_FILE)
+    target = next(case for case in cases if case.case_id == "golden_cross_chain_pk_conflict")
+    assert target.allowed_root_cause_anchors == ["root_cause_primary_key_conflict"]
+    baseline = await FixtureBackedGoldenRunner(
+        FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
+    ).run(target)
+    report = baseline.report.state.draft_report
+    assert report is not None
+    anchor_ref = f"kn_{target.allowed_root_cause_anchors[0]}"
+    assert anchor_ref in report.root_causes[0].evidence_refs
+
+    anchor_only_report = report.model_copy(
+        update={
+            "root_causes": [
+                report.root_causes[0].model_copy(update={"evidence_refs": [anchor_ref]})
+            ]
+        }
+    )
+    anchor_only_state = baseline.report.state.model_copy(
+        update={"draft_report": anchor_only_report}
+    )
+    diagnosis = baseline.model_copy(
+        update={"report": baseline.report.model_copy(update={"state": anchor_only_state})}
+    )
+
+    result = (await evaluate_golden_diagnosis([target], _SingleResultRunner(diagnosis))).cases[0]
+
+    assert result.required_root_cause_anchors == ["root_cause_primary_key_conflict"]
+    assert result.cited_root_cause_anchors == []
+    assert result.root_cause_anchor_hit is False
+    # 文本相等口径完全不受影响：根因字符串一字未改，因此它必须继续命中。两个指标就是这样保持独立的。
+    assert result.root_cause_top1_hit is True
+
+
+@pytest.mark.asyncio
+async def test_root_cause_anchor_misses_when_a_different_root_cause_node_is_cited() -> None:
+    """确认引用了另一个合法 root_cause 节点时锚点判定失败，而不是被前缀匹配放过。
+
+    这是锚点相对文本相等的真正增量：报告措辞可以完全正确却指向错误的故障模式，也可以措辞不同而
+    指向正确节点。判定必须落在节点 ID 的集合交集上，因此换一个同样合法、同样有实时支撑的
+    `kn_root_cause_*` 必须记成未命中，并把实际引用的锚点原样保留下来供失败定位。
+    """
+
+    cases = load_golden_cases(GOLDEN_CASE_FILE)
+    target = next(case for case in cases if case.case_id == "golden_cross_chain_pk_conflict")
+    baseline = await FixtureBackedGoldenRunner(
+        FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
+    ).run(target)
+    report = baseline.report.state.draft_report
+    assert report is not None
+    assert baseline.evidence_bundle is not None
+    wrong_node = baseline.evidence_bundle.selected_nodes[0].model_copy(
+        update={
+            "evidence_id": "kn_root_cause_bds_data_skew",
+            "node_id": "root_cause_bds_data_skew",
+        }
+    )
+    live_refs = [
+        reference
+        for reference in report.root_causes[0].evidence_refs
+        if reference.startswith("ev_")
+    ]
+    assert live_refs
+
+    wrong_anchor_report = report.model_copy(
+        update={
+            "root_causes": [
+                report.root_causes[0].model_copy(
+                    update={"evidence_refs": [*live_refs, wrong_node.evidence_id]}
+                )
+            ]
+        }
+    )
+    wrong_anchor_state = baseline.report.state.model_copy(
+        update={"draft_report": wrong_anchor_report}
+    )
+    diagnosis = baseline.model_copy(
+        update={
+            "report": baseline.report.model_copy(update={"state": wrong_anchor_state}),
+            "evidence_bundle": baseline.evidence_bundle.model_copy(
+                update={"selected_nodes": [*baseline.evidence_bundle.selected_nodes, wrong_node]}
+            ),
+        }
+    )
+
+    result = (await evaluate_golden_diagnosis([target], _SingleResultRunner(diagnosis))).cases[0]
+
+    assert result.cited_root_cause_anchors == ["root_cause_bds_data_skew"]
+    assert result.root_cause_anchor_hit is False
+    assert result.unsupported_critical_claim_count == 0
 
 
 @pytest.mark.asyncio
@@ -1019,6 +1135,7 @@ def _build_diagnosis_result(
     )
     evidence_ids = [item.evidence_id for item in evidence]
     retrieved_paths = _build_retrieved_paths(case)
+    anchor_bundle = _build_anchor_bundle(case)
     recalled_memories, history_explanations = _build_history_context(case, components)
     root_cause = case.allowed_root_causes[0] if case.allowed_root_causes else None
     hypotheses = []
@@ -1055,6 +1172,9 @@ def _build_diagnosis_result(
         evidence_ids=evidence_ids,
         retrieved_paths=retrieved_paths,
         similar_cases=history_explanations,
+        anchor_refs=[
+            node.evidence_id for node in (anchor_bundle.selected_nodes if anchor_bundle else ())
+        ],
     )
     memory = _build_pending_memory(case, components, evidence_ids) if root_cause else None
     final_state = state.model_copy(
@@ -1087,6 +1207,7 @@ def _build_diagnosis_result(
         memory_query=case.user_query if case.history_expectation is not None else None,
         recalled_memories=recalled_memories,
         history_case_matches=history_explanations,
+        evidence_bundle=anchor_bundle,
         react=react,
         report=report_result,
         memory_stage=memory_stage,
@@ -1100,11 +1221,14 @@ def _build_report(
     evidence_ids: list[str],
     retrieved_paths: list[RetrievedPath],
     similar_cases: tuple[SimilarCaseReference, ...],
+    anchor_refs: list[str],
 ) -> DiagnosisReport:
     """生成引用完整且风险与 Golden 标注一致的确定性报告。
 
     根因案例引用全部本次 TOOL Evidence 并形成一段可审计链路；异常/空结果案例不猜根因，只给
-    出低风险人工核验建议和明确不确定性。所有建议仅是说明，不执行生产写操作。
+    出低风险人工核验建议和明确不确定性。所有建议仅是说明，不执行生产写操作。``anchor_refs``
+    追加在实时 Evidence 之后而不是取代它：锚点判定要求同一条结论既非悬空又有实时支撑，只引用
+    静态知识节点的根因必须继续被判为不合格。
     """
 
     remediation = RemediationStep(
@@ -1130,11 +1254,12 @@ def _build_report(
                 RootCauseConclusion(
                     root_cause=root_cause,
                     confidence=0.9,
-                    evidence_refs=evidence_ids,
+                    evidence_refs=[*evidence_ids, *anchor_refs],
                 )
             ],
             evidence_refs=[
                 *evidence_ids,
+                *anchor_refs,
                 *(path.path_id for path in retrieved_paths),
                 *(similar.case_id for similar in similar_cases),
             ],
@@ -1290,6 +1415,39 @@ def _build_retrieved_paths(case: GoldenCaseSpec) -> list[RetrievedPath]:
         )
         for requirement in case.required_fault_paths
     ]
+
+
+def _build_anchor_bundle(case: GoldenCaseSpec) -> GraphEvidenceBundle | None:
+    """为声明了根因锚点的案例构造只含 root_cause 知识节点的确定性 Evidence Bundle。
+
+    评测侧的锚点判定要求 `kn_<node_id>` 必须真的出现在本轮可引用宇宙里，而这个宇宙由生产函数
+    ``collect_reference_sources`` 从 Bundle 读取；因此基线 runner 必须像真实链路一样填充 Bundle，
+    而不能只往报告里塞一个 `kn_*` 字符串。没有锚点的案例返回 ``None``，与"本轮没有图证据通道"
+    在契约上同形，从而让这十四条案例之外的指标口径完全不变。
+    """
+
+    if not case.allowed_root_cause_anchors:
+        return None
+    return GraphEvidenceBundle(
+        query=case.user_query,
+        retrieval_mode=RetrievalMode.HYBRID_GRAPH,
+        budget=EvidenceBundleBudget(),
+        used_bytes=0,
+        selected_nodes=[
+            BundledKnowledgeNode(
+                evidence_id=f"kn_{anchor}",
+                node_id=anchor,
+                node_type=KnowledgeNodeType.ROOT_CAUSE,
+                name=f"合成根因节点 {anchor}",
+                content="确定性基线使用的合成根因说明，不代表真实系统故障描述。",
+                source_id="synthetic_cross_chain_knowledge_v1",
+                source_span="golden-anchor-baseline",
+                reliability=0.9,
+                retrieval_score=0.85,
+            )
+            for anchor in case.allowed_root_cause_anchors
+        ],
+    )
 
 
 def _build_pending_memory(

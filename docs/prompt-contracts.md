@@ -984,13 +984,13 @@ run 约束如下：queued/running 不含结果；completed 必须含完整结果
 
 ## 8. 统一作品集评测运行契约
 
-`portfolio-eval-manifest:v23` 固定五个已经实现且有独立实测文档的评测层：GraphRAG vector/graph、
+`portfolio-eval-manifest:v24` 固定五个已经实现且有独立实测文档的评测层：GraphRAG vector/graph、
 长期记忆 vector/graph、Memory off/on 端到端影响、Auditor off/on 增量安全，以及
-`golden-diagnosis-eval:v22` 顶层诊断确定性回归。代码仍可读取精确四层 v1 和 Golden v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21 来源的五层
-v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22 历史 manifest，但默认 CLI 只使用 v23。manifest 只允许引用仓库 `tests/*.py` 文件或测试节点，不接受自由 pytest flags；
+`golden-diagnosis-eval:v23` 顶层诊断确定性回归。代码仍可读取精确四层 v1 和 Golden v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22 来源的五层
+v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22/v23 历史 manifest，但默认 CLI 只使用 v24。manifest 只允许引用仓库 `tests/*.py` 文件或测试节点，不接受自由 pytest flags；
 运行器使用 `subprocess.run(shell=False)`。
 
-`portfolio-eval-run:v22` 顺序执行每层，并遵守以下指标发布门禁：
+`portfolio-eval-run:v23` 顺序执行每层，并遵守以下指标发布门禁：
 
 - 只有本次 pytest status=`passed` 的 suite 才携带 manifest 中已审核的 measured snapshot；
 - failed、skipped 或 blocked 必须隐藏 metrics 并给出公开原因；
@@ -1013,7 +1013,21 @@ Observation、可引用图路径或已确认历史案例上。v21 的宇宙漏�
 `citation_completeness=0.875` 与 `unsupported_critical_claim_rate=0.125` 全部来自这个缺陷而不是报告
 质量下降。放宽悬空判定必须同时补上支撑判定，否则模型只复述知识库就能拿满引用分。
 
-`golden-case:v7` 的五类 `case_category` 当前为 8/10/4/3/3，五类均达到产品配额。
+`golden-diagnosis-eval:v23` 在此之上新增 `root_cause_anchor_hit_rate`，既有十九个指标的定义一字未改，
+因此两代同名数字可以直接对比。锚点判定读 Top-1 根因引用里的 `kn_root_cause_*`：`app/retrieval/budget.py`
+的 `KNOWLEDGE_EVIDENCE_ID_PREFIX` 固定把知识节点 evidence_id 生成为 `kn_<node_id>`，一条引用就精确
+编码了知识图节点 ID，因此"报告指向哪个故障模式"可以纯离线精确判定，无需比较自然语言根因文本。
+`golden-case:v8` 的 `allowed_root_cause_anchors` 由正则钉死 `root_cause_` 前缀，且加载期测试要求每个锚点
+都是 `graph-seed:v11` 里真实存在的 `root_cause` 节点——否则该案例永不可能命中，指标会静默恒零。
+
+锚点不比文本相等宽松：计数前该条 Top-1 根因必须先通过上述两道完全相同的引用校验，所以凭空编造节点
+ID（悬空）或只堆静态知识不看本轮 Observation（无实时支撑）都无法命中。它与 `root_cause_top1_hit_rate`
+分母不同——14 条声明锚点案例对 21 条有根因案例，7 条有根因但故障模式尚未建模的案例被排除在锚点分母
+之外而不是记 0——两者必须并列发布，不可相减也不可互相替换。把文本相等口径的低分换成锚点口径的高分
+并宣称"提升"属于改口径冒充改进。`anchored_case_count` 由报告层不变量从案例明细复算，防止分母被填成
+案例总数后让读者把"14 条的比率"误读成"28 条的比率"。
+
+`golden-case:v8` 的五类 `case_category` 当前为 8/10/4/3/3，五类均达到产品配额。
 `cross_component` 类别必须至少包含两个不同组件前缀的 required tool，并至少标注一条
 `required_fault_paths`；这两项在 Fixture 加载前校验，不能用单组件案例改标签或堆叠无关系工具虚增配额。
 
@@ -1026,7 +1040,7 @@ raw recall 与最终 `similar_cases` 顺序一致，冲突历史根因不得进�
 
 `evidence_conflict_expectation` 只允许出现在工具异常/证据冲突类别，至少标注两个且必须属于
 `required_evidence_sources` 的冲突 source ID，并声明禁止根因、无根因输出和 uncertainty 公开义务。
-`golden-diagnosis-eval:v22` 继续先检查所有冲突来源确实出现在本次 Evidence，再检查报告没有命中任一禁止
+`golden-diagnosis-eval:v23` 继续先检查所有冲突来源确实出现在本次 Evidence，再检查报告没有命中任一禁止
 根因、没有在要求克制时输出其他根因，并公开人工复核不确定性。有效 citation 不能抵消事实冲突违规。
 
 `required_fault_paths` 同时标注有序 node ID 和关系类型。链路评分先过滤出最终
@@ -1110,9 +1124,9 @@ Schema 兼容，但 7200 条预期事件只到 6300 条。FlashSync 日志必须
 
 ## 9. 真实模型 Golden 运行与观测契约
 
-`live-golden-eval:v1` 复用 `golden-diagnosis-eval:v22` 的评分器，但 runner 必须经过生产
+`live-golden-eval:v1` 复用 `golden-diagnosis-eval:v23` 的评分器，但 runner 必须经过生产
 PostgreSQL GraphRAG、Planner/Auditor Structured Outputs、LangGraph 和 stdio MCP。默认三案例 smoke
-不加入 `portfolio-eval-manifest:v23`，因为它需要用户显式提供本地模型密钥；缺少 Provider、密钥或
+不加入 `portfolio-eval-manifest:v24`，因为它需要用户显式提供本地模型密钥；缺少 Provider、密钥或
 数据库时必须在任何模型调用前失败，不能生成假的 `metric_kind=measured` 报告。
 
 合成 `scenario_id`、资源 ID 和观察窗口只作为 Mock MCP 寻址信息进入 Planner 的不可信 user 消息。

@@ -1088,25 +1088,25 @@ unsupported 与风险案例二审接受，持续证据冲突案例二审仍拒�
 ### 16.4 统一作品集评测 manifest 与单命令运行器
 
 四层消融此前各有独立测试和实测文档，但使用者需要记住不同命令，且失败后仍可能手工复制旧数字。
-`portfolio-eval-manifest:v23` 把这些层与 Golden 诊断基线的 suite ID、来源契约、结果文档、PostgreSQL 前置、受限 pytest target 和
+`portfolio-eval-manifest:v24` 把这些层与 Golden 诊断基线的 suite ID、来源契约、结果文档、PostgreSQL 前置、受限 pytest target 和
 已审核指标快照集中到 `data/evals/portfolio_eval_manifest.json`。它只汇总现有实测，不把不同层计算
 成一个没有统计意义的总准确率。
 
-`app/evaluation/portfolio.py` 实现 `portfolio-eval-run:v22`。测试 target 必须是仓库内 `tests/*.py`
+`app/evaluation/portfolio.py` 实现 `portfolio-eval-run:v23`。测试 target 必须是仓库内 `tests/*.py`
 文件或测试节点，manifest 不能加入任意 flags；真实执行使用当前 Python 解释器和
 `subprocess.run(shell=False)`，stdout/stderr 被捕获后只在失败层提供截断摘要。运行器不会输出环境变量、
-数据库 URL、Prompt、Thought 或供应商响应体。默认文件和 CLI 使用五层 v23；v1 精确四层与 v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22
-Golden v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21 来源仍可兼容读取，旧结果不会被静默解释为新完整运行。
+数据库 URL、Prompt、Thought 或供应商响应体。默认文件和 CLI 使用五层 v24；v1 精确四层与 v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22/v23
+Golden v1/v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22 来源仍可兼容读取，旧结果不会被静默解释为新完整运行。
 
 调用链如下：
 
 ```text
 python -m app.evaluation
-  -> load and validate portfolio-eval-manifest:v23
+  -> load and validate portfolio-eval-manifest:v24
   -> verify result documents and pytest targets exist
   -> run each suite with a bounded subprocess timeout
   -> publish snapshots only for status=passed
-  -> render portfolio-eval-run:v22 JSON to stdout
+  -> render portfolio-eval-run:v23 JSON to stdout
 ```
 
 状态语义刻意区分四类：`passed` 才携带 metrics；`failed` 表示 pytest 已执行但失败；`skipped` 只来自
@@ -1126,7 +1126,7 @@ Golden 确定性回归，用于无 Docker 环境的快速反馈；即使退出�
 `all_suites_passed=false`。`tests/integration/test_portfolio_evaluation_cli.py` 会真实启动该 CLI，并验证
 两个 skipped suite 没有 metrics。
 
-`app/evaluation/golden_diagnosis.py` 实现 `golden-diagnosis-eval:v22`。它依赖可替换异步 runner，但评分
+`app/evaluation/golden_diagnosis.py` 实现 `golden-diagnosis-eval:v23`。它依赖可替换异步 runner，但评分
 只读取完整 `DiagnosisRunResult`：意图来自终态 state，必要 Action/重复率/成功率来自 ToolEvent，关键
 来源来自 Evidence，Top-1、引用、最高风险和安全降级来自最终审计报告。合法 `attempt=2` 重试不算重复；
 根因、链路和高风险建议的引用做两项稳定 ID 检查——悬空判定直接调用报告层
@@ -1135,7 +1135,16 @@ Golden 确定性回归，用于无 Docker 环境的快速反馈；即使退出�
 一个把两者混起来的 AND 条件，且宇宙不含 Bundle 知识节点，所以"多引用一条合法知识依据"会被误判为
 悬空引用，这是 v22 的唯一行为差异。
 
-`golden-case:v7` 的 `case_category` 当前为 8/10/4/3/3。28 条案例使用 18 个 Fixture；三条记忆案例
+v23 只增加 `root_cause_anchor_hit_rate` 一个指标，既有指标定义一字未改。它读 Top-1 根因引用里的
+`kn_root_cause_*`：因为 `app/retrieval/budget.py` 的 `KNOWLEDGE_EVIDENCE_ID_PREFIX` 把知识节点的
+evidence_id 固定生成为 `kn_<node_id>`，一条引用就精确编码了知识图节点 ID，"报告指向哪个故障模式"
+因此可以纯离线精确判定，不需要对自然语言根因文本做相等或相似度比较。计数前该条结论必须先通过与
+关键结论完全相同的两道校验（全部引用非悬空、至少一条落在实时支撑集合），否则凭空编造节点 ID 或
+只堆静态知识都能刷出命中。它与文本相等的 `root_cause_top1_hit_rate` 分母不同（14 条声明锚点案例对
+21 条有根因案例），是两个必须并列发布的独立指标：把后者的低分换成前者的高分并宣称"提升"就是改
+口径冒充改进。`anchored_case_count` 由报告层不变量从明细复算，避免分母被手工填成案例总数。
+
+`golden-case:v8` 的 `case_category` 当前为 8/10/4/3/3。28 条案例使用 18 个 Fixture；三条记忆案例
 增加 `history_expectation`，逐项保存 required memory ID、历史根因、相似度、冲突标记和 forbidden IDs。
 runner 构造 confirmed `CaseMemoryMatch` 与同 ID/相似度的 `SimilarCaseReference`，评分器检查触发、召回
 覆盖、confirmed-only、报告投影和实时优先。即使旧根因只引用有效 memory ID，若没有本次 TOOL
@@ -1154,7 +1163,7 @@ Evidence 或与允许根因冲突，实时优先仍失败。
 领域 Evidence，评分器按以下顺序处理：
 
 ```text
-load golden-case:v7
+load golden-case:v8
   -> validate conflict sources / forbidden roots / no-root obligation
   -> replay three successful ToolEvent + Evidence objects
   -> verify every annotated conflict source was observed
@@ -1170,7 +1179,7 @@ load golden-case:v7
 引用完整率仍为 1；专用安全指标必须失败，证明两项指标职责不同。当前只有一条确定性冲突案例，不能
 外推为真实 LLM 的冲突识别准确率，未来新增同类案例或真实模型 runner 时必须提升契约并重新实测。
 
-`golden-case:v7` 延续把跨组件类别从“人工约定”升级为 Schema 不变量。加载器从每个
+`golden-case:v8` 延续把跨组件类别从“人工约定”升级为 Schema 不变量。加载器从每个
 `required_tools` 枚举值的前缀提取组件集合；`cross_component` 必须至少覆盖两个不同组件，并至少具有
 一条 `required_fault_paths`。先检查组件数量、再检查路径存在性，能分别暴露“单组件改标签”和“调用
 多个系统但没有因果关系”两种配额污染。普通单组件、记忆和冲突类别不受这条规则误伤。
@@ -1210,7 +1219,7 @@ BDS 状态、日志、表信息和 FlashSync 延迟、日志、一致性六项 O
 精简，同时把事实环境从“缺分区/主键冲突”扩展到“输入正常但计算资源耗尽”。
 
 第 16 条 `golden_ambiguous_bds_missing_resource_context` 覆盖真正的零工具补参边界。用户只说 BDS
-任务很慢，没有资源 ID 和时间窗；`golden-case:v7` 在加载阶段保证零 `required_tools` 只能属于
+任务很慢，没有资源 ID 和时间窗；`golden-case:v8` 在加载阶段保证零 `required_tools` 只能属于
 `ambiguous_or_insufficient`，并要求 path、Evidence source、allowed root 均为空。该类别还必须包含
 `missing_resource_id`、`need_user_input` 或 `evidence_insufficient` 之一，防止模糊输入被标成证据充分。
 
@@ -1416,7 +1425,7 @@ python -m pytest -m postgres
 为了让真实模型可以复用完全相同的评分逻辑，`app/evaluation/live_golden.py` 实现独立
 `live-golden-eval:v1`：它进入 FastAPI lifespan，取得生产 `DiagnosisApplicationRuntime` 与已验证
 Fixture registry，为每条案例创建独立 PostgreSQL session，再顺序运行 GraphRAG、双 Agent、真实
-stdio MCP、Auditor 和 memory staging。它没有加入默认 `portfolio-eval-manifest:v23`，因为离线 CI
+stdio MCP、Auditor 和 memory staging。它没有加入默认 `portfolio-eval-manifest:v24`，因为离线 CI
 没有密钥时应明确不运行，而不是让完整 Portfolio 永久 blocked 或偷偷换回确定性替身。
 
 v1 默认固定三条低成本代表案例：LTS 参数错误单组件、订单水位线时区错配三组件链路，以及 BDS 三个
@@ -1515,8 +1524,8 @@ confirm/reject；不得展示 Thought、Prompt、Provider 响应或凭据。所�
 - `memory-recall-eval:v1` 六条长期记忆召回案例、双模式消融、Recall/Precision/forbidden 指标和 PostgreSQL 实测报告。
 - `history-impact-eval:v1` 三条 Memory off/on 诊断案例、实际 ToolEvent 行为指标、实时事实优先门禁和真实 LangGraph 实测报告。
 - `auditor-impact-eval:v1` 三条语义缺陷案例、规则/Auditor 增量归因、危险残留与安全处置指标和真实报告 LangGraph 实测。
-- `golden-case:v7` Schema/位点/倾斜/参数/限流/授权/水位线反证、补参/降级/跨组件门禁、记忆与冲突标注，以及 `golden-diagnosis-eval:v22` 二十八条案例评测。
-- `portfolio-eval-manifest:v23` 五层受限 pytest 入口、v1–v22 兼容读取、指标发布门禁，以及 `portfolio-eval-run:v22` 单命令 JSON 汇总。
+- `golden-case:v8` Schema/位点/倾斜/参数/限流/授权/水位线反证、补参/降级/跨组件门禁、记忆与冲突标注、十四条案例的知识图根因锚点，以及 `golden-diagnosis-eval:v23` 二十八条案例评测。
+- `portfolio-eval-manifest:v24` 五层受限 pytest 入口、v1–v23 兼容读取、指标发布门禁，以及 `portfolio-eval-run:v23` 单命令 JSON 汇总。
 - `live-golden-eval:v1` 生产路径三案例真实模型入口、Golden 答案隔离、ContextVar 安全遥测和 measured-only 报告契约。
 - `audited-diagnosis-workflow:v2` 按需召回、两阶段案例解释、ReAct、Auditor 和审计后 staging 顶层闭环。
 - `diagnosis-resources:v4` session/message/run/event PostgreSQL 资源 API、取消/恢复、完整相似案例结果和安全失败事件。

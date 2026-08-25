@@ -10,6 +10,12 @@
 仓库仍然不提交任何密钥、端点地址或原始报告 JSON：`live-golden*.json` 已在 `.gitignore` 中，对外
 口径只保留本文的聚合数字与逐案例判定。
 
+最近一次真实模型运行是 Run G（评分器 `golden-diagnosis-eval:v23`），它给出了新增指标
+`root_cause_anchor_hit_rate` 的第一个实测值 0.500，分母 `anchored_case_count=2`；同一轮里
+`root_cause_top1_hit_rate` 仍然是 0.000。这两个数字是**分母与口径都不同的两个独立指标**，必须并列
+阅读，不能相减、不能互相替换（详见"Run G"与"仍未达标"两节）。Run G 中途遇到端点不可用，多数指标
+低于 Run D/F，这一点也在对应小节里如实标注。
+
 ## v1 默认冒烟集合
 
 默认集合固定三条案例，并保持以下顺序：
@@ -24,7 +30,7 @@
 
 ## 三次实测对比（全部为实测值）
 
-固定条件：同一份 `golden-case:v7` 三案例、同一 `bge-m3:v1` 向量空间、同一 `auditor-report:v2`、同一
+固定条件：同一份 `golden-case:v8` 三案例、同一 `bge-m3:v1` 向量空间、同一 `auditor-report:v2`、同一
 `gpt-5.6-sol`；唯一变量是 Planner Prompt 版本与报告返工实现。
 
 | 指标 | Run B `planner-react:v6` | Run C `planner-react:v7` | Run D `planner-react:v8` + 定位修订 | Run F `model-transient-retry:v1` |
@@ -134,6 +140,75 @@ Run D 的 1.000 回落到 0.833，缺口全部来自跨组件案例只执行了 
 | `golden_cross_lts_bds_flashsync_watermark_timezone_mismatch` | 3 | 3 个 | `invalid_evidence_reference`（未命中） | 未命中 |
 | `golden_bds_conflicting_partition_evidence` | 3 | 无 | `evidence_conflict_requires_manual_review`（命中） | 命中 |
 
+## Run G：`golden-diagnosis-eval:v23` 下的第一次真实模型运行（实测值）
+
+Run G 的目的只有一个：在真实模型报告上测量新增的 `root_cause_anchor_hit_rate`。它**不是离线重评分**。
+原计划是复用 Run D/F 持久化的 `agent_runs.result` 重新打分，但那些行已被后续 `-m postgres` 集成测试与
+五层评测的建表/清表流程清空，因此拿到锚点实测值必须重新调用模型。命令与前几轮完全一致，只有评分器
+从 v22 升到 v23（新增一个指标，既有指标定义一字未改）。
+
+| 指标 | Run D `planner-react:v8` | Run F `model-transient-retry:v1` | Run G `golden-diagnosis-eval:v23` |
+|---|---|---|---|
+| `root_cause_top1_hit_rate` | 0.000 | 0.000 | 0.000 |
+| `root_cause_anchor_hit_rate` | 未测量（v22 无此指标） | 未测量（v22 无此指标） | **0.500** |
+| `anchored_case_count` | — | — | 2 |
+| `intent_accuracy` | 1.000 | 1.000 | 1.000 |
+| `necessary_action_coverage` | 1.000 | 0.833 | 0.667 |
+| `evidence_source_coverage` | 1.000 | 0.833 | 0.667 |
+| `fault_path_completeness` | 0.667 | 0.667 | 0.500 |
+| `stop_reason_hit_rate` | 0.667 | 0.667 | 0.333 |
+| `risk_level_hit_rate` | 0.667 | 0.667 | 0.667 |
+| `citation_completeness` | 1.000 | 1.000 | 1.000 |
+| `unsupported_critical_claim_rate` | 0.000 | 0.000 | 0.000 |
+| `duplicate_action_rate` | 0.000 | 0.000 | 0.000 |
+| `tool_attempt_success_rate` | 0.857 | 1.000 | 0.818 |
+| `safe_degradation_rate` | 1.000 | 1.000 | 1.000 |
+| `evidence_conflict_safe_resolution_rate` | 1.000 | 1.000 | 0.000 |
+| `accepted_report_rate` | 0.667 | 0.667 | 0.333 |
+| 模型调用次数 | 12 | 13 | 14（8 成功、6 失败） |
+| 总 token | 126,670 | 189,996 | 88,819 |
+| 三案例总耗时 | 175.2 s | 227.2 s | 375.3 s |
+
+**Run G 的多数指标低于 Run D/F，原因是端点在这一轮中途不可用，不是 Prompt 或代码退化。** 14 次调用里
+6 次以 `timeout` 或 `connection_error` 结束，构成三组"首次调用 + 一次重试"，每组都在重试后仍失败：
+Auditor 两次 90.0 s 超时（等于配置的 Auditor 墙钟预算）、两次 5.0/16.2 s 连接错误，Planner 一次 30.0 s
+超时加一次 16.4 s 连接错误。`output_invalid_call_count=0`，说明没有任何一次是结构化输出不合法；
+`unreported_usage_call_count=6` 与失败次数一致，失败调用本来就没有 usage 可记。这同时是
+`model-transient-retry:v1` 的完整实测证据：有界重试确实在真实端点上执行了，上限确实是一次，并且
+在端点持续不可用时不会退化成无限重试。
+
+### Run G 逐案例判定（实测值）
+
+| 案例 | 执行工具数 | 缺失必要工具 | 停止原因 | 锚点判定 |
+|---|---|---|---|---|
+| `golden_lts_invalid_partition_parameter_single` | 3 | 无 | `evidence_sufficient`（命中） | **命中** `root_cause_lts_invalid_partition_parameter` |
+| `golden_cross_lts_bds_flashsync_watermark_timezone_mismatch` | 8 | 无 | `react_budget_exhausted`（未命中） | 未命中（报告没有任何根因） |
+| `golden_bds_conflicting_partition_evidence` | 0 | 3 个 | `planner_provider_error`（未命中） | 不适用（案例无允许根因，不进分母） |
+
+案例 1 是这次新增指标的关键一行：**`root_cause_top1_hit=false` 与 `root_cause_anchor_hit=true` 同时成立。**
+模型输出的根因文本准确说明 `partition_date` 用了 `20260713` 而任务要求 `yyyy-MM-dd`，但它是一整句自然
+语言，与知识节点名不可能字符串相等；而它的 Top-1 根因引用集合里包含
+`kn_root_cause_lts_invalid_partition_parameter`，并且该条结论的全部引用非悬空、至少一条落在本轮
+Observation 上，因此锚点判定成立。这正是两个口径的差别在真实报告上的第一次实测体现。
+
+案例 2 的锚点未命中不是"指向了错误的故障模式"：该案例三条并行批次共 8 个 Action 用满步数预算，
+`react_budget_exhausted` 之后报告里根本没有根因，`cited_root_cause_anchors` 为空。它对应的是已记录的
+收口缺口（见下节），不是检索错节点。案例 2 这一轮的必要工具覆盖是满的（Run F 曾缺 3 个），说明并行
+取证确实换来了更多证据，但也更快耗尽步数预算。
+
+案例 3 的 0 工具与 `planner_provider_error` 来自端点不可用，因此这一轮
+`evidence_conflict_safe_resolution_rate` 读到 0.000。为了确认这是端点事件而不是冲突处置退化，我用
+`--case-id golden_bds_conflicting_partition_evidence` 单独重跑（Run G2，`scope=custom`，5 次调用、
+69,535 token、57.2 s）：停止原因回到 `evidence_conflict_requires_manual_review`，三个矛盾 source 全部被
+观察，禁止根因零命中，uncertainty 已公开，`evidence_conflict_safe_resolution=true`、报告 accepted。
+**Run G2 不能并入 Run G 的 smoke 数字**——它的 scope 不同、分母只有 1，只能作为"同一案例在端点恢复后
+可复现安全处置"的旁证。
+
+Run G2 还顺带暴露了一个必须一起读的口径约定：它的 `root_cause_anchor_hit_rate` 显示 1.000 而
+`anchored_case_count=0`。空分母按 1.000 上报（`root_cause_top1_hit_rate` 与 `fault_path_completeness`
+在该运行里同理），这是"本轮没有可判定案例"而不是满分。看锚点比率必须同时看 `anchored_case_count`，
+报告层的不变量会强制这个分母从案例明细复算，正是为了让这种误读在数据里就能被发现。
+
 ## Run D 相对 Run C 的两项结构性修复
 
 1. **可引用 ID 白名单与报告层同源。** v7 的 Planner 白名单比 `collect_reference_sources` 更窄，模型
@@ -147,10 +222,15 @@ Run D 的 1.000 回落到 0.833，缺口全部来自跨组件案例只执行了 
 
 ## 仍未达标与已知测量口径缺陷
 
-- `root_cause_top1_hit_rate` 实测仍为 0.000。原因不是模型没给出根因：Run D 案例 1 输出的根因文本
-  已经准确说明 `partition_date` 用了 `20260713` 而任务声明要求 `yyyy-MM-dd`。评分器用**精确字符串
-  相等**把报告根因与知识图节点名比较，一段自然语言句子永远不可能相等。要让这个指标可达，必须先给
-  Golden 案例引入规范化根因锚点（节点 ID 或受控标签），否则它衡量的是措辞而不是正确性。
+- `root_cause_top1_hit_rate` 实测仍为 0.000，Run G 也没有变。原因不是模型没给出根因：Run D 案例 1
+  输出的根因文本已经准确说明 `partition_date` 用了 `20260713` 而任务声明要求 `yyyy-MM-dd`。评分器用
+  **精确字符串相等**把报告根因与知识图节点名比较，一段自然语言句子永远不可能相等。`golden-case:v8`
+  因此为 14 条案例引入了规范化根因锚点（知识图 `root_cause` 节点 ID），`golden-diagnosis-eval:v23` 新增
+  `root_cause_anchor_hit_rate` 与它**并列**发布，Run G 实测 0.500（分母 2）。
+  **这不是把 0.000 变成 0.500 的提升**：两个指标分母不同（Run G 里是 2 对 2，28 条全集里是 14 对 21）、
+  口径不同（引用节点 ID 对根因文本相等），文本相等口径一个字都没改，也不会因为新指标存在而变好。
+  要真正提升 `root_cause_top1_hit_rate`，仍然需要单独决定是否把它改成受控标签比较——那会是一次显式的
+  口径变更，必须重新标注全部案例并作废旧数字，而不是用锚点悄悄替换。
 - `risk_level_hit_rate` 只到 0.667，缺口来自跨组件案例期望 high 而实测 low。确定性
   `_build_remediation_steps` 目前不可能产出 `RiskLevel.HIGH`，因此该指标的上限受实现约束而非模型
   约束；需要让知识库声明方案的风险等级后才能真正测量。
@@ -173,7 +253,7 @@ Run D 的 1.000 回落到 0.833，缺口全部来自跨组件案例只执行了 
 session：
 
 ```text
-load golden-case:v7
+load golden-case:v8
   -> validate local settings and select case IDs
   -> FastAPI lifespan validates Fixture / Prompt / Graph / real MCP discovery
   -> PostgreSQL GraphRAG retrieves an Evidence Bundle
@@ -182,7 +262,7 @@ load golden-case:v7
   -> Observation returns to the bounded Planner loop
   -> deterministic report policy + independent Auditor
   -> audited memory staging and persisted run/events/checkpoint
-  -> golden-diagnosis-eval:v22 scores the public DiagnosisRunResult
+  -> golden-diagnosis-eval:v23 scores the public DiagnosisRunResult
   -> live-golden-eval:v1 aggregates safe model-call telemetry
 ```
 
@@ -228,7 +308,10 @@ $env:DATAOPS_CHAT_API_KEY='本地密钥，不写入文件'
 ## 当前不能宣称什么
 
 - 不能把三案例 smoke 外推到 28 条或生产故障分布；`target_coverage_complete=false` 必须一起给出。
-- 不能宣称达成 P95 ≤ 30 s：实测三案例平均端到端 Run D 约 58 s、Run F 约 75.7 s，该目标仍是设计目标值。
+- 不能宣称达成 P95 ≤ 30 s：实测三案例平均端到端 Run D 约 58 s、Run F 约 75.7 s、Run G 约 125.1 s
+  （Run G 含超时与重试，属端点不可用事件，但仍不构成达标证据）。该目标仍是设计目标值。
+- 不能把 Run G 的 `root_cause_anchor_hit_rate=0.500` 当成模型定位能力的成绩：分母只有 2
+  （`anchored_case_count=2`），且另一条未命中是因为步数预算耗尽后报告里根本没有根因。
 - 不能把 Run F 说成"重试已在真实端点验证"：那次运行没有出现瞬时失败，重试路径一次都没执行。被丢弃的
   terra 探测运行只证明退避会执行且遥测粒度正确，两次尝试都失败，救回效果仍未测量。
 - 不能把 `root_cause_top1_hit_rate=0` 说成"模型找不到根因"，也不能把它悄悄改口径后当成提升。

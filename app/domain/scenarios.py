@@ -76,6 +76,14 @@ GoldenRelationType = Literal[
     "SIMILAR_TO",
 ]
 GoldenNodeId = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{2,99}$")]
+# 根因锚点刻意限定为知识图 `root_cause` 节点 ID 而不是自由标签：只有稳定 ID 才能让"报告是否命中
+# 正确故障模式"变成精确判定，自然语言标签的相等比较衡量的是措辞。前缀由正则钉死，因此拼错节点
+# 类型（例如写成 symptom_*）在加载阶段就失败，而不是在评测时静默变成永不命中的锚点。
+ROOT_CAUSE_ANCHOR_NODE_PREFIX = "root_cause_"
+GoldenRootCauseAnchorId = Annotated[
+    str,
+    Field(pattern=rf"^{ROOT_CAUSE_ANCHOR_NODE_PREFIX}[a-z0-9][a-z0-9_]{{2,88}}$"),
+]
 
 
 class GoldenCaseCategory(StrEnum):
@@ -203,11 +211,13 @@ class GoldenCaseSpec(BaseModel):
 
     Golden Case 不复制工具返回，而是引用 scenario_id 并描述预期意图、必要工具、图路径、证据来源、
     可接受根因和停止原因；这种分离使 Mock 数据、GraphRAG 与 Agent 策略可以独立演进和消融。
+    ``allowed_root_causes`` 是人类可读标签，只能做字面比较；``allowed_root_cause_anchors`` 才是可在
+    自然语言报告上精确判定的规范化锚点，两者并列保留，因此换口径不会被误读成指标提升。
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    contract_id: Literal["golden-case:v7"]
+    contract_id: Literal["golden-case:v8"]
     case_id: str = Field(pattern=r"^golden_[a-z0-9][a-z0-9_-]{2,79}$")
     case_category: GoldenCaseCategory
     user_query: str = Field(min_length=1, max_length=4000)
@@ -218,6 +228,10 @@ class GoldenCaseSpec(BaseModel):
     history_expectation: GoldenHistoryExpectation | None = None
     evidence_conflict_expectation: GoldenEvidenceConflictExpectation | None = None
     allowed_root_causes: list[str] = Field(default_factory=list)
+    allowed_root_cause_anchors: list[GoldenRootCauseAnchorId] = Field(
+        default_factory=list,
+        max_length=4,
+    )
     required_evidence_sources: list[str] = Field(default_factory=list)
     expected_stop_reasons: list[str] = Field(min_length=1)
     expected_risk_level: RiskLevel
@@ -234,12 +248,19 @@ class GoldenCaseSpec(BaseModel):
         for field_name in (
             "required_tools",
             "allowed_root_causes",
+            "allowed_root_cause_anchors",
             "required_evidence_sources",
             "expected_stop_reasons",
         ):
             values = getattr(self, field_name)
             if len(values) != len(set(values)):
                 raise ValueError(f"Golden case {field_name} must not contain duplicates")
+        # 锚点只在"本案例允许给出根因"时才有意义：不允许根因的案例期望的是安全降级，若还声明锚点，
+        # 评测就会同时要求"不要给根因"和"引用正确的根因节点"，这两条不可能同时满足。
+        if self.allowed_root_cause_anchors and not self.allowed_root_causes:
+            raise ValueError(
+                "Golden root cause anchors require at least one allowed root cause label"
+            )
         path_labels = [path.path_label for path in self.required_fault_paths]
         if len(path_labels) != len(set(path_labels)):
             raise ValueError("Golden case fault path labels must be unique")

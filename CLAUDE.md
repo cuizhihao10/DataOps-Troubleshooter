@@ -39,7 +39,7 @@ Windows 仓库，bash 下用 `.venv/Scripts/python`。
 # PostgreSQL 集成测试必须显式选 marker 并提供测试库
 DATAOPS_TEST_DATABASE_URL='postgresql+asyncpg://...' .venv/Scripts/python -m pytest -m postgres
 
-# 五层作品集评测（19 个指标，portfolio-eval-run:v22）
+# 五层作品集评测（20 个指标，portfolio-eval-run:v23）
 DATAOPS_TEST_DATABASE_URL='postgresql+asyncpg://...' .venv/Scripts/python -m app.evaluation
 .venv/Scripts/python -m app.evaluation --skip-postgres   # 无库快速反馈，报告 complete=false
 

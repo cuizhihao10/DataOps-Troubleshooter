@@ -192,14 +192,18 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
     assert "history-impact-eval:v1" in guide
     assert "独立 Auditor 增量影响消融评测" in guide
     assert "auditor-impact-eval:v1" in guide
-    assert "golden-case:v7" in guide
-    assert "golden-diagnosis-eval:v22" in guide
+    assert "golden-case:v8" in guide
+    assert "golden-diagnosis-eval:v23" in guide
     # v22 的唯一行为差异是引用判定拆成悬空/实时支撑两条独立规则，文档必须显式记录，
     # 否则口径会在下一次改动里悄悄漂回 v21。
     assert "悬空判定直接调用报告层" in guide
+    # v23 只新增根因锚点这一个指标，文档必须同时保留"分母不同"与"不可相减"两句话：
+    # 少了它们，读者就会把 14 条锚点案例的比率当成 21 条有根因案例的口径改进。
+    assert "root_cause_anchor_hit_rate" in guide
+    assert "两个必须并列发布的独立指标" in guide
     assert "GoldenEvidenceConflictExpectation" in guide
     assert "统一作品集评测 manifest 与单命令运行器" in guide
-    assert "portfolio-eval-run:v22" in guide
+    assert "portfolio-eval-run:v23" in guide
     assert "live-golden-eval:v1" in guide
     assert "model-call-metric:v1" in guide
     assert "ContextVar" in guide
@@ -356,6 +360,8 @@ def test_live_golden_status_document_separates_runnable_contract_from_measuremen
 
     该门禁防止作品集把三案例 smoke 包装成完整真实模型成绩；文档必须保留默认三案例、生产运行路径、
     measured-only、usage 缺失、不保存 Prompt/Thought，以及"未达成 P95 目标"和评分口径缺陷的自述。
+    额外锁定根因锚点这一新增指标的并列口径：它与文本相等的 Top-1 命中率分母不同，文档必须写明
+    0.500 不是把 0.000 提升了，否则新增指标会被当成旧指标的改进对外宣称。
     """
 
     report = Path("docs/live-golden-eval-results.md").read_text(encoding="utf-8")
@@ -374,6 +380,10 @@ def test_live_golden_status_document_separates_runnable_contract_from_measuremen
     # 未达标项与口径缺陷必须留在文档里：删掉它们等于把设计目标当成实测成绩对外宣称。
     assert "不能宣称达成 P95 ≤ 30 s" in report
     assert "评分口径缺陷而非报告质量下降" in report
+    # 锚点指标必须连同分母与"不是提升"的说明一起出现，否则 0.500 会被读成 Top-1 命中率的改进。
+    assert "root_cause_anchor_hit_rate" in report
+    assert "anchored_case_count=2" in report
+    assert "这不是把 0.000 变成 0.500 的提升" in report
 
 
 
@@ -460,19 +470,23 @@ def test_portfolio_eval_report_documents_publish_gate_and_complete_golden_scope(
     """确认统一报告锁定 passed 才发布指标、快速模式不完整和 28/28 数量边界。
 
     该门禁防止 CLI 失败后仍宣传 manifest 快照，也防止把 28 条确定性脚本数量达标冒充真实模型
-    诊断成绩；完整命令、快速命令和十九个指标范围都必须可见。
+    诊断成绩；完整命令、快速命令和二十个指标范围都必须可见。
     """
 
     report = Path("docs/portfolio-eval-results.md").read_text(encoding="utf-8")
 
-    assert "portfolio-eval-manifest:v23" in report
-    assert "portfolio-eval-run:v22" in report
+    assert "portfolio-eval-manifest:v24" in report
+    assert "portfolio-eval-run:v23" in report
     assert "只有" in report and "status=`passed`" in report
     assert "failed、skipped、blocked" in report
     assert "python -m app.evaluation" in report
     assert "--skip-postgres" in report
     assert '"complete": true' in report
-    assert "共发布 19 个指标" in report
+    assert "共发布 20 个指标" in report
+    # 锚点行必须带上"与上一行分母不同，不可相减"，否则统一报告里两行相邻的 1.0000 会被读成
+    # 同一口径的两次测量，而它们的分母是 14 与 21。
+    assert "当前有锚点子集根因锚点命中率" in report
+    assert "与上一行分母不同，不可相减" in report
     assert "有 28 条案例、使用 18 个场景" in report
     assert "成功响应证据冲突安全处置率" in report
     assert "28 条产品目标" in report
@@ -489,13 +503,19 @@ def test_golden_diagnosis_report_documents_scoring_and_twenty_eight_case_boundar
 
     report = Path("docs/golden-diagnosis-eval-results.md").read_text(encoding="utf-8")
 
-    assert "golden-case:v7" in report
-    assert "golden-diagnosis-eval:v22" in report
+    assert "golden-case:v8" in report
+    assert "golden-diagnosis-eval:v23" in report
     assert "28/28 = 100%" in report
     assert "target_coverage_complete=true" in report
     assert "确定性脚本" in report
     assert "不能外推为真实 LLM" in report
     assert "根因 Top-1" in report
+    # 锚点指标必须同时公开分母、判定依据和"不能相减"的结论；只写一个 100% 会让 14 条锚点案例的
+    # 比率看起来像 21 条有根因案例的口径改进。
+    assert "根因锚点命中率 | 100%" in report
+    assert "14 条声明锚点案例" in report
+    assert "两个独立指标，不是同一件事的两种写法，也不能相减" in report
+    assert "kn_root_cause_*" in report
     assert "故障链路完整率 | 100%" in report
     assert "RetrievedPath" in report
     assert "安全降级率" in report
@@ -754,9 +774,15 @@ def test_diagnosis_resource_contract_documents_persistence_events_and_failure_se
     assert "FOR UPDATE SKIP LOCKED" in prompt_contract
     assert "HTTP 409" in prompt_contract
     assert "不保存 Thought" in prompt_contract
-    assert "portfolio-eval-manifest:v23" in prompt_contract
+    assert "portfolio-eval-manifest:v24" in prompt_contract
     assert "实时支撑判定" in prompt_contract
-    assert "portfolio-eval-run:v22" in prompt_contract
+    assert "portfolio-eval-run:v23" in prompt_contract
+    # 锚点契约的三条硬边界：ID 来源、必须落在种子图上、以及两个比率的分母不同。缺任意一条都会
+    # 让下一次改动把"衡量措辞"重新伪装成"衡量正确性"。
+    assert "allowed_root_cause_anchors" in prompt_contract
+    assert "KNOWLEDGE_EVIDENCE_ID_PREFIX" in prompt_contract
+    assert "都是 `graph-seed:v11` 里真实存在的 `root_cause` 节点" in prompt_contract
+    assert "14 条声明锚点案例对 21 条有根因案例" in prompt_contract
     assert "subprocess.run(shell=False)" in prompt_contract
     assert "failed、skipped 或 blocked 必须隐藏 metrics" in prompt_contract
     assert "28/28 条和五类配额已经完整" in prompt_contract

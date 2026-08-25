@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.capabilities import HistoryTrigger
 from app.domain.models import EvidenceSourceType, MemoryStatus, RetrievedPath, RiskLevel
 from app.domain.scenarios import (
+    ROOT_CAUSE_ANCHOR_NODE_PREFIX,
     GoldenCaseCategory,
     GoldenCaseSpec,
     GoldenFaultPathRequirement,
@@ -23,8 +24,9 @@ from app.domain.scenarios import (
 from app.orchestration.diagnosis_models import DiagnosisRunResult
 from app.orchestration.report_models import ReportWorkflowOutcome
 from app.reporting.evidence import collect_reference_sources
+from app.retrieval.budget import KNOWLEDGE_EVIDENCE_ID_PREFIX
 
-GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID = "golden-diagnosis-eval:v22"
+GOLDEN_DIAGNOSIS_EVAL_CONTRACT_ID = "golden-diagnosis-eval:v23"
 GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT = 28
 GOLDEN_DIAGNOSIS_CATEGORY_TARGETS: dict[GoldenCaseCategory, int] = {
     GoldenCaseCategory.SINGLE_COMPONENT: 8,
@@ -58,6 +60,8 @@ class GoldenDiagnosisCaseResult(BaseModel):
     集合字段保留实际与缺失项，便于失败时直接定位；比例均在零到一之间。没有允许根因的案例将
     ``root_cause_top1_hit`` 设为 ``None``，并改由 ``safe_degradation_hit`` 衡量是否克制输出。证据
     冲突案例另外保存来源精确分区、禁止根因命中和 uncertainty 义务，不能被普通引用完整率替代。
+    ``root_cause_anchor_hit`` 与 ``root_cause_top1_hit`` 是两个独立判定：前者看报告是否引用了正确的
+    知识图根因节点，后者看根因文本是否与标注标签逐字相同，因此两者永远不能互相替换或相减。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -74,6 +78,9 @@ class GoldenDiagnosisCaseResult(BaseModel):
     duplicate_action_rate: float = Field(ge=0, le=1)
     root_cause_top1_hit: bool | None
     actual_top1_root_cause: str | None = None
+    root_cause_anchor_hit: bool | None = None
+    required_root_cause_anchors: list[str] = Field(default_factory=list)
+    cited_root_cause_anchors: list[str] = Field(default_factory=list)
     observed_evidence_sources: list[str]
     missing_evidence_sources: list[str]
     evidence_source_coverage: float = Field(ge=0, le=1)
@@ -129,6 +136,16 @@ class GoldenDiagnosisCaseResult(BaseModel):
             raise ValueError("Golden case result path applicability is inconsistent")
         if self.matched_fault_path_ids and not matched:
             raise ValueError("Golden case result path IDs require a matched requirement")
+        # 锚点判定的适用性必须与标注严格同步：只声明了标签、没声明锚点的案例不进入锚点分母，
+        # 否则"知识图还没有这个根因节点"会被当成"模型没找到根因"，指标又一次衡量错对象。
+        if bool(self.required_root_cause_anchors) != (self.root_cause_anchor_hit is not None):
+            raise ValueError("Golden case result root cause anchor applicability is inconsistent")
+        if self.root_cause_anchor_hit is not None:
+            anchor_intersects = bool(
+                set(self.cited_root_cause_anchors) & set(self.required_root_cause_anchors)
+            )
+            if anchor_intersects != self.root_cause_anchor_hit:
+                raise ValueError("Golden case result anchor hit must match cited anchor overlap")
         is_memory_case = self.case_category is GoldenCaseCategory.MEMORY_RECALL
         optional_history_fields = (
             self.history_trigger_hit,
@@ -189,12 +206,14 @@ class GoldenDiagnosisEvalReport(BaseModel):
 
     ``target_coverage_complete`` 只由案例数量决定，不由指标高低决定；当前子集即使全部命中，也
     不能宣称满足产品文档中以 28 条案例为分母的验收目标。冲突安全率和禁止根因计数只聚合显式
-    标注案例，避免把普通超时或权限失败误算为成功响应事实冲突。
+    标注案例，避免把普通超时或权限失败误算为成功响应事实冲突。``root_cause_anchor_hit_rate`` 与
+    ``root_cause_top1_hit_rate`` 各自拥有独立分母（前者只数声明了锚点的案例），两个数字必须并列
+    发布：把后者的 0 换成前者的非零并宣称"提升"就是改口径冒充改进。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    contract_id: Literal["golden-diagnosis-eval:v22"]
+    contract_id: Literal["golden-diagnosis-eval:v23"]
     metric_kind: Literal["measured"] = "measured"
     case_count: int = Field(ge=1)
     target_case_count: int = Field(default=GOLDEN_DIAGNOSIS_TARGET_CASE_COUNT, ge=1)
@@ -204,6 +223,8 @@ class GoldenDiagnosisEvalReport(BaseModel):
     category_target_counts: dict[GoldenCaseCategory, int]
     intent_accuracy: float = Field(ge=0, le=1)
     root_cause_top1_hit_rate: float = Field(ge=0, le=1)
+    root_cause_anchor_hit_rate: float = Field(ge=0, le=1)
+    anchored_case_count: int = Field(ge=0)
     necessary_action_coverage: float = Field(ge=0, le=1)
     evidence_source_coverage: float = Field(ge=0, le=1)
     fault_path_completeness: float = Field(ge=0, le=1)
@@ -259,6 +280,13 @@ class GoldenDiagnosisEvalReport(BaseModel):
             for category in GoldenCaseCategory
         ):
             raise ValueError("golden diagnosis category count cannot exceed its target")
+        # 锚点分母必须能从明细复算：它是解读 root_cause_anchor_hit_rate 的唯一依据，一旦被手工填成
+        # 案例总数，读者就会把"14 条案例的比率"误读成"28 条案例的比率"。
+        anchored_cases = sum(case.root_cause_anchor_hit is not None for case in self.cases)
+        if self.anchored_case_count != anchored_cases:
+            raise ValueError("golden diagnosis anchored_case_count must match case details")
+        if self.anchored_case_count == 0 and self.root_cause_anchor_hit_rate != 1.0:
+            raise ValueError("golden diagnosis empty anchor denominator must report 1.0")
         return self
 
 
@@ -295,6 +323,13 @@ async def evaluate_golden_diagnosis(
         result.root_cause_top1_hit
         for result in case_results
         if result.root_cause_top1_hit is not None
+    ]
+    # 锚点分母独立于文本相等分母：只有声明了锚点的案例进入，因此"知识图还缺这个根因节点"不会被
+    # 计成模型失败。两个比率必须并列上报，永远不能相减或互相替换。
+    anchor_results = [
+        result.root_cause_anchor_hit
+        for result in case_results
+        if result.root_cause_anchor_hit is not None
     ]
     degradation_results = [
         result.safe_degradation_hit
@@ -333,6 +368,8 @@ async def evaluate_golden_diagnosis(
         category_target_counts=GOLDEN_DIAGNOSIS_CATEGORY_TARGETS,
         intent_accuracy=_mean([result.intent_hit for result in case_results]),
         root_cause_top1_hit_rate=_mean(root_results),
+        root_cause_anchor_hit_rate=_mean(anchor_results),
+        anchored_case_count=len(anchor_results),
         necessary_action_coverage=_mean(
             [result.necessary_action_coverage for result in case_results]
         ),
@@ -480,6 +517,33 @@ def score_golden_diagnosis_case(
     )
     claim_count = len(critical_claim_refs)
 
+    # 根因锚点只看 top-1 根因这一条 claim 引用了哪些 `kn_root_cause_*`。之所以能纯离线精确判定，是
+    # 因为 Bundle 的知识节点 evidence_id 由 `app/retrieval/budget.py` 固定生成为 `kn_<node_id>`，一
+    # 条引用就精确编码了知识图节点 ID，不需要再对自然语言根因文本做相等或相似度比较。
+    root_cause_anchors = list(case.allowed_root_cause_anchors)
+    cited_anchors: list[str] = []
+    anchor_hit: bool | None = None
+    if root_cause_anchors:
+        top1_refs = list(report.root_causes[0].evidence_refs) if report.root_causes else []
+        # 锚点必须先通过与关键结论完全相同的两道校验才允许计数：全部引用非悬空，且至少一条落在本次
+        # 实时支撑集合上。否则模型凭空编一个节点 ID，或只堆静态知识而不看本轮 Observation，都能刷出
+        # "命中正确根因"——这个指标就又一次退化成衡量措辞。
+        anchor_claim_valid = (
+            bool(top1_refs)
+            and all(reference in citable_refs for reference in top1_refs)
+            and any(reference in support_refs for reference in top1_refs)
+        )
+        if anchor_claim_valid:
+            anchor_prefix = f"{KNOWLEDGE_EVIDENCE_ID_PREFIX}{ROOT_CAUSE_ANCHOR_NODE_PREFIX}"
+            cited_anchors = list(
+                dict.fromkeys(
+                    reference.removeprefix(KNOWLEDGE_EVIDENCE_ID_PREFIX)
+                    for reference in top1_refs
+                    if reference.startswith(anchor_prefix)
+                )
+            )
+        anchor_hit = bool(set(cited_anchors) & set(root_cause_anchors))
+
     actual_risk = _highest_risk(report.remediation_steps)
     safe_degradation = None
     if not case.allowed_root_causes:
@@ -593,6 +657,9 @@ def score_golden_diagnosis_case(
         ),
         root_cause_top1_hit=root_hit,
         actual_top1_root_cause=top1,
+        root_cause_anchor_hit=anchor_hit,
+        required_root_cause_anchors=root_cause_anchors,
+        cited_root_cause_anchors=cited_anchors,
         observed_evidence_sources=observed_sources,
         missing_evidence_sources=missing_sources,
         evidence_source_coverage=_coverage(case.required_evidence_sources, observed_sources),

@@ -21,8 +21,8 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-PORTFOLIO_EVAL_MANIFEST_CONTRACT_ID = "portfolio-eval-manifest:v23"
-PORTFOLIO_EVAL_RUN_CONTRACT_ID = "portfolio-eval-run:v22"
+PORTFOLIO_EVAL_MANIFEST_CONTRACT_ID = "portfolio-eval-manifest:v24"
+PORTFOLIO_EVAL_RUN_CONTRACT_ID = "portfolio-eval-run:v23"
 DEFAULT_MANIFEST_PATH = Path("data/evals/portfolio_eval_manifest.json")
 _V1_REQUIRED_SUITE_IDS = {
     "graphrag_ablation",
@@ -55,6 +55,7 @@ _REQUIRED_SUITE_IDS_BY_CONTRACT = {
     "portfolio-eval-manifest:v21": _V2_REQUIRED_SUITE_IDS,
     "portfolio-eval-manifest:v22": _V2_REQUIRED_SUITE_IDS,
     "portfolio-eval-manifest:v23": _V2_REQUIRED_SUITE_IDS,
+    "portfolio-eval-manifest:v24": _V2_REQUIRED_SUITE_IDS,
 }
 _GOLDEN_SOURCE_CONTRACT_BY_MANIFEST = {
     "portfolio-eval-manifest:v2": "golden-diagnosis-eval:v1",
@@ -80,6 +81,9 @@ _GOLDEN_SOURCE_CONTRACT_BY_MANIFEST = {
     "portfolio-eval-manifest:v22": "golden-diagnosis-eval:v21",
     # v23 只换引用完整性判定口径（悬空与实时支撑分离），案例集合与其余指标定义保持 v22 语义。
     "portfolio-eval-manifest:v23": "golden-diagnosis-eval:v22",
+    # v24 新增根因锚点命中，它是与文本相等 top1 并列的独立指标：旧指标定义一个字都没改，因此两代
+    # manifest 的 golden_root_cause_top1 数字仍然可以直接对比。
+    "portfolio-eval-manifest:v24": "golden-diagnosis-eval:v23",
 }
 _GOLDEN_COVERAGE_VALUE_BY_MANIFEST = {
     "portfolio-eval-manifest:v2": 0.1786,
@@ -104,6 +108,7 @@ _GOLDEN_COVERAGE_VALUE_BY_MANIFEST = {
     "portfolio-eval-manifest:v21": 0.9643,
     "portfolio-eval-manifest:v22": 1.0,
     "portfolio-eval-manifest:v23": 1.0,
+    "portfolio-eval-manifest:v24": 1.0,
 }
 _GOLDEN_V2_METRIC_IDS = {
     "golden_case_coverage",
@@ -249,6 +254,16 @@ _GOLDEN_REQUIRED_METRIC_IDS_BY_MANIFEST = {
         "golden_realtime_priority_pass",
         "golden_evidence_conflict_safe_resolution",
     },
+    # v24 起 golden_root_cause_anchor 成为必需指标：只发布文本相等的 top1 等于把"报告措辞是否逐字
+    # 命中"当成根因正确性，而锚点是唯一能在自然语言报告上精确判定的口径，必须强制并列出现。
+    "portfolio-eval-manifest:v24": _GOLDEN_V2_METRIC_IDS
+    | {
+        "golden_fault_path_completeness",
+        "golden_history_recall_coverage",
+        "golden_realtime_priority_pass",
+        "golden_evidence_conflict_safe_resolution",
+        "golden_root_cause_anchor",
+    },
 }
 _TEST_TARGET = re.compile(r"^tests/[a-zA-Z0-9_./-]+\.py(?:::[a-zA-Z0-9_\[\]-]+)?$")
 
@@ -377,6 +392,7 @@ class PortfolioEvalManifest(BaseModel):
         "portfolio-eval-manifest:v21",
         "portfolio-eval-manifest:v22",
         "portfolio-eval-manifest:v23",
+        "portfolio-eval-manifest:v24",
     ]
     suites: list[PortfolioSuiteSpec] = Field(min_length=4)
 
@@ -501,7 +517,7 @@ class PortfolioEvalRunReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    contract_id: Literal["portfolio-eval-run:v22"]
+    contract_id: Literal["portfolio-eval-run:v23"]
     manifest_contract_id: Literal[
         "portfolio-eval-manifest:v1",
         "portfolio-eval-manifest:v2",
@@ -526,6 +542,7 @@ class PortfolioEvalRunReport(BaseModel):
         "portfolio-eval-manifest:v21",
         "portfolio-eval-manifest:v22",
         "portfolio-eval-manifest:v23",
+        "portfolio-eval-manifest:v24",
     ]
     metric_kind: Literal["measured"] = "measured"
     suites: list[PortfolioSuiteRun] = Field(min_length=4)

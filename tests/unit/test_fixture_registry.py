@@ -13,9 +13,12 @@ import pytest
 from app.core.fixture_registry import FixtureRegistry, load_golden_cases
 from app.domain.scenarios import GoldenCaseCategory
 from app.domain.tooling import ToolErrorCode, ToolName
+from app.retrieval.models import KnowledgeNodeType
+from app.retrieval.seeds import load_knowledge_seed
 
 FIXTURE_DIRECTORY = Path("data/fixtures/scenarios")
 GOLDEN_CASE_FILE = Path("data/fixtures/golden_cases.json")
+SEED_FILE = Path("data/knowledge/cross_chain_graph.json")
 
 
 def test_all_scenarios_load_and_match_golden_cases() -> None:
@@ -31,7 +34,7 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     assert len(registry) == 18
     assert len(golden_cases) == 28
     assert {case.scenario_id for case in golden_cases} == set(registry.scenario_ids)
-    assert {case.contract_id for case in golden_cases} == {"golden-case:v7"}
+    assert {case.contract_id for case in golden_cases} == {"golden-case:v8"}
     category_counts = {
         category: sum(case.case_category is category for case in golden_cases)
         for category in GoldenCaseCategory
@@ -326,6 +329,33 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     assert watermark_cross_case.allowed_root_causes[0] == "FlashSync 水位线时区错配"
     assert watermark_cross_case.expected_risk_level.value == "high"
     assert len(watermark_cross_case.required_evidence_sources) == 6
+
+
+def test_root_cause_anchors_reference_real_knowledge_graph_root_cause_nodes() -> None:
+    """验证每个根因锚点都是知识种子里真实存在的 ``root_cause`` 节点，且分母固定为十四条。
+
+    锚点判定完全依赖报告引用 ``kn_<node_id>``，节点不存在时该案例永远不可能命中，指标会静默退化
+    成恒零而不是报错。因此把"锚点必须落在种子图上"提到加载期断言：正则只能保证前缀拼写正确，
+    只有跟种子对账才能发现引用了一个尚未建模的故障模式。
+    """
+
+    golden_cases = load_golden_cases(GOLDEN_CASE_FILE)
+    seed = load_knowledge_seed(SEED_FILE)
+    seed_root_cause_ids = {
+        node.node_id for node in seed.nodes if node.node_type is KnowledgeNodeType.ROOT_CAUSE
+    }
+
+    anchored_cases = [case for case in golden_cases if case.allowed_root_cause_anchors]
+    # 分母写成字面量而不是从数据推导：它是 root_cause_anchor_hit_rate 的唯一解读依据，随手给案例
+    # 加锚点会改变已发布比率的含义，必须在这里显式失败并逼着同步文档里的实测数字。
+    assert len(anchored_cases) == 14
+    declared_anchors = {
+        anchor for case in anchored_cases for anchor in case.allowed_root_cause_anchors
+    }
+    assert declared_anchors <= seed_root_cause_ids
+    # 八个种子根因节点全部被锚点覆盖，剩余没有锚点的案例对应的是种子里还没有的故障模式，
+    # 属于已记录的检索缺口而不是评测遗漏。
+    assert declared_anchors == seed_root_cause_ids
 
 
 def test_main_scenario_exercises_all_nine_tool_contracts() -> None:

@@ -1,5 +1,5 @@
 {
-  "contract_id": "portfolio-eval-manifest:v23",
+  "contract_id": "portfolio-eval-manifest:v24",
   "suites": [
     {
       "suite_id": "graphrag_ablation",
@@ -151,7 +151,7 @@
     {
       "suite_id": "golden_diagnosis_baseline",
       "layer": "Golden Case 顶层诊断确定性回归基线",
-      "source_contract_id": "golden-diagnosis-eval:v22",
+      "source_contract_id": "golden-diagnosis-eval:v23",
       "result_document": "docs/golden-diagnosis-eval-results.md",
       "requires_postgres": false,
       "test_targets": [
@@ -190,6 +190,17 @@
           "delta": 0.2,
           "direction": "higher_is_better",
           "note": "二十一条有根因案例进入 Top-1 分母；七条无根因案例另以安全降级衡量。"
+        },
+        {
+          "metric_id": "golden_root_cause_anchor",
+          "label": "当前有锚点子集根因锚点命中率",
+          "control_label": "product_target_minimum",
+          "treatment_label": "measured_scripted_14_anchor_cases",
+          "control_value": 0.8,
+          "treatment_value": 1.0,
+          "delta": 0.2,
+          "direction": "higher_is_better",
+          "note": "十四条案例声明了知识图 root_cause 节点锚点；判定看 Top-1 根因是否引用了对应 kn_root_cause_* 且该结论非悬空并有实时支撑。与文本相等的 golden_root_cause_top1 是两个独立指标，分母不同，不可相减。"
         },
         {
           "metric_id": "golden_necessary_action_coverage",

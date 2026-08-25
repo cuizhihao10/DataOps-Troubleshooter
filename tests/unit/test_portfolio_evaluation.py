@@ -60,8 +60,23 @@ class RecordingPytestExecutor:
         )
 
 
+def _drop_metrics_introduced_after_v23(golden_suite: dict) -> None:
+    """删除 v24 才引入的 Golden 指标，让历史版本兼容测试仍能复用当前 manifest payload。
+
+    v24 之前的 manifest 不认识 ``golden_root_cause_anchor``，只改 contract_id 会先撞上"版本化指标
+    集合"门禁，于是每个兼容测试都在验证同一条无关规则，而不是它自己那条来源或覆盖快照约束。
+    集中在一处删除，新增指标只需改这个函数，而不是逐个改二十多个测试。
+    """
+
+    golden_suite["metrics"] = [
+        metric
+        for metric in golden_suite["metrics"]
+        if metric["metric_id"] != "golden_root_cause_anchor"
+    ]
+
+
 def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -> None:
-    """确认 v23 manifest 精确覆盖五层、十九个指标，并拒绝任意 pytest flag/命令目标。
+    """确认 v24 manifest 精确覆盖五层、二十个指标，并拒绝任意 pytest flag/命令目标。
 
     复制 payload 后把第一 target 改为 ``--collect-only``；Pydantic 必须在执行器之前失败，证明 JSON
     不能把受限 test target 字段变成自由命令入口。
@@ -69,9 +84,9 @@ def test_portfolio_manifest_loads_five_layers_and_rejects_unsafe_test_target() -
 
     manifest = load_portfolio_eval_manifest(MANIFEST_PATH)
 
-    assert manifest.contract_id == "portfolio-eval-manifest:v23"
+    assert manifest.contract_id == "portfolio-eval-manifest:v24"
     assert len(manifest.suites) == 5
-    assert sum(len(suite.metrics) for suite in manifest.suites) == 19
+    assert sum(len(suite.metrics) for suite in manifest.suites) == 20
     assert sum(suite.requires_postgres for suite in manifest.suites) == 2
 
     payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
@@ -111,6 +126,7 @@ def test_portfolio_manifest_v2_requires_the_original_golden_v1_source() -> None:
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v1"
     golden_suite["metrics"] = [
         metric
@@ -162,6 +178,7 @@ def test_portfolio_manifest_v3_preserves_five_case_path_scoring_snapshot() -> No
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v2"
     golden_suite["metrics"] = [
         metric
@@ -203,6 +220,7 @@ def test_portfolio_manifest_v4_preserves_eight_case_category_snapshot() -> None:
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v3"
     coverage = next(
         metric
@@ -242,6 +260,7 @@ def test_portfolio_manifest_v5_preserves_eleven_case_memory_snapshot() -> None:
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v4"
     coverage = next(
         metric
@@ -276,6 +295,7 @@ def test_portfolio_manifest_v6_preserves_twelve_case_conflict_snapshot() -> None
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v5"
     coverage = next(
         metric
@@ -307,6 +327,7 @@ def test_portfolio_manifest_v7_preserves_thirteen_case_lts_bds_snapshot() -> Non
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v6"
     coverage = next(
         metric
@@ -338,6 +359,7 @@ def test_portfolio_manifest_v8_preserves_fourteen_case_flashsync_snapshot() -> N
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v7"
     coverage = next(
         metric
@@ -369,6 +391,7 @@ def test_portfolio_manifest_v9_preserves_fifteen_case_resource_snapshot() -> Non
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v8"
     coverage = next(
         metric
@@ -400,6 +423,7 @@ def test_portfolio_manifest_v10_preserves_sixteen_case_clarification_snapshot() 
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v9"
     coverage = next(
         metric
@@ -432,6 +456,7 @@ def test_portfolio_manifest_v11_preserves_seventeen_case_partial_evidence_snapsh
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v10"
     coverage = next(
         metric
@@ -465,6 +490,7 @@ def test_portfolio_manifest_v12_preserves_eighteen_case_unavailable_snapshot() -
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v11"
     coverage = next(
         metric
@@ -498,6 +524,7 @@ def test_portfolio_manifest_v13_preserves_nineteen_case_lts_graph_snapshot() -> 
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v12"
     coverage = next(
         metric
@@ -526,11 +553,12 @@ def test_portfolio_manifest_v14_preserves_twenty_case_bds_skew_snapshot() -> Non
     """
 
     payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    # 保留当前五层/十九指标结构，只回写来源与覆盖字段，模拟读取实际历史快照。
+    # 保留当前五层/二十指标结构，只回写来源与覆盖字段，模拟读取实际历史快照。
     payload["contract_id"] = "portfolio-eval-manifest:v14"
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v13"
     coverage = next(
         metric
@@ -564,6 +592,7 @@ def test_portfolio_manifest_v15_preserves_twenty_one_case_checkpoint_snapshot() 
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v14"
     coverage = next(
         metric
@@ -596,6 +625,7 @@ def test_portfolio_manifest_v16_preserves_twenty_two_case_schema_snapshot() -> N
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v15"
     coverage = next(
         metric
@@ -628,6 +658,7 @@ def test_portfolio_manifest_v17_preserves_twenty_three_case_schema_propagation_s
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v16"
     coverage = next(
         metric
@@ -660,6 +691,7 @@ def test_portfolio_manifest_v18_preserves_twenty_four_case_checkpoint_snapshot()
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v17"
     coverage = next(
         metric
@@ -692,6 +724,7 @@ def test_portfolio_manifest_v19_preserves_twenty_five_case_skew_snapshot() -> No
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v18"
     coverage = next(
         metric
@@ -724,6 +757,7 @@ def test_portfolio_manifest_v20_preserves_twenty_six_case_throttle_snapshot() ->
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v19"
     coverage = next(
         metric
@@ -756,6 +790,7 @@ def test_portfolio_manifest_v21_preserves_twenty_seven_case_authorization_snapsh
     golden_suite = next(
         suite for suite in payload["suites"] if suite["suite_id"] == "golden_diagnosis_baseline"
     )
+    _drop_metrics_introduced_after_v23(golden_suite)
     golden_suite["source_contract_id"] = "golden-diagnosis-eval:v20"
     coverage = next(
         metric
@@ -780,7 +815,7 @@ def test_complete_portfolio_run_publishes_metrics_only_after_all_suites_pass() -
     """验证完整模式五层通过后报告 complete、run_success 和 all_suites_passed 均为真。
 
     两个 PostgreSQL 命令必须追加内部 `-m postgres`，三个快速层不得追加；所有 passed suite 才携带
-    manifest 指标，十九个指标全量进入本次报告。
+    manifest 指标，二十个指标全量进入本次报告。
     """
 
     manifest = load_portfolio_eval_manifest(MANIFEST_PATH)
@@ -797,7 +832,7 @@ def test_complete_portfolio_run_publishes_metrics_only_after_all_suites_pass() -
     assert report.complete is True
     assert report.all_suites_passed is True
     assert all(suite.status is SuiteExecutionStatus.PASSED for suite in report.suites)
-    assert sum(len(suite.metrics) for suite in report.suites) == 19
+    assert sum(len(suite.metrics) for suite in report.suites) == 20
     assert sum("postgres" in command for command in executor.commands) == 2
     assert all(command[1:4] == ["-m", "pytest", "-q"] for command in executor.commands)
 

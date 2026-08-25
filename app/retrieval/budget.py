@@ -27,6 +27,11 @@ from app.retrieval.models import (
     ScoredGraphPath,
 )
 
+# 知识节点引用前缀单列成常量，因为它已经不只是显示格式：`kn_<node_id>` 让一条报告引用精确编码知识图
+# 节点 ID，评测侧因此可以离线反解出"报告引用了哪个 root_cause 节点"。两处各写一份字面量会在改前缀的
+# 那天让反解静默失配，指标退化成恒为 0 而不是报错。
+KNOWLEDGE_EVIDENCE_ID_PREFIX = "kn_"
+
 
 def build_evidence_bundle(
     result: GraphRetrievalResult,
@@ -170,7 +175,7 @@ def _bundle_node(
     """
 
     return BundledKnowledgeNode(
-        evidence_id=f"kn_{node.node_id}",
+        evidence_id=f"{KNOWLEDGE_EVIDENCE_ID_PREFIX}{node.node_id}",
         node_id=node.node_id,
         node_type=node.node_type,
         name=node.name,

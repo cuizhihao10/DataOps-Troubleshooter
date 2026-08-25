@@ -98,9 +98,11 @@ from app.retrieval.models import (
     GRAPH_RETRIEVAL_CONTRACT_ID,
     EvidenceBundleBudget,
     HybridScoringWeights,
+    KnowledgeNodeType,
 )
 from app.retrieval.repository import PostgresGraphRepository
 from app.retrieval.reranker import create_reranker
+from app.retrieval.seeds import load_knowledge_seed
 
 
 class ContractVersions(BaseModel):
@@ -466,6 +468,24 @@ async def lifespan(app: FastAPI):
     missing_scenarios = sorted({case.scenario_id for case in golden_cases} - scenario_ids)
     if missing_scenarios:
         raise ValueError(f"golden cases reference unknown scenarios: {missing_scenarios}")
+
+    # 根因锚点必须真的是知识图里的 root_cause 节点：锚点一旦拼错就永远不可能被任何报告引用命中，
+    # 于是 `root_cause_anchor_hit_rate` 会静默退化成恒为 0 的假指标——那正是这条契约要修掉的毛病。
+    root_cause_node_ids = {
+        node.node_id
+        for node in load_knowledge_seed(settings.knowledge_seed_file).nodes
+        if node.node_type is KnowledgeNodeType.ROOT_CAUSE
+    }
+    unknown_anchors = sorted(
+        {
+            anchor
+            for case in golden_cases
+            for anchor in case.allowed_root_cause_anchors
+            if anchor not in root_cause_node_ids
+        }
+    )
+    if unknown_anchors:
+        raise ValueError(f"golden cases reference unknown root cause anchors: {unknown_anchors}")
 
     # Prompt 文本和 ID 必须成对校验，否则评测记录的版本无法代表实际执行内容。
     if settings.planner_prompt_id != PLANNER_PROMPT_ID:
