@@ -1896,7 +1896,7 @@ if run.status in TERMINAL_RUN_STATUSES:       # 3. 用第 1 步的快照判定
 
 ```
 run_stream_poll_seconds (0.5) < run_stream_keepalive_seconds (15) < run_stream_max_seconds (300)
-run_stream_max_seconds > react_total_timeout_seconds (150)
+run_stream_max_seconds > react_total_timeout_seconds (240)
 ```
 
 最后一条最容易被忽略：如果最长寿命不大于 ReAct 总超时，一个**只是跑满预算的正常 run** 会在结束前
@@ -2090,6 +2090,89 @@ ReAct 会引入"审计驱动取证"的新回路，它需要自己的步数预算
 `auditor-impact-eval:v1`（第 16.3 节）是这条契约的量化验证：三条语义缺陷案例分别在"只有规则"和
 "规则 + Auditor"两种配置下运行，归因增量拦截、危险残留与安全处置。当前成绩来自确定性脚本替身的
 小样本，**不能外推为真实 LLM 的审计质量**；这条限制必须保留在报告和任何对外材料里。
+
+## 23. 模型调用的有界瞬时重试
+
+### 23.1 为什么这一条是实测逼出来的，而不是照抄最佳实践
+
+第二次真实模型 Golden 冒烟给出了一段很干净的证据：同一个端点在约 92 秒内成功完成 6 次调用
+（单次 8.5–22.9 秒），随后连续 4 次返回 HTTP 错误，每次只用 0.26–0.63 秒就被驳回。响应时间差两个
+数量级，说明后 4 次根本没打到模型，是网关按配额窗口直接拒绝的。后果不是"慢一点"：两个案例以
+`planner_provider_error` 终结，其中一个连第一个工具都没执行，`necessary_action_coverage` 直接归零。
+
+在此之前，`PlannerProviderError.retryable` 已经存在但没有任何消费者——它只是一个诊断属性。所以这
+不是"发现了 bug"，而是一个被文档记录过的**有意推迟**：`model-transient-retry:v1` 把那个标记接上了
+真正的控制流。
+
+### 23.2 重试为什么放在包装层，而不是 Provider 内部
+
+`app/agents/retrying.py` 提供 `RetryingPlannerChatProvider` / `RetryingAuditorChatProvider` 两个包装器，
+它们实现同样的 `complete` 协议，Agent 适配层察觉不到差别。真正的原因是保住两条既有边界：
+
+1. **具体 Provider 继续保持 `max_retries=0`，一次 `complete` 只发一次网络请求。** 因此每次尝试仍各自
+   产生一条 `model-call-metric:v1` 记录和一个 `model_call` span——"第一次 429、第二次成功"在遥测里是
+   两条可归因的记录，而不是被平均掉的一条。如果把重试塞进 `OpenAICompatiblePlannerProvider.complete`
+   里，SDK 层的隐藏重试问题会以我们自己的形式复现：延迟统计会把退避等待算进模型耗时，错误率会
+   凭空下降，而"配额窗口被打满"这个最需要被看见的事实会消失。
+2. **连接池所有权不变。** 包装器不持有 HTTP 资源，也**不提供 `aclose`**；`PlannerRuntime` /
+   `AuditorRuntime` 仍持有具体 Provider，lifespan 退出时关闭的还是那一层。
+
+与 MCP 侧 `McpToolExecutor` 的策略刻意对称：同一套"只重复供应商已判定为瞬时的失败"的语义，
+在工具边界和模型边界各实现一次，而不是抽象成一个跨层的通用重试装饰器。
+
+### 23.3 什么会被重试，什么绝不重试
+
+| 失败 | `retryable` | 行为 |
+|---|---|---|
+| HTTP 429、5xx | true | 退避后重发同一批消息 |
+| 超时、连接失败 | true | 同上 |
+| HTTP 401/403 | **false** | 一次即上抛，且完全不进入退避 |
+| Schema 不合法（`PlannerOutputValidationError`） | 不适用 | 兄弟异常，重试层看不见；归 `repair_count` |
+| 结构化 refusal | 不适用 | 同上，重发规避安全判断是不允许的 |
+
+认证失败被显式排除：重复投递坏凭据既救不回调用，也会加速触发网关封禁。**瞬时重试与 Schema 修复
+是两套预算，故意不合并**——传输失败不该消耗格式修复预算，格式错误也不该触发退避等待。
+
+重试逐次**原样重发**同一批消息。重试成立的前提正是"这次调用没有产生任何副作用"；改写内容会让第二
+次尝试变成语义不同的请求，也就把重试悄悄变成了第二轮决策。
+
+### 23.4 预算：为什么 `react_total_timeout_seconds` 必须同步放宽到 240 秒
+
+`TransientRetryPolicy` 默认 `max_attempts=2`、退避 1s 起、倍数 2、上限 8s。上限被 Schema 钉在三次
+尝试：实测的配额窗口打满形态重试更多次救不回来，只会把单次决策的最坏耗时推出墙钟预算。也**不加
+随机抖动**——本系统的并发度是单个诊断 run，抖动只会让实测耗时不可复现。
+
+`worst_case_added_seconds(single_call_timeout)` 把"重试要多花多少时间"变成一个可校验的数字：
+重试次数 × 单次超时 + 有界退避和。默认配置下是 `1 × 30 + 1 = 31` 秒。`Settings._validate_transient_retry()`
+据此在启动阶段强制 `react_total_timeout_seconds ≥ chat_timeout_seconds + worst_case_added_seconds`，
+默认值因此从 150 秒放宽到 **240 秒**。
+
+这条校验存在的理由，就是防止一个只做一半的加固：如果墙钟预算不变，第二次尝试会在退避途中被
+`asyncio.timeout` 掐断，run 以 `total_timeout` 收口——等于**加了重试又不让它生效**，而且把
+"预算够但时间不够"伪装成了正常终止。反过来，预算耗尽时包装层**原样上抛**最后一次失败，ReAct 循环
+照旧以 `planner_provider_error` 收口；审计侧照旧走第 3 级不可用降级，不消耗返工预算。重试只争取让
+审计真的跑起来，**绝不因为网络失败而放行报告**。
+
+三个旋钮：`DATAOPS_CHAT_TRANSIENT_RETRY_ATTEMPTS`（默认 2）、
+`DATAOPS_CHAT_TRANSIENT_RETRY_BACKOFF_SECONDS`（默认 1）、
+`DATAOPS_CHAT_TRANSIENT_RETRY_MAX_BACKOFF_SECONDS`（默认 8）。两个角色共用同一份策略是有意的：
+它们打同一个端点、共享同一份配额，分别配置只会让"到底哪一层在退避"变得难以推断。`/health` 的
+`limits.chat_transient_retry_attempts` 与 `tool_retry_count` 并列公开，部署者不读代码也能确认模型侧和
+工具侧是两套独立预算。
+
+### 23.5 验证方式
+
+```powershell
+.venv\Scripts\python -m ruff check .
+.venv\Scripts\python -m pytest -q tests/unit/test_model_transient_retry.py tests/unit/test_planner_factory.py
+.venv\Scripts\python -m pytest -q tests/integration/test_health.py
+```
+
+单元测试注入记录型 `sleep` 与脚本化 Provider 替身，因此可以在毫秒内断言退避序列恰好是 `[1.0]` 或
+`[1.0, 2.0]`、认证失败一次即抛且 `delays == []`、预算耗尽后上抛的仍是**最后那个**
+`PlannerProviderError` 实例。工厂测试断言 Agent 拿到的是包装器、而 `runtime.provider` 仍是具体
+Provider——这条接线是重试能生效的唯一途径。
+
 
 
 

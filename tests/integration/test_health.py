@@ -65,16 +65,19 @@ async def test_health_reports_validated_contract_baseline() -> None:
         "run_trace": "run-trace:v1",
         "api_auth": "api-auth:v1",
         "run_stream": "run-stream:v1",
+        "model_transient_retry": "model-transient-retry:v1",
     }
     assert payload["limits"] == {
         # 步数预算严格大于 Golden 集里最长的必需工具集（6 个），给真实模型留出试探余量；墙钟预算
-        # 随之放宽到 150s，因为实测 Planner 单次 8–15s，8 步最坏要四次决策加工具与检索时间。
+        # 随之放宽到 240s，因为实测 Planner 单次 8–15s，8 步最坏要四次决策加工具与检索时间，并且
+        # 还要能容纳一次瞬时重试的最坏开销（一次超时 30s 加 1s 退避）。
         "max_react_steps": 8,
         "max_parallel_tool_actions": 3,
-        "react_total_timeout_seconds": 150.0,
+        "react_total_timeout_seconds": 240.0,
         "max_graph_hops": 2,
         "max_audit_revisions": 1,
         "tool_retry_count": 1,
+        "chat_transient_retry_attempts": 2,
     }
     assert payload["planner"] == {
         "status": "disabled",

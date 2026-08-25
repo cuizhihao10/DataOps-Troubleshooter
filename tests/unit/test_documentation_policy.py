@@ -67,6 +67,7 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/api/security.py"),
     Path("app/api/streaming.py"),
     Path("app/core/http_identity.py"),
+    Path("app/agents/retrying.py"),
     Path("mcp_server/repository.py"),
 )
 REQUIRED_GUIDE_SECTIONS = (
@@ -91,6 +92,7 @@ REQUIRED_GUIDE_SECTIONS = (
     "资源 API 鉴权、限流与降级边界",
     "运行状态 SSE 增量推流",
     "双 Agent 契约：否决权、返工预算与降级阶梯",
+    "模型调用的有界瞬时重试",
 )
 
 
@@ -319,6 +321,34 @@ def test_dual_agent_documents_pin_veto_asymmetry_revision_budget_and_degrade_lad
     assert "从不读 `revision_instructions`" in guide
     assert "未经放行的表述不应以" in guide
     assert "不能外推为真实 LLM 的审计质量" in guide
+
+
+def test_model_transient_retry_documents_pin_wrapper_boundary_and_budget_guard() -> None:
+    """确认瞬时重试文档锁定"包装层不改遥测粒度"、认证不重试与墙钟预算校验三条边界。
+
+    重试最容易退化成"顺手在 Provider 里加个 for 循环"：那样每次尝试会被合并成一条遥测，延迟统计
+    把退避等待算进模型耗时，错误率凭空下降，而"配额窗口被打满"这个最该被看见的事实会消失。同样地，
+    只要文档不写清预算校验，后续维护者会把 react_total_timeout_seconds 调回去，第二次尝试就会在
+    退避途中被掐断——等于加了重试又不让它生效。
+    """
+
+    guide = Path("docs/implementation-guide.md").read_text(encoding="utf-8")
+    contracts = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
+
+    assert "model-transient-retry:v1" in guide
+    assert "model-transient-retry:v1" in contracts
+    assert "模型调用的有界瞬时重试" in guide
+    assert "一次 `complete` 只发一次网络请求" in contracts
+    assert "两条可归因的记录" in guide
+    assert "401/403 认证失败被显式排除" in contracts
+    assert "瞬时重试与 Schema 修复是两套预算" in contracts
+    assert "worst_case_added_seconds" in guide
+    assert "react_total_timeout_seconds ≥ chat_timeout_seconds + worst_case_added_seconds" in (
+        contracts
+    )
+    assert "等于**加了重试又不让它生效**" in guide
+    assert "绝不因为网络失败而放行报告" in contracts
+    assert "MODEL_TRANSIENT_RETRY_CONTRACT_ID" in contracts
 
 
 def test_live_golden_status_document_separates_runnable_contract_from_measurement() -> None:

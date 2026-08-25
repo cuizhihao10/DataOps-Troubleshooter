@@ -1174,3 +1174,13 @@ span 必须与 run 终态、事件、checkpoint 在同一事务提交，不允�
 
 浏览器 `EventSource` 无法设置请求头，因此 `api-auth:v1` 切到 `bearer` 后推流一定被前缀中间件拒绝。这是被接受的限制而不是缺陷：`/health` 的 `stream.available_under_auth` 如实报告它，前端退回轮询是正常路径。契约版本写在 `app/core/settings.py` 的 `run_stream_contract_id` 与 `app/api/streaming.py` 的 `RUN_STREAM_CONTRACT_ID`，由 lifespan 逐项比对，不一致就拒绝启动。
 
+### model-transient-retry:v1：模型调用瞬时重试的边界与预算
+
+`model-transient-retry:v1` 只覆盖**传输层瞬时失败**，不改变任何 Agent 语义。重试实现为包装层（`app/agents/retrying.py` 的 `RetryingPlannerChatProvider` / `RetryingAuditorChatProvider`），因此两个 `openai-compatible-*:v1` Provider 契约仍然如实描述"一次 `complete` 只发一次网络请求、`max_retries=0`"，遥测里每次尝试也仍是独立一条 `model-call-metric:v1` 记录与独立 `model_call` span——重试不得被平均成一次调用，否则延迟统计会把退避等待算进模型耗时、错误率会凭空下降。包装层不持有 HTTP 资源，不提供 `aclose`；连接池所有权仍属被包装的具体 Provider。
+
+准入条件只有一个：异常是 `PlannerProviderError` / `AuditorProviderError` 且 `retryable` 为真（429、5xx、超时、连接失败）。**401/403 认证失败被显式排除**，一次即上抛且不进入退避。`PlannerOutputValidationError`、`AuditorOutputValidationError` 与两个 refusal 异常是兄弟异常而不是子类，因此结构上不可能被重试层吞掉：**瞬时重试与 Schema 修复是两套预算**，格式错误仍只归 Agent 适配层的 `repair_count`，重发也不得用于规避供应商的安全拒绝。重试逐次原样重发同一批消息，禁止改写内容——改写会让第二次尝试变成语义不同的请求。
+
+`TransientRetryPolicy` 被 Pydantic 限制在 `max_attempts ≤ 3`，退避按倍数增长并被 `max_backoff_seconds` 截断，且不加随机抖动（并发度是单个 run，抖动只会让实测耗时不可复现）。默认 `attempts=2`、`1s` 起、倍数 `2`、上限 `8s`。`worst_case_added_seconds(single_call_timeout)` = 重试次数 × 单次超时 + 有界退避和；`Settings._validate_transient_retry()` 在启动阶段强制 `react_total_timeout_seconds ≥ chat_timeout_seconds + worst_case_added_seconds`，默认值因此为 240 秒。缺这条校验就等于加了重试又不让它生效：第二次尝试会在退避途中被 `asyncio.timeout` 掐断，run 以 `total_timeout` 收口，把"预算够但时间不够"伪装成正常终止。
+
+预算耗尽后原样上抛最后一次失败：ReAct 循环照旧以 `planner_provider_error` 收口，报告工作流照旧走第 3 级 `auditor_unavailable` 降级且不消耗返工预算。重试只争取让调用真的发生，**绝不因为网络失败而放行报告**。契约版本写在 `app/core/settings.py` 的 `model_transient_retry_contract_id` 与 `app/agents/retrying.py` 的 `MODEL_TRANSIENT_RETRY_CONTRACT_ID`，由 lifespan 逐项比对，不一致就拒绝启动。
+

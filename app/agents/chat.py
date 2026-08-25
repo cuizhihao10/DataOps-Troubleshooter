@@ -79,7 +79,9 @@ class OpenAICompatiblePlannerProvider:
     """通过官方异步 SDK 调用可配置 base_url 的 Chat Completions Structured Outputs。
 
     SDK 的 Pydantic parse helper 自动生成 strict JSON Schema并解析响应，减少手写 Schema 漂移。
-    `max_retries=0` 禁止隐藏网络重试；超时、连接和状态码在此转换为稳定领域错误。
+    `max_retries=0` 禁止隐藏网络重试；超时、连接和状态码在此转换为稳定领域错误。瞬时重试由
+    `RetryingPlannerChatProvider` 在外层负责，本层保持"一次 complete 一次网络请求"，因此每次尝试
+    都各自产生一条 model-call-metric 记录而不会被合并统计。
     """
 
     def __init__(

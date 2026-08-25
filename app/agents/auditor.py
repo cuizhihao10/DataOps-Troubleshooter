@@ -96,8 +96,9 @@ class AuditorRefusalError(AuditorAgentError):
 class AuditorProviderError(AuditorAgentError):
     """表示 Auditor 的超时、连接、认证、限流或服务端失败。
 
-    Provider 禁用 SDK 隐式重试，retryable 仅作为诊断属性；本次工作流不会因网络失败放行报告，
-    也不会把 URL、响应体或 API key 写入公开摘要。
+    Provider 仍禁用 SDK 隐式重试，瞬时失败由 `RetryingAuditorChatProvider` 在外层按有界预算重试；
+    预算耗尽后本异常照原样抛出，工作流依旧不会因网络失败放行报告，也不会把 URL、响应体或
+    API key 写入公开摘要。
     """
 
     def __init__(
@@ -107,10 +108,10 @@ class AuditorProviderError(AuditorAgentError):
         public_summary: str,
         retryable: bool,
     ) -> None:
-        """初始化供应商无关错误分类、净化摘要和未来可重试提示。
+        """初始化供应商无关错误分类、净化摘要和是否值得重试的标记。
 
-        retryable 不触发当前请求的第二次网络尝试，以免与总预算叠加；调用方只用 stop_reason 决定
-        安全降级，error_code 用于受控日志或指标。
+        retryable 由重试包装层消费；一旦预算耗尽，调用方仍只用 stop_reason 决定安全降级，
+        error_code 用于受控日志或指标。
         """
 
         super().__init__(stop_reason="auditor_provider_error", public_summary=public_summary)

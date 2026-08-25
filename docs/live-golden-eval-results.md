@@ -27,26 +27,30 @@
 固定条件：同一份 `golden-case:v7` 三案例、同一 `bge-m3:v1` 向量空间、同一 `auditor-report:v2`、同一
 `gpt-5.6-sol`；唯一变量是 Planner Prompt 版本与报告返工实现。
 
-| 指标 | Run B `planner-react:v6` | Run C `planner-react:v7` | Run D `planner-react:v8` + 定位修订 |
-|---|---|---|---|
-| `intent_accuracy` | 1.000 | 1.000 | 1.000 |
-| `necessary_action_coverage` | 0.944 | 0.778 | **1.000** |
-| `evidence_source_coverage` | 0.944 | 0.778 | **1.000** |
-| `fault_path_completeness` | 0.000 | 0.167 | **0.667** |
-| `stop_reason_hit_rate` | 0.000 | 0.667 | 0.667 |
-| `risk_level_hit_rate` | 0.333 | 0.333 | **0.667** |
-| `accepted_report_rate` | 0.333 | 0.667 | 0.667 |
-| `root_cause_top1_hit_rate` | 0.000 | 0.000 | 0.000 |
-| `citation_completeness` | 1.000 | 1.000 | 1.000（v22 口径） |
-| `unsupported_critical_claim_rate` | 0.000 | 0.000 | 0.000（v22 口径） |
-| `duplicate_action_rate` | 0.000 | 0.000 | 0.000 |
-| `tool_attempt_success_rate` | 0.917 | 0.818 | 0.857 |
-| `safe_degradation_rate` | 1.000 | 1.000 | 1.000 |
-| `evidence_conflict_safe_resolution_rate` | 1.000 | 1.000 | 1.000 |
-| `history_*` 五项与 `forbidden_*` 两项 | 全部满足 | 全部满足 | 全部满足 |
-| 模型调用次数 | 15 | 15 | **12** |
-| 总 token | 135,685 | 151,199 | **126,670** |
-| 三案例总耗时 | 275.6 s | 209.7 s | **175.2 s** |
+| 指标 | Run B `planner-react:v6` | Run C `planner-react:v7` | Run D `planner-react:v8` + 定位修订 | Run F `model-transient-retry:v1` |
+|---|---|---|---|---|
+| `intent_accuracy` | 1.000 | 1.000 | 1.000 | 1.000 |
+| `necessary_action_coverage` | 0.944 | 0.778 | **1.000** | 0.833 |
+| `evidence_source_coverage` | 0.944 | 0.778 | **1.000** | 0.833 |
+| `fault_path_completeness` | 0.000 | 0.167 | **0.667** | 0.667 |
+| `stop_reason_hit_rate` | 0.000 | 0.667 | 0.667 | 0.667 |
+| `risk_level_hit_rate` | 0.333 | 0.333 | **0.667** | 0.667 |
+| `accepted_report_rate` | 0.333 | 0.667 | 0.667 | 0.667 |
+| `root_cause_top1_hit_rate` | 0.000 | 0.000 | 0.000 | 0.000 |
+| `citation_completeness` | 1.000 | 1.000 | 1.000（v22 口径） | 1.000（v22 原生） |
+| `unsupported_critical_claim_rate` | 0.000 | 0.000 | 0.000（v22 口径） | 0.000（v22 原生） |
+| `duplicate_action_rate` | 0.000 | 0.000 | 0.000 | 0.000 |
+| `tool_attempt_success_rate` | 0.917 | 0.818 | 0.857 | **1.000** |
+| `safe_degradation_rate` | 1.000 | 1.000 | 1.000 | 1.000 |
+| `evidence_conflict_safe_resolution_rate` | 1.000 | 1.000 | 1.000 | 1.000 |
+| `history_*` 五项与 `forbidden_*` 两项 | 全部满足 | 全部满足 | 全部满足 | 全部满足 |
+| 模型调用次数 | 15 | 15 | **12** | 13 |
+| 总 token | 135,685 | 151,199 | **126,670** | 189,996 |
+| 三案例总耗时 | 275.6 s | 209.7 s | **175.2 s** | 227.2 s |
+
+Run F 的两项指标标注"v22 原生"是因为它们**来自新的模型调用直接评分**，不是离线重评分：这是
+`golden-diagnosis-eval:v22` 拆分悬空/实时支撑两条规则之后的第一次真实模型运行，两项引用指标在真实
+报告上原生复现了 1.000 / 0.000。
 
 两个引用指标标注"v22 口径"是因为它们来自**同一份 Run D 持久化运行结果的离线重评分**，不是新的模型
 调用：Run D 原始报告在 `golden-diagnosis-eval:v21` 下读到 `citation_completeness=0.875`、
@@ -76,6 +80,42 @@ Planner/Auditor 延迟就已经占满预算，因此不能宣称已达成。并�
 Golden 要求系统不给根因、公开冲突并要求人工复核，`safe_degradation_hit=True`、
 `evidence_conflict_safe_resolution=True` 都已命中，`forbidden_conflict_root_hit_count=0`。因此
 `accepted_report_rate=0.667` 在这个三案例集合上就是上限，不应被当作三分之一报告不合格。
+
+## Run E 与 Run F：端点限流暴露的重试缺口
+
+Run E 与 Run F 之间只有一处代码变化：`model-transient-retry:v1`（实现见实现指南第 23 节）。
+
+**Run E 不发布聚合成绩**，因为它测到的是端点配额而不是模型质量：同一端点在约 92 s 内成功完成 6 次
+调用（单次 8.5–22.9 s），随后连续 4 次返回 HTTP 错误，每次只用 0.26–0.63 s 就被驳回——响应时间差两个
+数量级，说明后 4 次根本没打到模型。两个案例因此以 `planner_provider_error` 终结，其中一个连第一个
+工具都没执行，`necessary_action_coverage` 直接归零。把 0.667 / 0.333 这类数字作为模型成绩发布会违反
+本仓库的评测诚实性要求，因此只保留这段成因记录。触发原因也如实记录：Run E 与前一次因运行器缺陷
+崩溃的运行相隔不到 4 分钟，几乎肯定是短时间内两轮完整评测打满了配额窗口。
+
+Run F 是加上重试后的干净运行（实测值，单调时钟）：13 次调用**全部 `succeeded`**，
+`output_invalid_call_count=0`、`unreported_usage_call_count=0`、`tool_attempt_success_rate=1.000`。
+Planner 八次调用 5.9–23.1 s，Auditor 五次调用 3.5–33.8 s。
+
+必须诚实说明的一点：**Run F 没有触发任何重试**。本次运行没有出现瞬时失败，因此这份报告只能证明
+"加了重试之后链路仍然正常"，**不能作为"重试在生产端点上成功救回了调用"的证据**。重试路径的行为
+由单元测试用注入 sleep 与脚本化 Provider 覆盖（退避序列、认证失败不重试、预算耗尽原样上抛），真实
+端点上的救回效果需要下一次恰好遇到 429 的运行才能测量。
+
+Run F 的三案例总耗时 227.2 s（约 75.7 s/案例），比 Run D 的 175.2 s（约 58 s/案例）更慢，token 也从
+126,670 升到 189,996。这**不是重试造成的**（没有重试发生），而是端点单次延迟的自然波动加上本轮
+Auditor 一次 33.8 s 的长调用；同时也再次说明 P95 ≤ 30 s 仍未达成。`necessary_action_coverage` 从
+Run D 的 1.000 回落到 0.833，缺口全部来自跨组件案例只执行了 3 个工具中的一半（缺
+`lts.get_dependency_topology`、`bds.get_table_info`、`flashsync.get_sync_log`），并以
+`invalid_evidence_reference` 收口——这属于同一 Prompt 下的运行间波动，三案例样本无法区分它与真实回退，
+不应被解读为 `planner-react:v8` 退化。
+
+## Run F 逐案例判定（实测值）
+
+| 案例 | 执行工具数 | 缺失必要工具 | 停止原因 | 风险等级 |
+|---|---|---|---|---|
+| `golden_lts_invalid_partition_parameter_single` | 3 | 无 | `evidence_sufficient`（命中） | 命中 |
+| `golden_cross_lts_bds_flashsync_watermark_timezone_mismatch` | 3 | 3 个 | `invalid_evidence_reference`（未命中） | 未命中 |
+| `golden_bds_conflicting_partition_evidence` | 3 | 无 | `evidence_conflict_requires_manual_review`（命中） | 命中 |
 
 ## Run D 相对 Run C 的两项结构性修复
 
@@ -171,7 +211,8 @@ $env:DATAOPS_CHAT_API_KEY='本地密钥，不写入文件'
 ## 当前不能宣称什么
 
 - 不能把三案例 smoke 外推到 28 条或生产故障分布；`target_coverage_complete=false` 必须一起给出。
-- 不能宣称达成 P95 ≤ 30 s：实测三案例平均端到端约 58 s，该目标仍是设计目标值。
+- 不能宣称达成 P95 ≤ 30 s：实测三案例平均端到端 Run D 约 58 s、Run F 约 75.7 s，该目标仍是设计目标值。
+- 不能把 Run F 说成"重试已在真实端点验证"：那次运行没有出现瞬时失败，重试路径一次都没执行。
 - 不能把 `root_cause_top1_hit_rate=0` 说成"模型找不到根因"，也不能把它悄悄改口径后当成提升。
 - 不能把 MockTransport 的固定 15 token 响应当作模型成本实测。
 - 不能把确定性 Golden runner 的 28/28 满分当作 Planner/Auditor 质量。

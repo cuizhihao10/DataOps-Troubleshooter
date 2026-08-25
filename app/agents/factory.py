@@ -16,6 +16,7 @@ from app.agents.auditor_prompting import AuditorPromptRenderer
 from app.agents.chat import OpenAICompatiblePlannerProvider
 from app.agents.planner_adapter import OpenAICompatiblePlannerAgent
 from app.agents.prompting import PlannerPromptRenderer
+from app.agents.retrying import RetryingAuditorChatProvider, RetryingPlannerChatProvider
 from app.core.settings import Settings
 
 
@@ -87,7 +88,12 @@ def create_planner_runtime(
         client=client,
     )
     agent = OpenAICompatiblePlannerAgent(
-        provider=provider,
+        # Agent 只看到重试包装器，因此瞬时 429 不会直接变成 planner_provider_error 终态；而
+        # runtime 仍持有具体 Provider，连接池关闭责任不因为多一层包装而失去归属。
+        provider=RetryingPlannerChatProvider(
+            provider,
+            policy=settings.transient_retry_policy(),
+        ),
         renderer=renderer,
         repair_count=settings.planner_schema_repair_count,
     )
@@ -123,7 +129,12 @@ def create_auditor_runtime(
         client=client,
     )
     agent = OpenAICompatibleAuditorAgent(
-        provider=provider,
+        # 审计侧的重试收益更高：AuditorAgentError 会让报告立即 degraded 且不消耗返工预算，因此
+        # 一次瞬时 429 原本就足以让"审计不可用"变成终态，而重试只争取让审计真的跑起来。
+        provider=RetryingAuditorChatProvider(
+            provider,
+            policy=settings.transient_retry_policy(),
+        ),
         renderer=renderer,
         repair_count=settings.auditor_schema_repair_count,
     )

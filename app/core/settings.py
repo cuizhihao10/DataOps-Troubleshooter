@@ -13,6 +13,7 @@ from typing import Literal
 from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.agents.retrying import TransientRetryPolicy
 from app.domain.planner import MAX_PARALLEL_TOOL_ACTIONS
 from app.retrieval.documents import DocumentScoringWeights
 from app.retrieval.embeddings import (
@@ -53,9 +54,11 @@ class Settings(BaseSettings):
     # 步数预算必须严格大于 Golden 集里最长的必需工具集（跨组件案例 required_tools 最多 6 个），否则
     # 系统被设计成必然拿不到满覆盖：真实模型总要花一到两步试探，零余量下每次试探都直接换掉一个必需
     # 取证。首次真实模型评测就撞上了这一点——跨组件案例执行满 6 步后以 react_budget_exhausted 结束，
-    # 却漏掉 bds.get_table_info。墙钟预算同步放宽到 150s：实测 Planner 单次 8–15s，8 步在最坏情况下
-    # 要四次决策加上工具与检索时间，仍按 60s 会把"预算够但时间不够"伪装成正常终止。
-    react_total_timeout_seconds: float = Field(default=150, gt=0, le=600)
+    # 却漏掉 bds.get_table_info。墙钟预算随后从 60s 放宽到 240s：实测 Planner 单次 8–18s，8 步最坏
+    # 要四次决策加上工具与检索时间，仍按 60s 会把"预算够但时间不够"伪装成正常终止；240s 还必须容得下
+    # 至少一次瞬时重试的最坏开销（见下面 chat_transient_retry_* 与 model_transient_retry 校验），
+    # 否则一个本可恢复的 429 会被预算截断成 total_timeout，等于加了重试又不让它生效。
+    react_total_timeout_seconds: float = Field(default=240, gt=0, le=600)
     max_graph_hops: int = Field(default=2, ge=1, le=2)
     max_audit_revisions: int = Field(default=1, ge=0, le=1)
     tool_timeout_seconds: float = Field(default=5, gt=0, le=60)
@@ -85,6 +88,14 @@ class Settings(BaseSettings):
     auditor_timeout_seconds: float = Field(default=90, gt=0, le=300)
     planner_schema_repair_count: int = Field(default=1, ge=0, le=1)
     auditor_schema_repair_count: int = Field(default=1, ge=0, le=1)
+    # 瞬时重试与 Schema 修复是两套预算，故意分开：修复预算处理"模型输出格式不对"，重试预算处理
+    # "请求根本没打到模型"。第二次真实模型评测实测到必须有它——新端点在约 92s 内成功 6 次调用后
+    # 连续 4 次返回 HTTP 错误（每次 250–630ms 即被驳回），两个案例因此以 planner_provider_error
+    # 终结，其中一个连第一个工具都没执行，必要 Action 覆盖率直接归零。默认只重试一次：实测那种
+    # 配额窗口打满的形态重试更多次也救不回来，只会把单次决策的最坏耗时推出墙钟预算。
+    chat_transient_retry_attempts: int = Field(default=2, ge=1, le=3)
+    chat_transient_retry_backoff_seconds: float = Field(default=1.0, gt=0, le=30)
+    chat_transient_retry_max_backoff_seconds: float = Field(default=8.0, gt=0, le=60)
 
     # 离线默认仍是确定性基线，使无凭据环境可以真实跑通 pgvector；生产部署改成 bge-m3:v1 并配
     # 套 1024 维，两者通过 provider_id 隔离，绝不会在同一次 cosine 排序里混算。
@@ -149,6 +160,9 @@ class Settings(BaseSettings):
     planner_provider_contract_id: str = "openai-compatible-planner:v1"
     auditor_prompt_id: str = "auditor-report:v2"
     auditor_provider_contract_id: str = "openai-compatible-auditor:v1"
+    # 重试是包装层而不是 Provider 内部行为，因此单列一个契约 ID：两个 openai-compatible-*:v1
+    # 仍然如实描述"一次 complete 只发一次网络请求"，遥测里每次尝试也仍是独立一条记录。
+    model_transient_retry_contract_id: str = "model-transient-retry:v1"
     mcp_contract_id: str = "mcp-tools:v1"
     golden_case_contract_id: str = "golden-case:v7"
     capabilities_contract_id: str = "runtime-capabilities:v1"
@@ -198,7 +212,40 @@ class Settings(BaseSettings):
         self._validate_run_stream()
         self._validate_retrieval_providers()
         self._validate_api_security()
+        self._validate_transient_retry()
         return self
+
+    def transient_retry_policy(self) -> TransientRetryPolicy:
+        """把三个重试旋钮投影成 Provider 包装层使用的策略对象。
+
+        与 `document_scoring_weights` 同样的模式：配置只保存标量，策略语义集中在一个受校验的值
+        对象里，避免"退避倍数"这类判断散落在工厂和测试两处。倍数固定为 2.0 而不开放配置——真实
+        故障窗口按分钟计，能调的是起始退避和上限，再多一个旋钮只会让最坏耗时更难算。
+        """
+
+        return TransientRetryPolicy(
+            max_attempts=self.chat_transient_retry_attempts,
+            initial_backoff_seconds=self.chat_transient_retry_backoff_seconds,
+            max_backoff_seconds=self.chat_transient_retry_max_backoff_seconds,
+        )
+
+    def _validate_transient_retry(self) -> None:
+        """确认 ReAct 墙钟预算真的容得下一次瞬时重试的最坏开销。
+
+        只加重试而不留预算是自欺欺人：Planner 跑在 `react_total_timeout_seconds` 内，若预算连
+        "一次跑满超时的首次尝试 + 全部重试与退避"都装不下，一个本可恢复的 429 会被外层
+        `asyncio.timeout` 截断成 total_timeout，指标上看不出重试曾经生效。这里用 Planner 超时而不是
+        Auditor 超时，因为 Auditor 不在这个预算内。
+        """
+
+        policy = self.transient_retry_policy()
+        worst_case = self.chat_timeout_seconds + policy.worst_case_added_seconds(
+            self.chat_timeout_seconds
+        )
+        if self.react_total_timeout_seconds < worst_case:
+            raise ValueError(
+                "react_total_timeout_seconds must cover one planner call plus its transient retries"
+            )
 
     def _validate_run_stream(self) -> None:
         """校验推流的轮询/心跳/寿命三者有序，且单连接能覆盖一次完整 ReAct 预算。

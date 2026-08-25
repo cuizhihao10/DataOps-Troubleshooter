@@ -25,6 +25,7 @@ from app.agents.prompts import (
     load_auditor_prompt,
     load_planner_prompt,
 )
+from app.agents.retrying import MODEL_TRANSIENT_RETRY_CONTRACT_ID
 from app.api.security import (
     API_AUTH_CONTRACT_ID,
     PROTECTED_PATH_PREFIXES,
@@ -132,6 +133,7 @@ class ContractVersions(BaseModel):
     run_trace: str
     api_auth: str
     run_stream: str
+    model_transient_retry: str
 
 
 class RuntimeLimits(BaseModel):
@@ -151,6 +153,9 @@ class RuntimeLimits(BaseModel):
     max_graph_hops: int
     max_audit_revisions: int
     tool_retry_count: int
+    # 模型侧重试次数与 tool_retry_count 并列公开：两者都是"瞬时失败最多再试几次"，但预算互相独立，
+    # 只看工具侧会误判一个 429 是否会被直接判成 planner_provider_error 终态。
+    chat_transient_retry_attempts: int
 
 
 class RetrievalConfiguration(BaseModel):
@@ -475,6 +480,8 @@ async def lifespan(app: FastAPI):
         raise ValueError("Auditor prompt must not be empty")
     if settings.auditor_provider_contract_id != AUDITOR_PROVIDER_CONTRACT_ID:
         raise ValueError("configured Auditor provider contract ID does not match the package")
+    if settings.model_transient_retry_contract_id != MODEL_TRANSIENT_RETRY_CONTRACT_ID:
+        raise ValueError("configured model transient retry contract ID does not match the package")
     if settings.graphrag_retrieval_contract_id != GRAPH_RETRIEVAL_CONTRACT_ID:
         raise ValueError("configured GraphRAG retrieval contract ID does not match the package")
     if settings.graphrag_evidence_bundle_contract_id != GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID:
@@ -861,6 +868,7 @@ async def health(request: Request) -> HealthResponse:
             run_trace=settings.run_trace_contract_id,
             api_auth=settings.api_auth_contract_id,
             run_stream=settings.run_stream_contract_id,
+            model_transient_retry=settings.model_transient_retry_contract_id,
         ),
         limits=RuntimeLimits(
             max_react_steps=settings.max_react_steps,
@@ -869,6 +877,7 @@ async def health(request: Request) -> HealthResponse:
             max_graph_hops=settings.max_graph_hops,
             max_audit_revisions=settings.max_audit_revisions,
             tool_retry_count=settings.tool_retry_count,
+            chat_transient_retry_attempts=settings.chat_transient_retry_attempts,
         ),
         planner=PlannerConfiguration(
             status=("disabled" if request.app.state.planner_runtime is None else "configured"),

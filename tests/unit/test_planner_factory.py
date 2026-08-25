@@ -10,6 +10,10 @@ from openai import AsyncOpenAI
 from pydantic import ValidationError
 
 from app.agents.factory import create_auditor_runtime, create_planner_runtime
+from app.agents.retrying import (
+    RetryingAuditorChatProvider,
+    RetryingPlannerChatProvider,
+)
 from app.core.settings import Settings
 
 
@@ -150,6 +154,37 @@ async def test_planner_and_auditor_receive_independent_request_timeouts() -> Non
     try:
         assert planner.provider._client.timeout == settings.chat_timeout_seconds
         assert auditor.provider._client.timeout == settings.auditor_timeout_seconds
+    finally:
+        await planner.aclose()
+        await auditor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_factory_wraps_both_agents_in_transient_retry_but_keeps_pool_ownership() -> None:
+    """验证工厂给两个 Agent 都接上重试包装器，而 runtime 仍持有具体 Provider 以便关闭连接池。
+
+    这条接线是重试能生效的唯一途径：Agent 只依赖协议，若工厂直接把具体 Provider 交给它，
+    一次瞬时 429 就会立刻变成 planner_provider_error 终态。同时断言 runtime.provider 不是包装器，
+    因为包装层不持有 HTTP 资源，aclose 责任必须留在真正创建了 AsyncOpenAI 的那一层。
+    """
+
+    settings = Settings(
+        _env_file=None,
+        chat_provider="openai-compatible",
+        chat_base_url="https://example.test/v1",
+        chat_api_key="local_test_secret",
+    )
+
+    planner = create_planner_runtime(settings)
+    auditor = create_auditor_runtime(settings)
+    assert planner is not None
+    assert auditor is not None
+    try:
+        assert isinstance(planner.agent._provider, RetryingPlannerChatProvider)
+        assert isinstance(auditor.agent._provider, RetryingAuditorChatProvider)
+        assert planner.agent._provider._inner is planner.provider
+        assert auditor.agent._provider._inner is auditor.provider
+        assert planner.agent._provider._policy == settings.transient_retry_policy()
     finally:
         await planner.aclose()
         await auditor.aclose()

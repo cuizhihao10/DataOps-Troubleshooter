@@ -90,8 +90,9 @@ class PlannerRefusalError(PlannerAgentError):
 class PlannerProviderError(PlannerAgentError):
     """表示 OpenAI-compatible 传输、认证、限流或服务端失败。
 
-    error_code 提供供应商无关分类，retryable 仅供未来运行策略评估；本切片不在 Agent 内自动重试，
-    避免 SDK 隐式重试与总墙钟预算叠加。公开摘要不包含 URL 查询、响应体或凭据。
+    error_code 提供供应商无关分类；retryable 标记 429/5xx、超时与连接失败，认证失败被显式排除。
+    Provider 自身仍然一次 complete 只发一次请求，重试由 `RetryingPlannerChatProvider` 在外层按
+    有界预算与指数退避执行，因此每次尝试各自留下独立遥测。公开摘要不包含 URL 查询、响应体或凭据。
     """
 
     def __init__(
@@ -103,8 +104,8 @@ class PlannerProviderError(PlannerAgentError):
     ) -> None:
         """初始化稳定分类、可公开摘要和是否值得稍后重试的标记。
 
-        所有供应商异常先在 Provider 边界映射后才进入本对象；`retryable` 不会触发当前请求内的
-        自动循环，只表明外部调度器可在新的受控运行中考虑重试。
+        所有供应商异常先在 Provider 边界映射后才进入本对象；`retryable` 由重试包装层消费，预算
+        耗尽或标记为假时原样上抛，让 ReAct 循环照旧以 planner_provider_error 收口。
         """
 
         super().__init__(
