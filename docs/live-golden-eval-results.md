@@ -101,6 +101,23 @@ Planner 八次调用 5.9–23.1 s，Auditor 五次调用 3.5–33.8 s。
 由单元测试用注入 sleep 与脚本化 Provider 覆盖（退避序列、认证失败不重试、预算耗尽原样上抛），真实
 端点上的救回效果需要下一次恰好遇到 429 的运行才能测量。
 
+## 被丢弃的 `gpt-5.6-terra` 探测运行：退避在真实端点上执行过，但没救回任何调用
+
+同一端点还提供 `gpt-5.6-terra`，单次 trivial Structured Outputs 调用只要 6.3 s（`gpt-5.6-sol` 同类
+调用 18.0 s），因此值得试一次能否压低端到端延迟。**这次运行的聚合指标一律不发布**，理由与 Run E
+相同：三案例全部以 `planner_provider_error` 收口、执行工具数为 0，测到的是网关容量而不是模型质量。
+
+它仍然贡献了一条 Run F 拿不到的实测事实：**12 条模型调用记录恰好是 3 案例 ×（Planner 2 次 + Auditor
+2 次）**，即每个逻辑调用都真的按 `max_attempts=2` 重发了一次，且两次尝试各自落成独立的
+`model-call-metric:v1` 记录（10 次 `http_error`、2 次 `connection_error`，单次 1.5–12.3 s）。这证明
+退避包装层在真实端点上会执行、并且保持了"一次尝试一条可归因记录"的遥测粒度；但两次尝试都失败，
+所以**"重试成功救回调用"依旧没有真实端点证据**。
+
+失败原因经单独探测确认为网关侧资源未分配，而不是 Schema 被拒：terra 在最小 `{ok: bool}` Schema 与
+完整 `PlannerDecision` strict Schema 下都返回 `HTTP 500 / E41001 Waiting for service resources to be
+allocated`，同一时刻同一密钥的 `gpt-5.6-sol` 调用正常返回。因此结论是 terra 在本工作负载下不可用，
+固定模型继续保持 `gpt-5.6-sol`；这也说明它那次 6.3 s 的快只是偶然命中了已分配实例。
+
 Run F 的三案例总耗时 227.2 s（约 75.7 s/案例），比 Run D 的 175.2 s（约 58 s/案例）更慢，token 也从
 126,670 升到 189,996。这**不是重试造成的**（没有重试发生），而是端点单次延迟的自然波动加上本轮
 Auditor 一次 33.8 s 的长调用；同时也再次说明 P95 ≤ 30 s 仍未达成。`necessary_action_coverage` 从
@@ -212,7 +229,8 @@ $env:DATAOPS_CHAT_API_KEY='本地密钥，不写入文件'
 
 - 不能把三案例 smoke 外推到 28 条或生产故障分布；`target_coverage_complete=false` 必须一起给出。
 - 不能宣称达成 P95 ≤ 30 s：实测三案例平均端到端 Run D 约 58 s、Run F 约 75.7 s，该目标仍是设计目标值。
-- 不能把 Run F 说成"重试已在真实端点验证"：那次运行没有出现瞬时失败，重试路径一次都没执行。
+- 不能把 Run F 说成"重试已在真实端点验证"：那次运行没有出现瞬时失败，重试路径一次都没执行。被丢弃的
+  terra 探测运行只证明退避会执行且遥测粒度正确，两次尝试都失败，救回效果仍未测量。
 - 不能把 `root_cause_top1_hit_rate=0` 说成"模型找不到根因"，也不能把它悄悄改口径后当成提升。
 - 不能把 MockTransport 的固定 15 token 响应当作模型成本实测。
 - 不能把确定性 Golden runner 的 28/28 满分当作 Planner/Auditor 质量。
