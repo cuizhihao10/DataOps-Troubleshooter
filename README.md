@@ -13,7 +13,7 @@
 - 提供 `GET /health`，返回契约版本、运行预算和已加载场景。
 - 通过官方 MCP Python SDK 和 stdio 协议暴露产品规定的 9 个只读工具，并将返回标准化为 Evidence 与 ToolEvent。
 - 瞬时错误最多自动重试一次，每次尝试均保留独立 ToolEvent；空结果和权限错误不会重试。
-- PostgreSQL + pgvector 保存 `graph-seed:v11` 的 54 个显式知识节点、71 条关系边和带 Provider 溯源的向量，支持全文/向量混合召回、五项可解释评分与 1–2 跳路径扩展。
+- PostgreSQL + pgvector 保存 `graph-seed:v12` 的 54 个显式知识节点、71 条关系边和带 Provider 溯源的向量，支持全文/向量混合召回、五项可解释评分与 1–2 跳路径扩展。方案类节点显式声明 `remediation_risk_level`，报告里的处置风险等级只能来自这条人工声明，不从动作文本猜、也没有默认值。
 - Evidence Bundle 按 UTF-8 JSON 字节、节点数和路径数三重预算原子选择证据，并返回稳定 `kn_*` / `path_*` 引用与 omitted IDs。
 - 版本控制的消融案例真实比较 vector-only 与 vector+graph；当前实测根因命中持平，必要因果链完整率由 0.0 提升至 1.0。
 - `document-retrieval:v1` 以文档 RAG 作为第二条知识通道：`document-seed:v1` 的 5 份脱敏 Runbook/SOP/复盘/FAQ 按标题层级切片入库，切片而不是文档是检索与引用单元，引用 ID `dc_*` 同时充当 `document_chunks` 主键与报告脚注。

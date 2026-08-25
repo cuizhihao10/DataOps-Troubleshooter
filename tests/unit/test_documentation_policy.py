@@ -208,8 +208,14 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
     assert "model-call-metric:v1" in guide
     assert "ContextVar" in guide
     assert "docs/frontend-design.md" in guide
-    assert "graph-seed:v11" in guide
+    assert "graph-seed:v12" in guide
     assert "54 节点/71 边" in guide
+    # 处置风险等级改由知识声明后，"为什么没有默认值"必须留在文档里：一旦有人补一个 medium 兜底，
+    # RiskLevel.HIGH 会重新变成死代码，而指标看起来仍然正常。
+    assert "处置风险等级由知识声明，而不是由报告层猜" in guide
+    assert "remediation_risk_level" in guide
+    assert "ck_knowledge_nodes_remediation_risk_level" in guide
+    assert "20260716_0010" in guide
     assert "authorization_value_exposed=false" in guide
     assert "WATERMARK_TIMEZONE_MISMATCH" in guide
     assert "明确保留为接入点" in guide
@@ -384,6 +390,9 @@ def test_live_golden_status_document_separates_runnable_contract_from_measuremen
     assert "root_cause_anchor_hit_rate" in report
     assert "anchored_case_count=2" in report
     assert "这不是把 0.000 变成 0.500 的提升" in report
+    # 风险等级实现约束已解除，但旧实测值必须原样保留：解除上限不是一次新的测量。
+    assert "实现约束已在 `graph-seed:v12` 解除" in report
+    assert "上表的 0.667 仍然是最后一次实测值，不得改写" in report
 
 
 
@@ -539,7 +548,7 @@ def test_golden_diagnosis_report_documents_scoring_and_twenty_eight_case_boundar
     assert "attempt 1/2" in report
     assert "lts_parameter_validation_failure" in report
     assert "INVALID_PARTITION_DATE" in report
-    assert "graph-seed:v11" in report
+    assert "graph-seed:v12" in report
     assert "bds_data_skew" in report
     assert "DATA_SKEW_DETECTED" in report
     assert "9.6 倍热点分桶" in report
@@ -585,7 +594,11 @@ def test_prompt_contract_versions_budgeted_retrieval_inputs() -> None:
     prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
 
     assert "graphrag-retrieval:v3" in prompt_contract
-    assert "graphrag-evidence-bundle:v2" in prompt_contract
+    assert "graphrag-evidence-bundle:v3" in prompt_contract
+    # v2→v3 的唯一原因就是这个字段；文档必须写清"当且仅当方案类节点声明"，否则读者会以为
+    # 任何节点都能给报告指定风险等级。
+    assert "remediation_risk_level" in prompt_contract
+    assert "既不允许缺声明时静默退回 `medium`" in prompt_contract
     assert "document-retrieval:v1" in prompt_contract
     assert "路径只有在其全部节点、边和来源能一起进入预算" in prompt_contract
     assert "truncated=true" in prompt_contract
@@ -781,7 +794,7 @@ def test_diagnosis_resource_contract_documents_persistence_events_and_failure_se
     # 让下一次改动把"衡量措辞"重新伪装成"衡量正确性"。
     assert "allowed_root_cause_anchors" in prompt_contract
     assert "KNOWLEDGE_EVIDENCE_ID_PREFIX" in prompt_contract
-    assert "都是 `graph-seed:v11` 里真实存在的 `root_cause` 节点" in prompt_contract
+    assert "都是 `graph-seed:v12` 里真实存在的 `root_cause` 节点" in prompt_contract
     assert "14 条声明锚点案例对 21 条有根因案例" in prompt_contract
     assert "subprocess.run(shell=False)" in prompt_contract
     assert "failed、skipped 或 blocked 必须隐藏 metrics" in prompt_contract
@@ -810,9 +823,9 @@ def test_ablation_report_labels_measured_values_and_honest_zero_gain() -> None:
     assert "根因节点命中 | 1 | 1 | 0" in report
     assert "必要有序链路完整率 | 0.0 | 1.0 | +1.0" in report
     assert "path_4f6638ec28f7073d" in report
-    assert "graph-seed:v11" in report
+    assert "graph-seed:v12" in report
     assert "54 个节点、71 条边" in report
-    assert "5658 字节" in report
+    assert "5876 字节" in report
     assert "7 个去重节点" in report
     assert "5 个节点和 4 条路径" in report
     assert "LTS 参数校验失败 partition_date" in report

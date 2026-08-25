@@ -12,6 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.domain.models import RiskLevel
 from app.retrieval.documents import BundledDocumentChunk
 from app.retrieval.scoring import (
     RetrievalChannel,
@@ -20,11 +21,12 @@ from app.retrieval.scoring import (
 )
 
 GRAPH_RETRIEVAL_CONTRACT_ID = "graphrag-retrieval:v3"
-GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID = "graphrag-evidence-bundle:v2"
+GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID = "graphrag-evidence-bundle:v3"
 
 __all__ = [
     "GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID",
     "GRAPH_RETRIEVAL_CONTRACT_ID",
+    "REMEDIATION_KNOWLEDGE_NODE_TYPES",
     "BundledGraphPath",
     "BundledKnowledgeNode",
     "EvidenceBundleBudget",
@@ -61,6 +63,32 @@ class KnowledgeNodeType(StrEnum):
     SOLUTION = "solution"
     CASE = "case"
     SOP = "sop"
+
+
+# 只有方案类节点描述"要对生产做什么"，因此只有它们需要（也只有它们允许）声明执行风险等级。
+# 把范围写成显式集合而不是"有值就用"，是为了让 component/symptom 这类事实节点无法夹带一个
+# 会被报告层当成控制语义的字段：风险等级决定报告是否要求审批与回滚演练，不能来自任意节点。
+REMEDIATION_KNOWLEDGE_NODE_TYPES = frozenset(
+    {KnowledgeNodeType.SOLUTION, KnowledgeNodeType.SOP}
+)
+
+
+def validate_remediation_risk_declaration(
+    node_type: KnowledgeNodeType,
+    remediation_risk_level: RiskLevel | None,
+) -> None:
+    """校验风险等级"当且仅当"由方案类节点声明，供知识节点与 Bundle 节点共用同一条规则。
+
+    双向都必须显式失败：方案节点缺声明时，报告层只能退回硬编码默认值，于是"高风险操作"永远
+    产生不出来（这正是 `risk_level_hit_rate` 曾被实现卡住上限的原因）；非方案节点带声明时，
+    一个事实节点就能悄悄抬高报告风险等级。两侧共用一个函数保证种子与 Prompt 上下文口径一致。
+    """
+
+    is_remediation = node_type in REMEDIATION_KNOWLEDGE_NODE_TYPES
+    if is_remediation and remediation_risk_level is None:
+        raise ValueError("solution and sop nodes must declare remediation_risk_level")
+    if not is_remediation and remediation_risk_level is not None:
+        raise ValueError("only solution and sop nodes may declare remediation_risk_level")
 
 
 class KnowledgeRelationType(StrEnum):
@@ -138,9 +166,22 @@ class KnowledgeNode(BaseModel):
     source_id: str = Field(min_length=1, max_length=200)
     source_span: str = Field(min_length=1, max_length=2000)
     reliability: float = Field(default=1, ge=0, le=1)
+    remediation_risk_level: RiskLevel | None = None
     embedding: list[float] | None = None
     embedding_provider: str | None = Field(default=None, min_length=1, max_length=100)
     embedding_dimensions: int | None = Field(default=None, ge=8, le=4096)
+
+    @model_validator(mode="after")
+    def validate_remediation_risk_scope(self) -> KnowledgeNode:
+        """要求方案类节点声明执行风险等级，并禁止其他节点类型携带该字段。
+
+        风险等级由人工知识声明而不是由报告层猜测：`app/reporting/draft.py` 明确不从动作文本嗅探
+        关键词，否则一句自然语言改写就能改变"是否需要审批和回滚演练"这类控制语义。校验放在种子
+        载入边界，新增方案节点时缺声明会立刻失败，而不是静默沿用一个不可能产出高风险的默认值。
+        """
+
+        validate_remediation_risk_declaration(self.node_type, self.remediation_risk_level)
+        return self
 
     @model_validator(mode="after")
     def validate_embedding_metadata(self) -> KnowledgeNode:
@@ -382,6 +423,8 @@ class BundledKnowledgeNode(BaseModel):
 
     Bundle 只保留 Planner/Auditor 需要的名称、正文、来源跨度、可靠性和最高检索分；embedding
     派生数组、别名和数据库状态不会注入 Prompt。`kn_<node_id>` 可直接进入 evidence_refs。
+    方案类节点额外携带人工声明的执行风险等级，因为报告层的修复建议风险必须来自知识声明而不是
+    文本推断；非方案节点带该字段会被拒绝，避免事实节点抬高报告风险等级。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -394,7 +437,19 @@ class BundledKnowledgeNode(BaseModel):
     source_id: str = Field(min_length=1, max_length=200)
     source_span: str = Field(min_length=1, max_length=2000)
     reliability: float = Field(ge=0, le=1)
+    remediation_risk_level: RiskLevel | None = None
     retrieval_score: float = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_remediation_risk_scope(self) -> BundledKnowledgeNode:
+        """在注入上下文的紧凑节点上复用与知识节点完全相同的风险声明范围规则。
+
+        Bundle 是报告层实际读取的对象，如果只在种子侧校验，任何绕过种子直接构造 Bundle 的路径
+        （测试替身、缓存反序列化）都能让方案节点失去风险声明，报告风险等级随即退回默认值。
+        """
+
+        validate_remediation_risk_declaration(self.node_type, self.remediation_risk_level)
+        return self
 
 
 class BundledGraphPath(BaseModel):
@@ -431,7 +486,7 @@ class GraphEvidenceBundle(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    contract_id: Literal["graphrag-evidence-bundle:v2"] = GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID
+    contract_id: Literal["graphrag-evidence-bundle:v3"] = GRAPH_EVIDENCE_BUNDLE_CONTRACT_ID
     retrieval_contract_id: Literal["graphrag-retrieval:v3"] = GRAPH_RETRIEVAL_CONTRACT_ID
     query: str = Field(min_length=1, max_length=2000)
     retrieval_mode: RetrievalMode

@@ -61,6 +61,11 @@ class PostgresGraphRepository:
                 "source_id": node.source_id,
                 "source_span": node.source_span,
                 "reliability": node.reliability,
+                "remediation_risk_level": (
+                    node.remediation_risk_level.value
+                    if node.remediation_risk_level is not None
+                    else None
+                ),
                 "embedding": node.embedding,
                 "embedding_provider": node.embedding_provider,
                 "embedding_dimensions": node.embedding_dimensions,
@@ -161,6 +166,7 @@ class PostgresGraphRepository:
                     source_id,
                     source_span,
                     reliability,
+                    remediation_risk_level,
                     ts_rank(
                         to_tsvector(
                             'simple',
@@ -377,6 +383,7 @@ def _node_from_mapping(mapping) -> KnowledgeNode:
         source_id=mapping["source_id"],
         source_span=mapping["source_span"],
         reliability=mapping["reliability"],
+        remediation_risk_level=mapping["remediation_risk_level"],
     )
 
 
@@ -396,6 +403,7 @@ def _node_from_record(record: KnowledgeNodeRecord) -> KnowledgeNode:
         source_id=record.source_id,
         source_span=record.source_span,
         reliability=record.reliability,
+        remediation_risk_level=record.remediation_risk_level,
     )
 
 

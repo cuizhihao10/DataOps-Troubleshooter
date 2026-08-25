@@ -159,12 +159,13 @@ def _build_fault_chain(
 def _build_remediation_steps(
     evidence_bundle: GraphEvidenceBundle | None,
 ) -> list[RemediationStep]:
-    """从已召回 solution/SOP 节点与运维文档步骤小节生成中风险人工建议，否则生成只读检查步骤。
+    """从已召回 solution/SOP 节点与运维文档步骤小节生成人工建议，否则生成只读检查步骤。
 
-    知识节点内容保持原文并引用自身 evidence_id，文档切片补充"步骤写在哪一节"的可执行细节并引用
-    `dc_*`；两类来源都标记 medium，明确需审批、可回滚和验证，但绝不声称系统已执行。图节点排在
-    文档之前，因为节点是人工归纳过的方案摘要，文档切片是更长的原文。没有任何方案证据时返回 low
-    风险的只读核对，避免编造具体写操作。
+    知识节点内容保持原文并引用自身 evidence_id，风险等级直接采用该节点声明的
+    `remediation_risk_level`；文档切片补充"步骤写在哪一节"的可执行细节并引用 `dc_*`，因为切片是
+    原文摘录而没有声明字段，只能固定为 medium。两类来源都明确需审批、可回滚和验证，但绝不声称
+    系统已执行。图节点排在文档之前，因为节点是人工归纳过的方案摘要，文档切片是更长的原文。
+    没有任何方案证据时返回 low 风险的只读核对，避免编造具体写操作。
     """
 
     solution_nodes = []
@@ -195,11 +196,13 @@ def _build_remediation_steps(
 
     steps: list[RemediationStep] = []
     for order, node in enumerate(solution_nodes, start=1):
+        # Bundle 的模型校验保证 solution/sop 一定带声明，因此这里不需要（也不应该）兜底默认值：
+        # 一旦出现 None 就说明证据来源绕过了校验，宁可 Pydantic 立刻拒绝也不要静默降成 medium。
         steps.append(
             RemediationStep(
                 order=order,
                 action=node.content,
-                risk_level=RiskLevel.MEDIUM,
+                risk_level=node.remediation_risk_level,
                 evidence_refs=[node.evidence_id],
                 prerequisites=["先在隔离或合成环境复核该 SOP 与本次实时 Observation 一致。"],
                 rollback="若验证失败，停止后续步骤并恢复变更前配置或数据快照。",

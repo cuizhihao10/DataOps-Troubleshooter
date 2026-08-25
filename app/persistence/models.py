@@ -73,6 +73,12 @@ class KnowledgeNodeRecord(Base):
             "embedding_dimensions >= 8 AND vector_dims(embedding) = embedding_dimensions)",
             name="ck_knowledge_nodes_embedding_metadata",
         ),
+        CheckConstraint(
+            "(node_type IN ('solution','sop') AND remediation_risk_level IN "
+            "('low','medium','high')) OR "
+            "(node_type NOT IN ('solution','sop') AND remediation_risk_level IS NULL)",
+            name="ck_knowledge_nodes_remediation_risk_level",
+        ),
         Index("ix_knowledge_nodes_type", "node_type"),
         Index("ix_knowledge_nodes_source", "source_id"),
         Index(
@@ -90,6 +96,9 @@ class KnowledgeNodeRecord(Base):
     source_id: Mapped[str] = mapped_column(String(200), nullable=False)
     source_span: Mapped[str] = mapped_column(Text, nullable=False)
     reliability: Mapped[float] = mapped_column(Float, nullable=False, default=1)
+    # 只有 solution/sop 行允许非空：CheckConstraint 让"方案缺风险声明"和"事实节点夹带风险"
+    # 两种污染都无法进入表，即使有人绕过 Pydantic 直接写库。
+    remediation_risk_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(), nullable=True)
     embedding_provider: Mapped[str | None] = mapped_column(String(100), nullable=True)
     embedding_dimensions: Mapped[int | None] = mapped_column(Integer, nullable=True)

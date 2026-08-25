@@ -119,6 +119,7 @@ def _bundle() -> GraphEvidenceBundle:
                 source_id="synthetic_sop_wait",
                 source_span="合成 SOP 第 1 段",
                 reliability=0.8,
+                remediation_risk_level=RiskLevel.MEDIUM,
                 retrieval_score=0.75,
             )
         ],
@@ -179,6 +180,61 @@ def test_deterministic_builder_uses_only_supported_claims_and_cited_graph_conten
         "path_0123456789abcdef",
         "kn_solution_wait",
     ]
+
+
+def test_declared_high_risk_solution_node_reaches_the_report_risk_level() -> None:
+    """验证高风险处置等级由知识声明驱动，能真正穿过生产报告路径而不是被硬编码成 medium。
+
+    这条断言修补的是一个曾经存在的实现上限：`_build_remediation_steps` 曾把所有知识方案固定为
+    medium，于是 `RiskLevel.HIGH` 在生产路径上永远不可达，`derive_report_risks` 的高风险分支是
+    死代码，Golden 案例声明的 high 期望也永远不可能命中。测试同时检查报告级风险摘要升级为
+    "必须完成证据复核、审批、备份和回滚演练"，因为等级只在字段里正确、文案仍说"仅供人工评审"
+    的话，读报告的人拿到的仍是中风险指引。
+    """
+
+    bundle = _bundle()
+    high_risk_bundle = bundle.model_copy(
+        update={
+            "selected_nodes": [
+                bundle.selected_nodes[0].model_copy(
+                    update={"remediation_risk_level": RiskLevel.HIGH}
+                )
+            ]
+        }
+    )
+
+    report = DeterministicReportBuilder().build(_state(), evidence_bundle=high_risk_bundle)
+
+    assert report.remediation_steps[0].risk_level is RiskLevel.HIGH
+    assert report.remediation_steps[0].evidence_refs == ["kn_solution_wait"]
+    assert report.risks == [
+        "包含高风险人工操作，必须完成证据复核、审批、备份和回滚演练。",
+    ]
+
+
+def test_bundle_rejects_missing_or_out_of_scope_remediation_risk_declaration() -> None:
+    """验证方案节点缺风险声明与事实节点夹带风险声明两个方向都在 Bundle 边界被拒绝。
+
+    双向校验是这条控制语义的结构性保证：缺声明时报告层没有兜底默认值可用，必须显式失败而不是
+    静默退回 medium；反向如果允许 symptom/component 之类的事实节点声明风险，任何一条被召回的
+    事实证据都能抬高整份报告的风险等级，而它根本不描述"要对生产做什么"。
+    """
+
+    node = _bundle().selected_nodes[0]
+
+    with pytest.raises(ValidationError, match="must declare remediation_risk_level"):
+        BundledKnowledgeNode(
+            **node.model_dump(exclude={"remediation_risk_level"}),
+        )
+    with pytest.raises(ValidationError, match="only solution and sop nodes"):
+        BundledKnowledgeNode(
+            **{
+                **node.model_dump(),
+                "evidence_id": "kn_symptom_wait",
+                "node_id": "symptom_wait",
+                "node_type": KnowledgeNodeType.SYMPTOM,
+            }
+        )
 
 
 def test_policy_vetoes_valid_but_semantically_unsupported_root_cause() -> None:

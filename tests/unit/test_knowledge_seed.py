@@ -29,7 +29,7 @@ def test_curated_seed_uses_approved_node_and_relation_contracts() -> None:
 
     bundle = load_knowledge_seed(SEED_FILE)
 
-    assert bundle.seed_version == "graph-seed:v11"
+    assert bundle.seed_version == "graph-seed:v12"
     assert len(bundle.nodes) == 54
     assert len(bundle.edges) == 71
     assert {node.node_type for node in bundle.nodes} <= set(KnowledgeNodeType)

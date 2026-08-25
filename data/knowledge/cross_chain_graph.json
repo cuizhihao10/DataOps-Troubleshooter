@@ -1,5 +1,5 @@
 {
-  "seed_version": "graph-seed:v11",
+  "seed_version": "graph-seed:v12",
   "source_id": "synthetic_cross_chain_knowledge_v11",
   "nodes": [
     {
@@ -121,6 +121,7 @@
       "source_id": "synthetic_cross_chain_knowledge_v1",
       "source_span": "确认冲突范围、备份差异记录、按变更流程处理重复键并验证同步位点。",
       "reliability": 1.0,
+      "remediation_risk_level": "medium",
       "embedding": null
     },
     {
@@ -154,6 +155,7 @@
       "source_id": "synthetic_cross_chain_knowledge_v2",
       "source_span": "修正前先核对参数 Schema 和渲染结果，避免直接重跑放大配置错误。",
       "reliability": 1.0,
+      "remediation_risk_level": "medium",
       "embedding": null
     },
     {
@@ -187,6 +189,7 @@
       "source_id": "synthetic_cross_chain_knowledge_v3",
       "source_span": "处理倾斜应先验证热点，再受控调整分区策略并复核结果，不能直接扩大全局资源。",
       "reliability": 1.0,
+      "remediation_risk_level": "medium",
       "embedding": null
     },
     {
@@ -220,6 +223,7 @@
       "source_id": "synthetic_cross_chain_knowledge_v4",
       "source_span": "位点恢复可能重复写入或遗漏数据，必须备份、验证幂等性并受控重放。",
       "reliability": 1.0,
+      "remediation_risk_level": "high",
       "embedding": null
     },
     {
@@ -253,6 +257,7 @@
       "source_id": "synthetic_cross_chain_knowledge_v5",
       "source_span": "映射更新必须先做兼容性和预览验证，再受控回放并核对一致性。",
       "reliability": 1.0,
+      "remediation_risk_level": "medium",
       "embedding": null
     },
     {
@@ -440,6 +445,7 @@
       "source_id": "synthetic_cross_chain_knowledge_v9",
       "source_span": "只提供人工复核、限速回放和结果核验建议，不自动修改配额或写入生产目标。",
       "reliability": 1.0,
+      "remediation_risk_level": "medium",
       "embedding": null
     },
     {
@@ -517,6 +523,7 @@
       "source_id": "synthetic_cross_chain_knowledge_v10",
       "source_span": "方案只描述安全流程、验证和回滚边界，不生成、存储或传输授权值。",
       "reliability": 1.0,
+      "remediation_risk_level": "high",
       "embedding": null
     },
     {
@@ -594,6 +601,7 @@
       "source_id": "synthetic_cross_chain_knowledge_v11",
       "source_span": "只提供人工校准、边界验证、小批量回补和回滚建议，不自动修改水位线或写入生产目标。",
       "reliability": 1.0,
+      "remediation_risk_level": "high",
       "embedding": null
     }
   ],

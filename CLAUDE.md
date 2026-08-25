@@ -104,5 +104,5 @@ AuditedDiagnosisWorkflow (audited-diagnosis-workflow:v2, app/orchestration/diagn
 
 ## 数据库迁移
 
-Alembic 链是线性单 head：`0001 → 0002 → 0003 → 0004 → 20260716_0005(session_checkpoints) → 20260716_0006(diagnosis_worker) → 20260716_0007 → 20260716_0008(documents) → 20260716_0009(run_trace_spans)`。注意 `20260716_0005_diagnosis_worker.py` 的文件名与它内部的 `revision = "20260716_0006"` 不一致，按 revision 值而不是文件名判断顺序。Docker 启动命令自带 `alembic upgrade head && python -m app.persistence.seed`。
+Alembic 链是线性单 head：`0001 → 0002 → 0003 → 0004 → 20260716_0005(session_checkpoints) → 20260716_0006(diagnosis_worker) → 20260716_0007 → 20260716_0008(documents) → 20260716_0009(run_trace_spans) → 20260716_0010(remediation_risk_level)`。注意 `20260716_0005_diagnosis_worker.py` 的文件名与它内部的 `revision = "20260716_0006"` 不一致，按 revision 值而不是文件名判断顺序。Docker 启动命令自带 `alembic upgrade head && python -m app.persistence.seed`。
 

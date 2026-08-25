@@ -11,9 +11,13 @@ from pathlib import Path
 import pytest
 
 from app.core.fixture_registry import FixtureRegistry, load_golden_cases
+from app.domain.models import RiskLevel
 from app.domain.scenarios import GoldenCaseCategory
 from app.domain.tooling import ToolErrorCode, ToolName
-from app.retrieval.models import KnowledgeNodeType
+from app.retrieval.models import (
+    REMEDIATION_KNOWLEDGE_NODE_TYPES,
+    KnowledgeNodeType,
+)
 from app.retrieval.seeds import load_knowledge_seed
 
 FIXTURE_DIRECTORY = Path("data/fixtures/scenarios")
@@ -356,6 +360,32 @@ def test_root_cause_anchors_reference_real_knowledge_graph_root_cause_nodes() ->
     # 八个种子根因节点全部被锚点覆盖，剩余没有锚点的案例对应的是种子里还没有的故障模式，
     # 属于已记录的检索缺口而不是评测遗漏。
     assert declared_anchors == seed_root_cause_ids
+
+
+def test_every_expected_risk_level_is_producible_from_seed_declarations() -> None:
+    """验证 28 条案例期望的每个风险等级都能被现有知识真正产出，而不是永远不可达的分母。
+
+    `risk_level_hit_rate` 的实测上限曾经是 0.667，原因不是模型判断错，而是生产报告层把所有知识
+    方案硬编码成 medium，于是任何期望 high 的案例都必然不命中——指标测的是实现缺陷而不是能力。
+    等级现在改由种子里的方案节点显式声明，因此这条可达性不变量必须常驻：low 来自"没有任何方案
+    证据"时的只读兜底步骤，medium/high 只能来自 solution/sop 节点的声明。若有人给案例写了一个
+    没有任何方案节点声明的等级，这里立刻失败，而不是等到 live 评测里看到一个恒零的比率。
+    """
+
+    golden_cases = load_golden_cases(GOLDEN_CASE_FILE)
+    seed = load_knowledge_seed(SEED_FILE)
+
+    expected_levels = {case.expected_risk_level for case in golden_cases}
+    declared_levels = {
+        node.remediation_risk_level
+        for node in seed.nodes
+        if node.node_type in REMEDIATION_KNOWLEDGE_NODE_TYPES
+    }
+    # 只读兜底步骤固定 low，因此它无需知识声明即可产出；其余等级必须有真实声明来源。
+    producible_levels = {RiskLevel.LOW} | declared_levels
+    assert expected_levels <= producible_levels
+    assert expected_levels == {RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH}
+    assert RiskLevel.HIGH in declared_levels
 
 
 def test_main_scenario_exercises_all_nine_tool_contracts() -> None:

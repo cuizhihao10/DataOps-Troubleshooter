@@ -782,7 +782,7 @@ def test_portfolio_manifest_v21_preserves_twenty_seven_case_authorization_snapsh
     """验证历史 v21 绑定 Golden v20 与 27/28 的源端授权传播快照。
 
     当前 v22 JSON 回写 v21、Golden v20 和 27 条覆盖后必须可读；再注入 v22 的 28/28 覆盖必须
-    失败。该门禁阻止旧报告无版本地获得水位线时区错配案例、graph-seed:v11 和完整目标资格。
+    失败。该门禁阻止旧报告无版本地获得水位线时区错配案例、graph-seed:v12 和完整目标资格。
     """
 
     payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))

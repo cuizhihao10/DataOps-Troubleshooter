@@ -302,7 +302,7 @@ Planner 的调查建议顺序，实际 Action 仍必须通过白名单、参数�
 ### 2.6 在线 GraphRAG 上下文契约
 
 `{retrieved_paths}` 使用版本化的 `graphrag-retrieval:v3` 结构；`{evidence_bundle}` 使用
-`graphrag-evidence-bundle:v2`，只包含预算选中的紧凑节点、路径和文档切片。这三类证据由确定性
+`graphrag-evidence-bundle:v3`，只包含预算选中的紧凑节点、路径和文档切片。这三类证据由确定性
 检索服务生成，不是 LLM 输出。v3 在 v2 基础上加入二阶段 cross-encoder 重排溯源：`reranker_model`
 为空表示本次只跑了一阶段召回，`candidate_count` 记录重排前的候选规模，`rerank_blend_weight`
 公开一阶段与二阶段分数的线性融合权重，因此"名次为何变化"可以被外部核对而不是黑盒结论。
@@ -366,7 +366,7 @@ Evidence Bundle 的上下文主体契约如下：
 
 ```json
 {
-  "contract_id": "graphrag-evidence-bundle:v2",
+  "contract_id": "graphrag-evidence-bundle:v3",
   "retrieval_contract_id": "graphrag-retrieval:v3",
   "query": "sync backlog",
   "retrieval_mode": "vector_graph",
@@ -417,6 +417,13 @@ Evidence Bundle 的上下文主体契约如下：
 → 文档切片"的顺序装入。顺序不是任意的：关系路径是本系统区别于普通 RAG 的解释能力，若让几段
 长 Runbook 正文先占满字节预算，报告就会退化成"引用了文档但说不出故障如何传播"。文档切片被省略
 时 `omitted_chunk_ids` 必须记录，Planner 据此声明不确定性而不是当作"文档库里没有这段步骤"。
+
+Bundle 从 v2 提升到 v3 的唯一原因是 `selected_nodes` 增加了 `remediation_risk_level`：它**当且仅当**
+出现在 `solution` / `sop` 节点上，取值 `low` / `medium` / `high`，其余节点类型必须为 `null`。这条
+双向约束在 `KnowledgeNode` 与 `BundledKnowledgeNode` 两处共用同一个校验函数，并由
+`knowledge_nodes` 表的 CheckConstraint 兜底。报告层的修复建议风险等级只能来自这条人工声明：
+既不允许缺声明时静默退回 `medium`（那会让 `high` 在生产路径上永远不可达），也不允许从动作文本
+关键词推断（改写一句话就能改变审批与回滚要求）。文档切片没有声明字段，只能固定 `medium`。
 
 `used_bytes` 精确计算 `selected_nodes`、`selected_paths` 和 `selected_documents` 的规范 UTF-8 JSON 大小，不包含预算诊断元数据。路径只有在其全部节点、边和来源能一起进入预算时才允许注入；`truncated=true` 时 Planner 必须把 omitted IDs 视为“未注入上下文”，不能解释为知识库不存在这些候选。
 
@@ -1018,7 +1025,7 @@ Observation、可引用图路径或已确认历史案例上。v21 的宇宙漏�
 的 `KNOWLEDGE_EVIDENCE_ID_PREFIX` 固定把知识节点 evidence_id 生成为 `kn_<node_id>`，一条引用就精确
 编码了知识图节点 ID，因此"报告指向哪个故障模式"可以纯离线精确判定，无需比较自然语言根因文本。
 `golden-case:v8` 的 `allowed_root_cause_anchors` 由正则钉死 `root_cause_` 前缀，且加载期测试要求每个锚点
-都是 `graph-seed:v11` 里真实存在的 `root_cause` 节点——否则该案例永不可能命中，指标会静默恒零。
+都是 `graph-seed:v12` 里真实存在的 `root_cause` 节点——否则该案例永不可能命中，指标会静默恒零。
 
 锚点不比文本相等宽松：计数前该条 Top-1 根因必须先通过上述两道完全相同的引用校验，所以凭空编造节点
 ID（悬空）或只堆静态知识不看本轮 Observation（无实时支撑）都无法命中。它与 `root_cause_top1_hit_rate`
@@ -1112,7 +1119,7 @@ BDS/FlashSync 任务、客户状态数据集以及 RUNS_ON、DEPENDS_ON、PRODUC
 Schema 兼容，但 7200 条预期事件只到 6300 条。FlashSync 日志必须给出
 `WATERMARK_TIMEZONE_MISMATCH`、UTC 与 Asia/Shanghai 的 480 分钟配置差和 900 条跳过记录；一致性
 抽检必须给出同一 900 条目标缺失与零重复。校验顺序先建立传播和反证，再确认错误码与一致性数量，
-不能因同步状态为 completed_with_quality_error 就宣称数据正确。`graph-seed:v11` 提供任务依赖、
+不能因同步状态为 completed_with_quality_error 就宣称数据正确。`graph-seed:v12` 提供任务依赖、
 静默漏数症状入口和受控回补方案链；high 风险建议只允许冻结位点、隔离校准、小批量回补、幂等/
 一致性验证和回滚，不授权自动修改水位线、自动回补或生产写入。
 

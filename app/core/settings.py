@@ -173,7 +173,7 @@ class Settings(BaseSettings):
     session_checkpoint_contract_id: str = "session-checkpoint:v1"
     case_memory_contract_id: str = "case-memory:v2"
     graphrag_retrieval_contract_id: str = "graphrag-retrieval:v3"
-    graphrag_evidence_bundle_contract_id: str = "graphrag-evidence-bundle:v2"
+    graphrag_evidence_bundle_contract_id: str = "graphrag-evidence-bundle:v3"
     document_retrieval_contract_id: str = "document-retrieval:v1"
     run_trace_contract_id: str = "run-trace:v1"
     api_auth_contract_id: str = "api-auth:v1"

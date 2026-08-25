@@ -199,14 +199,37 @@ component_lts
 
 每条边保存来源 ID 和原文跨度，最终报告可以引用 `path_id` 并回溯到人工知识种子。
 
-`graph-seed:v11` 在 v1–v10 的 47 节点/61 边基础上，增加订单履约链 LTS/BDS/FlashSync 三个任务、
+`graph-seed:v12` 在 v1–v10 的 47 节点/61 边基础上，增加订单履约链 LTS/BDS/FlashSync 三个任务、
 订单事件数据集、增量窗口静默漏数症状、水位线时区错配根因和受控回补方案共七个节点；同时增加
 三个 RUNS_ON、两个 DEPENDS_ON、PRODUCES、CONSUMES、MANIFESTS_AS、CAUSED_BY 和 RESOLVED_BY
 共十条边，当前合计 54 节点/71 边。旧节点和边继续保留各自 v1–v10 source；只有订单履约链与水位线
-知识使用 `synthetic_cross_chain_knowledge_v11`。高风险方案只描述冻结位点、人工校准、幂等验证、
+知识使用 `synthetic_cross_chain_knowledge_v11`。v12 不改变拓扑，只为八个 `solution` 节点补上
+`remediation_risk_level` 声明（三个 high、五个 medium），把"这个方案有多危险"从代码常量变成人工
+知识。高风险方案只描述冻结位点、人工校准、幂等验证、
 小批量回补和回滚点，不授予自动修改水位线或生产写入权限。任务依赖表达传播，数据边表达实际交付，症状→根因→方案边
 表达可复用解释，三类关系不能互相替代。
 Bundle 版本描述组合快照，逐项 source_id 描述原始出处，两者分离可避免升级种子时伪造旧知识历史。
+
+#### 8.1.1 处置风险等级由知识声明，而不是由报告层猜
+
+`remediation_risk_level` 只能出现在 `solution` / `sop` 节点上，且这类节点必须声明它——"当且仅当"
+是一条双向不变量，由 `app/retrieval/models.py::validate_remediation_risk_declaration` 在
+`KnowledgeNode` 与 `BundledKnowledgeNode` 两处共用，并由 `knowledge_nodes` 表的
+`ck_knowledge_nodes_remediation_risk_level` CheckConstraint 在绕过 Pydantic 直接写库时兜住。
+反向约束同样重要：如果 `symptom` / `component` 这类事实节点也能声明风险，任何一条被召回的事实
+证据都能抬高整份报告的风险等级，而它根本不描述"要对生产做什么"。
+
+刻意没有默认值。`app/reporting/draft.py::_build_remediation_steps` 之前把所有知识方案固定成
+`RiskLevel.MEDIUM`，后果不是"偏保守"而是 `RiskLevel.HIGH` 在生产路径上不可达：
+`derive_report_risks` 的高风险分支成了死代码，Golden 案例声明的 high 期望永远不可能命中，
+`risk_level_hit_rate` 的上限因此被实现而不是被模型能力锁在 0.667。现在缺声明会在 Bundle 边界
+直接 `ValidationError`，而不是静默退回 medium——静默降级正是这次要消除的东西。迁移
+`20260716_0010` 先回填既有 solution/sop 行为 `medium` 再建约束（顺序反了会让存量行违约），
+因此它也不是一个带默认值的 NOT NULL 列。
+
+文档切片仍固定 medium：切片是原文摘录，没有声明字段可读，而 `draft.py` 明确不允许从动作文本
+猜风险（关键词改写就能改变控制语义）。一个案例的实测风险等级是被召回方案节点的最大值，因此它
+仍然依赖检索选择——实现约束解除不等于指标自动达标。
 
 ### 8.2 全文种子召回
 
@@ -240,7 +263,7 @@ PostgreSQL `to_tsvector` 和 `websearch_to_tsquery` 召回全文种子，同时�
 
 ### 8.6 Evidence Bundle 上下文预算
 
-`GraphRetrievalResult` 是完整检索结果，不应原样注入 Planner。`app/retrieval/budget.py` 将它转换为 `graphrag-evidence-bundle:v2`：先按最终检索排序尝试加入路径及其全部节点，再补充未出现的高分种子，最后加入文档切片。路径是原子候选，任何字节、节点或路径预算不满足时整条省略，不会切断边或截短正文。
+`GraphRetrievalResult` 是完整检索结果，不应原样注入 Planner。`app/retrieval/budget.py` 将它转换为 `graphrag-evidence-bundle:v3`：先按最终检索排序尝试加入路径及其全部节点，再补充未出现的高分种子，最后加入文档切片。路径是原子候选，任何字节、节点或路径预算不满足时整条省略，不会切断边或截短正文。
 
 默认预算为 6000 个 UTF-8 JSON 字节、8 个唯一节点、4 条路径和 3 个文档切片。使用字节而不是某个供应商 tokenizer，能在尚未绑定模型时保持精确可重放；未来模型适配层仍可在此硬上限内增加供应商 token 检查。`used_bytes` 只统计规范序列化后的 selected_nodes/selected_paths/selected_documents 主体，omitted IDs 属于诊断元数据。
 
@@ -1383,7 +1406,7 @@ BDS 状态证明 CPU 31%、内存 36% 且 7200 条预期输入只到 6300 条，
 completed_with_quality_error 当成数据正确，也避免把漏数误报成缺分区、Schema 漂移或重复写入。
 
 六项工具恰好使用默认 ReAct Action 上限。真实 MCP 测试用独立 trace 证明 LTS/BDS/日志/一致性的
-900 等式确实穿过 stdio，而非 Golden runner 直接读取 Fixture 冒充协议。`graph-seed:v11` 新增七个
+900 等式确实穿过 stdio，而非 Golden runner 直接读取 Fixture 冒充协议。`graph-seed:v12` 新增七个
 节点和十条边，分别形成三组件任务依赖、同步任务→静默漏数症状→水位线时区根因，以及根因→受控
 回补方案；PostgreSQL 从任务和症状查询三条完整有向路径。风险标注 high，因为改水位线和回补可能
 造成重复、越界或二次漏数；项目只建议冻结位点、核对时间语义、隔离校准、小批量回补、幂等/
@@ -1395,9 +1418,12 @@ v9 新知识与既有 `sync backlog` 消融查询存在合理语义重叠，因�
 这些数字，是为了要求知识扩展后重新解释上下文组成，而不是把旧快照当成与数据无关的常量。
 v10 结算授权知识没有进入该固定查询的最终候选，PostgreSQL 重跑后仍为 5634 字节/7 节点/4 路径、
 省略 5 个节点和 4 条路径；文档保留相同快照是重新验证后的结果，不是因为版本升级而假定结果不变。
-`document-retrieval:v1` 让计费主体多出 `,"selected_documents":[]` 这 24 字节的规范包装键，因此当前
+`document-retrieval:v1` 让计费主体多出 `,"selected_documents":[]` 这 24 字节的规范包装键，因此当时
 实测快照为 5658 字节/7 节点/4 路径、省略 5 个节点和 4 条路径；图证据的选择逐条未变，变化只来自
-共享字节预算新增了第三类证据入口。
+共享字节预算新增了第三类证据入口。`graph-seed:v12` 给每个紧凑节点加上 `remediation_risk_level`
+（6 个事实节点各 31 字节的 `null`、1 个方案节点 32 字节的 `"medium"`），当前实测快照因此为
+5876 字节/7 节点/4 路径、省略 5 个节点和 4 条路径。空值同样进入 Prompt，所以它必须照实计费——
+在字节统计里排除 `null` 只会让预算账目好看而 Planner 上下文照旧变大。
 v11 订单水位线知识加入后再次重跑仍保持相同 Bundle 数字和主键冲突完整路径；新检索断言使用
 `dws_order_fulfillment_daily`、`flashsync_order_event_delta` 与“FlashSync 增量窗口静默漏数”，证明
 新知识真实入库，同时不把它包装成固定消融查询的额外收益。

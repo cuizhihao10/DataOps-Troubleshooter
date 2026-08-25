@@ -60,7 +60,7 @@ async def test_health_reports_validated_contract_baseline() -> None:
         "session_checkpoint": "session-checkpoint:v1",
         "case_memory": "case-memory:v2",
         "graph_retrieval": "graphrag-retrieval:v3",
-        "graph_evidence_bundle": "graphrag-evidence-bundle:v2",
+        "graph_evidence_bundle": "graphrag-evidence-bundle:v3",
         "document_retrieval": "document-retrieval:v1",
         "run_trace": "run-trace:v1",
         "api_auth": "api-auth:v1",

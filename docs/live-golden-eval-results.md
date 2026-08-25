@@ -231,9 +231,14 @@ Run G2 还顺带暴露了一个必须一起读的口径约定：它的 `root_cau
   口径不同（引用节点 ID 对根因文本相等），文本相等口径一个字都没改，也不会因为新指标存在而变好。
   要真正提升 `root_cause_top1_hit_rate`，仍然需要单独决定是否把它改成受控标签比较——那会是一次显式的
   口径变更，必须重新标注全部案例并作废旧数字，而不是用锚点悄悄替换。
-- `risk_level_hit_rate` 只到 0.667，缺口来自跨组件案例期望 high 而实测 low。确定性
-  `_build_remediation_steps` 目前不可能产出 `RiskLevel.HIGH`，因此该指标的上限受实现约束而非模型
-  约束；需要让知识库声明方案的风险等级后才能真正测量。
+- `risk_level_hit_rate` 在 Run D–G 都只到 0.667，缺口来自跨组件案例期望 high 而实测 low。**这条缺口
+  的实现约束已在 `graph-seed:v12` 解除**：确定性 `_build_remediation_steps` 曾把所有知识方案硬编码成
+  `RiskLevel.MEDIUM`，`RiskLevel.HIGH` 在生产路径上不可达，因此旧上限测的是实现缺陷而不是模型能力；
+  现在风险等级由 `solution` / `sop` 节点的 `remediation_risk_level` 声明（三个 high、五个 medium），
+  `tests/unit/test_reporting.py` 与 `tests/unit/test_fixture_registry.py` 分别锁定"high 能穿过生产
+  报告路径"和"28 条案例期望的每个等级都可达"。但**上表的 0.667 仍然是最后一次实测值，不得改写**：
+  真实模型下的新值要等下一次 live 运行才能测量，而且一个案例的实测等级取被召回方案节点的最大值，
+  仍然依赖检索是否选中那个 high 方案——解除实现约束不等于指标自动达标。
 - `citation_completeness` 与 `unsupported_critical_claim_rate` 在 v21 下读到的 0.875 / 0.125 是
   **评分口径缺陷而非报告质量下降**，现已修复为 `golden-diagnosis-eval:v22`。Run D 案例 1 的根因引用集合
   为三条实时 Observation + 一条 `kn_*` 知识节点 + 一条 `path_*`，而 v21 的 `valid_refs` 只收 `state.evidence`、候选

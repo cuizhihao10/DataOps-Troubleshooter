@@ -171,7 +171,9 @@ def _bundle_node(
     """把知识节点转换为 Planner 可引用的紧凑证据，并排除别名和向量派生字段。
 
     `kn_<node_id>` 与知识库主键稳定对应；source_span 保留原始依据，content 提供可读语义。embedding、
-    Provider 元数据和 aliases 只服务检索，不应消耗 Prompt 预算或被模型当作额外事实。
+    Provider 元数据和 aliases 只服务检索，不应消耗 Prompt 预算或被模型当作额外事实。方案类节点的
+    风险等级必须一起进入 Bundle：报告层的修复建议风险只能来自这条人工声明，丢掉它就等于让所有
+    方案退回同一个硬编码等级。
     """
 
     return BundledKnowledgeNode(
@@ -183,6 +185,7 @@ def _bundle_node(
         source_id=node.source_id,
         source_span=node.source_span,
         reliability=node.reliability,
+        remediation_risk_level=node.remediation_risk_level,
         retrieval_score=retrieval_score,
     )
 
