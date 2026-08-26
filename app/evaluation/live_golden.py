@@ -236,7 +236,9 @@ def build_live_golden_message(
 
     资源 ID、scenario ID 和观察窗口是 Mock MCP 定位输入，不是诊断答案。函数刻意不读取
     ``required_tools``、``allowed_root_causes``、证据来源、路径或停止原因；历史类只把触发来源标为
-    user_requested，仍由 confirmed-only 数据库检索决定实际召回。
+    user_requested，仍由 confirmed-only 数据库检索决定实际召回。组件范围取案例显式声明的
+    ``requested_components``（真实产品里由用户勾选），而不是 Fixture 的组件列表：多条单组件案例
+    共用同一个三组件 Fixture，按 Fixture 推导会与单组件意图的元数要求直接冲突。
     """
 
     if scenario.scenario_id != case.scenario_id:
@@ -251,8 +253,9 @@ def build_live_golden_message(
         f"observation_window={min(starts).isoformat()}/{max(ends).isoformat()}\n"
         "以上字段只用于构造只读 MCP 请求，不代表必要工具、证据或诊断答案。"
     )
-    # Fixture 组件是合成场景的公开范围；保持文件顺序并去重，避免 capability 请求产生重复组件。
-    components = tuple(dict.fromkeys(scenario.components))
+    # 组件范围与意图的自洽性由 GoldenCaseSpec 在加载阶段保证，因此这里不需要再兜底裁剪；
+    # 一旦案例数据违约，失败发生在读取 JSON 时而不是烧掉真实模型费用之后。
+    components = tuple(case.requested_components)
     history_trigger = (
         HistoryTrigger.USER_REQUESTED
         if case.case_category is GoldenCaseCategory.MEMORY_RECALL

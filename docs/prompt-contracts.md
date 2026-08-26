@@ -1024,7 +1024,7 @@ Observation、可引用图路径或已确认历史案例上。v21 的宇宙漏�
 因此两代同名数字可以直接对比。锚点判定读 Top-1 根因引用里的 `kn_root_cause_*`：`app/retrieval/budget.py`
 的 `KNOWLEDGE_EVIDENCE_ID_PREFIX` 固定把知识节点 evidence_id 生成为 `kn_<node_id>`，一条引用就精确
 编码了知识图节点 ID，因此"报告指向哪个故障模式"可以纯离线精确判定，无需比较自然语言根因文本。
-`golden-case:v8` 的 `allowed_root_cause_anchors` 由正则钉死 `root_cause_` 前缀，且加载期测试要求每个锚点
+`golden-case:v9` 的 `allowed_root_cause_anchors` 由正则钉死 `root_cause_` 前缀，且加载期测试要求每个锚点
 都是 `graph-seed:v12` 里真实存在的 `root_cause` 节点——否则该案例永不可能命中，指标会静默恒零。
 
 锚点不比文本相等宽松：计数前该条 Top-1 根因必须先通过上述两道完全相同的引用校验，所以凭空编造节点
@@ -1034,14 +1034,19 @@ ID（悬空）或只堆静态知识不看本轮 Observation（无实时支撑）
 并宣称"提升"属于改口径冒充改进。`anchored_case_count` 由报告层不变量从案例明细复算，防止分母被填成
 案例总数后让读者把"14 条的比率"误读成"28 条的比率"。
 
-`golden-case:v8` 的五类 `case_category` 当前为 8/10/4/3/3，五类均达到产品配额。
+`golden-case:v9` 的五类 `case_category` 当前为 8/10/4/3/3，五类均达到产品配额。
 `cross_component` 类别必须至少包含两个不同组件前缀的 required tool，并至少标注一条
 `required_fault_paths`；这两项在 Fixture 加载前校验，不能用单组件案例改标签或堆叠无关系工具虚增配额。
 
 零 `required_tools` 只允许用于 `ambiguous_or_insufficient`，同时禁止 required path、Evidence source 和
 allowed root，并要求 `missing_resource_id`、`need_user_input` 或 `evidence_insufficient` 之一作为安全停止
-原因。评测 runner 从 Scenario 元数据取得组件上下文但不读取工具响应；生产 ReAct 测试要求 executor
-调用数为零，确保缺少任务标识时不会发起宽泛探测。
+原因。评测 runner 从案例声明的 `requested_components` 取得组件上下文但不读取工具响应；生产 ReAct 测试
+要求 executor 调用数为零，确保缺少任务标识时不会发起宽泛探测。
+
+`requested_components` 是 v9 唯一的新增字段，代表真实产品里用户勾选的组件范围。它必须与
+`expected_intent` 的元数一致，并覆盖全部 `required_tools` 所属组件，两条约束都在加载阶段强制。它是
+输入而不是答案：Prompt 正文仍然不含工具名、允许根因、必要证据来源与停止原因，真实模型入口只把
+scenario/resource/observation window 作为路由元数据追加在用户问题之后。
 `history_expectation` 标注 required confirmed memory、forbidden ID、历史根因与冲突状态；评测要求
 raw recall 与最终 `similar_cases` 顺序一致，冲突历史根因不得进入报告，当前根因必须引用 TOOL Evidence。
 

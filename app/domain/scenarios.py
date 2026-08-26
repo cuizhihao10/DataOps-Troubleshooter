@@ -84,6 +84,11 @@ GoldenRootCauseAnchorId = Annotated[
     str,
     Field(pattern=rf"^{ROOT_CAUSE_ANCHOR_NODE_PREFIX}[a-z0-9][a-z0-9_]{{2,88}}$"),
 ]
+# 意图字面量在这里复制而不是导入 `DiagnosisIntent`：`app/domain` 是最底层契约，反向依赖
+# `app/capabilities` 会形成导入环。两侧口径由 tests/unit/test_fixture_registry.py 断言一致，
+# 因此复制的是常量而不是规则本身的第二份实现。
+SINGLE_COMPONENT_DIAGNOSIS_INTENT = "single_component_diagnosis"
+CROSS_COMPONENT_DIAGNOSIS_INTENT = "cross_component_diagnosis"
 
 
 class GoldenCaseCategory(StrEnum):
@@ -213,15 +218,19 @@ class GoldenCaseSpec(BaseModel):
     可接受根因和停止原因；这种分离使 Mock 数据、GraphRAG 与 Agent 策略可以独立演进和消融。
     ``allowed_root_causes`` 是人类可读标签，只能做字面比较；``allowed_root_cause_anchors`` 才是可在
     自然语言报告上精确判定的规范化锚点，两者并列保留，因此换口径不会被误读成指标提升。
+    ``requested_components`` 是唯一的组件范围输入：它代表真实产品里用户在界面勾选的组件，与
+    ``expected_intent`` 的元数必须自洽，因此多条案例共用同一个三组件 Fixture 时不再需要从 Fixture
+    反推组件。
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    contract_id: Literal["golden-case:v8"]
+    contract_id: Literal["golden-case:v9"]
     case_id: str = Field(pattern=r"^golden_[a-z0-9][a-z0-9_-]{2,79}$")
     case_category: GoldenCaseCategory
     user_query: str = Field(min_length=1, max_length=4000)
     scenario_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{2,79}$")
+    requested_components: list[Component] = Field(min_length=1, max_length=3)
     expected_intent: str = Field(min_length=1, max_length=100)
     required_tools: list[ToolName] = Field(default_factory=list)
     required_fault_paths: list[GoldenFaultPathRequirement] = Field(default_factory=list)
@@ -251,10 +260,30 @@ class GoldenCaseSpec(BaseModel):
             "allowed_root_cause_anchors",
             "required_evidence_sources",
             "expected_stop_reasons",
+            "requested_components",
         ):
             values = getattr(self, field_name)
             if len(values) != len(set(values)):
                 raise ValueError(f"Golden case {field_name} must not contain duplicates")
+        # 组件范围必须与意图元数自洽，否则真实模型入口会在构造生产消息时被 capability 校验整条
+        # 拒绝——`--all-cases` 首次运行就是这样在第六条案例上失败的。把约束放在加载阶段，等价的
+        # 缺陷从"跑到一半烧掉真实模型费用"变成"离线加载即失败"。
+        if self.expected_intent == SINGLE_COMPONENT_DIAGNOSIS_INTENT:
+            if len(self.requested_components) != 1:
+                raise ValueError(
+                    "Golden single-component case requires exactly one requested component"
+                )
+        elif self.expected_intent == CROSS_COMPONENT_DIAGNOSIS_INTENT:
+            if len(self.requested_components) < 2:
+                raise ValueError(
+                    "Golden cross-component case requires at least two requested components"
+                )
+        # 必要工具必须落在声明的组件范围内：capability 注册表按组件裁剪可用工具，范围外的必要工具
+        # 会让案例在任何模型下都不可能达标，而覆盖率会把它记成模型能力不足。
+        tool_components = {tool.value.split(".", 1)[0] for tool in self.required_tools}
+        requested = {component.value for component in self.requested_components}
+        if not tool_components <= requested:
+            raise ValueError("Golden required tools must belong to the requested components")
         # 锚点只在"本案例允许给出根因"时才有意义：不允许根因的案例期望的是安全降级，若还声明锚点，
         # 评测就会同时要求"不要给根因"和"引用正确的根因节点"，这两条不可能同时满足。
         if self.allowed_root_cause_anchors and not self.allowed_root_causes:

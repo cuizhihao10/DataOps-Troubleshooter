@@ -214,6 +214,27 @@ Run G2 还顺带暴露了一个必须一起读的口径约定：它的 `root_cau
 在该运行里同理），这是"本轮没有可判定案例"而不是满分。看锚点比率必须同时看 `anchored_case_count`，
 报告层的不变量会强制这个分母从案例明细复算，正是为了让这种误读在数据里就能被发现。
 
+## 被中止的首次全量运行：`--all-cases` 暴露的组件范围契约缺陷
+
+`live-golden-eval:v2` 加上 `--all-cases` 之后的第一次全量尝试**没有产生任何成绩**，本节只记录它的
+失败原因，因为它测到的是评测入口自己的数据契约缺陷。
+
+失败点在第六条案例 `golden_lts_upstream_not_ready_single` 构造生产消息时：18 个 Fixture 被 28 条案例
+复用，这条单组件案例与两条跨组件案例共用三组件场景 `cross_chain_pk_conflict`，而旧实现把
+`DiagnosisMessage.components` 从 Fixture 的组件列表推导，于是 `single_component_diagnosis` 意图拿到三个
+组件，被 `CapabilitySelectionRequest` 的元数校验整条拒绝（`single-component diagnosis requires exactly
+one component`）。六条案例（第 6–11 条，含三条记忆案例）都属于这个形状。
+
+必须如实说明代价：案例按声明顺序串行执行，因此前五条案例的真实模型调用已经发生并产生费用，而
+`run_live_golden_evaluation` 按设计在失败时不写半成品 JSON，所以这些调用既没有成绩也没有可发布的
+token/耗时明细——本文无法给出它的任何数字，只能给出失败原因。
+
+修复方式是把组件范围变成显式输入而不是推导结果：`golden-case:v9` 新增 `requested_components`，加载
+阶段强制它与 `expected_intent` 的元数一致、并覆盖全部 `required_tools` 所属组件；确定性 runner 与真实
+模型 runner 都读同一个字段。升版只加输入字段，不动评分器、Prompt 与分母，因此上文 Run A–G 的数值
+继续有效。同时补了一条零成本单测逐条构造 28 个生产消息，等价缺陷今后会在离线单测里失败，而不是
+在花掉五条案例的模型费用之后失败。
+
 ## Run D 相对 Run C 的两项结构性修复
 
 1. **可引用 ID 白名单与报告层同源。** v7 的 Planner 白名单比 `collect_reference_sources` 更窄，模型
@@ -263,7 +284,7 @@ Run G2 还顺带暴露了一个必须一起读的口径约定：它的 `root_cau
 session：
 
 ```text
-load golden-case:v8
+load golden-case:v9
   -> validate local settings and select case IDs
   -> FastAPI lifespan validates Fixture / Prompt / Graph / real MCP discovery
   -> PostgreSQL GraphRAG retrieves an Evidence Bundle
@@ -318,6 +339,8 @@ $env:DATAOPS_CHAT_API_KEY='本地密钥，不写入文件'
 ## 当前不能宣称什么
 
 - 不能把三案例 smoke 外推到 28 条或生产故障分布；`target_coverage_complete=false` 必须一起给出。
+- 不能宣称"已经跑过全量"：`--all-cases` 的首次尝试因组件范围契约缺陷在第六条案例中止且不写报告，
+  `scope=full` 的实测数字目前仍然不存在（详见"被中止的首次全量运行"一节）。
 - 不能宣称达成 P95 ≤ 30 s：实测三案例平均端到端 Run D 约 58 s、Run F 约 75.7 s、Run G 约 125.1 s
   （Run G 含超时与重试，属端点不可用事件，但仍不构成达标证据）。该目标仍是设计目标值。
 - 不能把 Run G 的 `root_cause_anchor_hit_rate=0.500` 当成模型定位能力的成绩：分母只有 2

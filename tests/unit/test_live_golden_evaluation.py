@@ -222,3 +222,33 @@ def test_all_cases_flag_is_off_by_default_in_the_cli() -> None:
 
     full_args = parser.parse_args(["--code-revision", "abc1234", "--all-cases"])
     assert full_args.all_cases is True
+
+
+def test_every_golden_case_builds_a_valid_live_message_without_model_calls() -> None:
+    """验证全部 28 条案例都能离线构造出合法生产消息，使 ``--all-cases`` 不会跑到一半才失败。
+
+    这条门禁来自一次真实失败：共用三组件 Fixture 的单组件案例此前从 Fixture 推导组件，第六条案例
+    在构造 ``DiagnosisMessage`` 时被 capability 元数校验拒绝，而前五条案例的真实模型费用已经花掉且
+    不写任何报告。断言本身不访问模型、数据库或 MCP，因此可以在每次单测里以零成本复现该边界。
+    泄漏检查只针对 runner 追加的路由段：``user_query`` 是用户自己的措辞，一条记忆案例的问题里本来
+    就写着"FlashSync 主键冲突"，把它算成泄漏会逼着改写案例文本去迎合测试。
+    """
+
+    cases = load_golden_cases(GOLDEN_CASE_FILE)
+    registry = FixtureRegistry.from_directory(FIXTURE_DIRECTORY)
+
+    assert len(cases) == 28
+    for case in cases:
+        message = build_live_golden_message(case, registry.get(case.scenario_id))
+        assert message.intent is DiagnosisIntent(case.expected_intent)
+        assert message.components == tuple(case.requested_components)
+        assert message.content.startswith(case.user_query)
+        routing = message.content[len(case.user_query) :]
+        # 组件范围是输入，但工具名、根因、证据来源和停止原因始终不得出现在追加的路由段里。
+        for forbidden in (
+            *case.allowed_root_causes,
+            *(tool.value for tool in case.required_tools),
+            *case.required_evidence_sources,
+            *case.expected_stop_reasons,
+        ):
+            assert forbidden not in routing

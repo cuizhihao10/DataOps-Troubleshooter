@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from app.capabilities import CapabilitySelectionRequest, DiagnosisIntent, HistoryTrigger
 from app.core.fixture_registry import FixtureRegistry, load_golden_cases
 from app.domain.models import RiskLevel
 from app.domain.scenarios import GoldenCaseCategory
@@ -38,7 +39,7 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     assert len(registry) == 18
     assert len(golden_cases) == 28
     assert {case.scenario_id for case in golden_cases} == set(registry.scenario_ids)
-    assert {case.contract_id for case in golden_cases} == {"golden-case:v8"}
+    assert {case.contract_id for case in golden_cases} == {"golden-case:v9"}
     category_counts = {
         category: sum(case.case_category is category for case in golden_cases)
         for category in GoldenCaseCategory
@@ -692,3 +693,67 @@ def test_ambiguous_case_rejects_root_causes_and_unsafe_stop_reason(tmp_path: Pat
 
     with pytest.raises(ValueError, match="requires a safe stop reason"):
         load_golden_cases(unsafe_stop)
+
+
+def test_requested_components_match_capability_arity_and_required_tools() -> None:
+    """验证每条案例声明的组件范围都能通过 capability 元数校验且覆盖全部必要工具。
+
+    ``app/domain`` 不能反向依赖 ``app/capabilities``，因此 GoldenCaseSpec 里的意图字面量是复制的；
+    本测试用真正的 ``CapabilitySelectionRequest`` 逐条构造，保证复制的常量不会与能力层规则漂移。
+    第二项断言防止必要工具落在组件范围之外——那种案例在任何模型下都不可能达标，却会被覆盖率
+    记成模型能力不足。
+    """
+
+    golden_cases = load_golden_cases(GOLDEN_CASE_FILE)
+
+    for case in golden_cases:
+        CapabilitySelectionRequest(
+            intent=DiagnosisIntent(case.expected_intent),
+            components=tuple(case.requested_components),
+            history_trigger=HistoryTrigger.NOT_REQUESTED,
+        )
+        tool_components = {tool.value.split(".", 1)[0] for tool in case.required_tools}
+        assert tool_components <= {component.value for component in case.requested_components}
+
+
+def test_single_component_case_rejects_multi_component_scope(tmp_path: Path) -> None:
+    """验证单组件意图声明多个组件会在加载阶段失败，而不是留到真实模型入口。
+
+    这是 ``--all-cases`` 首次全量运行的真实失败模式：共用三组件 Fixture 的单组件案例此前从
+    Fixture 推导组件，直到构造生产消息时才被 capability 元数拒绝，前几条案例的模型费用已经花掉。
+    把不变量前移到 Fixture 加载，等价缺陷在离线单测里就会暴露。
+    """
+
+    payload = json.loads(GOLDEN_CASE_FILE.read_text(encoding="utf-8"))
+    target_case = next(
+        case
+        for case in payload
+        if case["case_id"] == "golden_lts_upstream_not_ready_single"
+    )
+    target_case["requested_components"] = ["lts", "bds", "flashsync"]
+    widened_scope = tmp_path / "invalid_single_component_scope.json"
+    widened_scope.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="exactly one requested component"):
+        load_golden_cases(widened_scope)
+
+
+def test_required_tools_outside_requested_components_are_rejected(tmp_path: Path) -> None:
+    """验证必要工具的组件不在声明范围内时加载失败，保持案例可解。
+
+    capability 注册表按组件裁剪可用工具，因此范围外的必要工具等于把案例设成永久不可达；让它在
+    加载阶段失败，可以避免评测把数据缺陷读成 ``necessary_action_coverage`` 下降。
+    """
+
+    payload = json.loads(GOLDEN_CASE_FILE.read_text(encoding="utf-8"))
+    target_case = next(
+        case
+        for case in payload
+        if case["case_id"] == "golden_lts_upstream_not_ready_single"
+    )
+    target_case["requested_components"] = ["bds"]
+    mismatched_scope = tmp_path / "invalid_tool_component_scope.json"
+    mismatched_scope.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must belong to the requested components"):
+        load_golden_cases(mismatched_scope)

@@ -164,7 +164,7 @@ class Settings(BaseSettings):
     # 仍然如实描述"一次 complete 只发一次网络请求"，遥测里每次尝试也仍是独立一条记录。
     model_transient_retry_contract_id: str = "model-transient-retry:v1"
     mcp_contract_id: str = "mcp-tools:v1"
-    golden_case_contract_id: str = "golden-case:v8"
+    golden_case_contract_id: str = "golden-case:v9"
     capabilities_contract_id: str = "runtime-capabilities:v1"
     react_loop_contract_id: str = "langgraph-react-loop:v3"
     audited_report_workflow_contract_id: str = "audited-report-workflow:v2"

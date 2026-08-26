@@ -192,7 +192,12 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
     assert "history-impact-eval:v1" in guide
     assert "独立 Auditor 增量影响消融评测" in guide
     assert "auditor-impact-eval:v1" in guide
-    assert "golden-case:v8" in guide
+    assert "golden-case:v9" in guide
+    # v9 只新增组件范围这一个输入字段，指南必须同时写明"不改评分"与失败起因，否则下次读者
+    # 会以为 28/28 与 Run A–G 需要重测，或者把组件范围误当成又一条泄漏给模型的答案。
+    assert "requested_components" in guide
+    assert "v8 到 v9 只新增一个输入字段" in guide
+    assert "组件范围是输入而不是答案" in guide
     assert "golden-diagnosis-eval:v23" in guide
     # v22 的唯一行为差异是引用判定拆成悬空/实时支撑两条独立规则，文档必须显式记录，
     # 否则口径会在下一次改动里悄悄漂回 v21。
@@ -390,6 +395,10 @@ def test_live_golden_status_document_separates_runnable_contract_from_measuremen
     assert "unreported_usage_call_count" in report
     assert "Prompt、模型原始响应或 Thought" in report
     assert "不能把三案例 smoke 外推到 28 条" in report
+    # 首次全量尝试是一次真实的失败运行：它花掉了前五条案例的模型费用却不写报告，文档必须
+    # 保留这段成因，否则"跑过全量"会被误读成已经有 scope=full 的成绩。
+    assert "被中止的首次全量运行" in report
+    assert "`scope=full` 的实测数字目前仍然不存在" in report
     # 未达标项与口径缺陷必须留在文档里：删掉它们等于把设计目标当成实测成绩对外宣称。
     assert "不能宣称达成 P95 ≤ 30 s" in report
     assert "评分口径缺陷而非报告质量下降" in report
@@ -519,7 +528,7 @@ def test_golden_diagnosis_report_documents_scoring_and_twenty_eight_case_boundar
 
     report = Path("docs/golden-diagnosis-eval-results.md").read_text(encoding="utf-8")
 
-    assert "golden-case:v8" in report
+    assert "golden-case:v9" in report
     assert "golden-diagnosis-eval:v23" in report
     assert "28/28 = 100%" in report
     assert "target_coverage_complete=true" in report

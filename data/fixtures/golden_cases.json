@@ -1,10 +1,11 @@
 [
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_cross_chain_pk_conflict",
     "case_category": "cross_component",
     "user_query": "LTS 任务 dws_order_report_daily 执行失败，请帮我定位根因。",
     "scenario_id": "cross_chain_pk_conflict",
+    "requested_components": ["lts", "bds", "flashsync"],
     "expected_intent": "cross_component_diagnosis",
     "required_tools": [
       "lts.get_task_status",
@@ -43,11 +44,12 @@
     "expected_risk_level": "medium"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_bds_resource_pressure",
     "case_category": "single_component",
     "user_query": "BDS 作业 bds_customer_profile_hourly 运行很慢，帮我检查。",
     "scenario_id": "bds_resource_pressure",
+    "requested_components": ["bds"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": ["bds.get_task_status", "bds.get_task_log", "bds.get_table_info"],
     "required_fault_paths": [],
@@ -57,11 +59,12 @@
     "expected_risk_level": "medium"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_lts_empty_result",
     "case_category": "ambiguous_or_insufficient",
     "user_query": "查看 lts_inventory_snapshot_daily 的失败日志。",
     "scenario_id": "lts_empty_result",
+    "requested_components": ["lts"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": ["lts.get_task_log"],
     "required_fault_paths": [],
@@ -71,11 +74,12 @@
     "expected_risk_level": "low"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_flashsync_timeout",
     "case_category": "tool_anomaly_or_conflict",
     "user_query": "检查 ods_payment_delta 的同步延迟。",
     "scenario_id": "flashsync_timeout",
+    "requested_components": ["flashsync"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": ["flashsync.get_sync_delay"],
     "required_fault_paths": [],
@@ -85,11 +89,12 @@
     "expected_risk_level": "low"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_bds_permission_denied",
     "case_category": "tool_anomaly_or_conflict",
     "user_query": "检查 dwd_sensitive_segment_mock 的分区情况。",
     "scenario_id": "bds_permission_denied",
+    "requested_components": ["bds"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": ["bds.get_table_info"],
     "required_fault_paths": [],
@@ -99,11 +104,12 @@
     "expected_risk_level": "low"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_lts_upstream_not_ready_single",
     "case_category": "single_component",
     "user_query": "只从 LTS 调度侧检查 dws_order_report_daily 为什么提示上游未就绪。",
     "scenario_id": "cross_chain_pk_conflict",
+    "requested_components": ["lts"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": [
       "lts.get_task_status",
@@ -133,11 +139,12 @@
     "expected_risk_level": "low"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_bds_missing_partition_single",
     "case_category": "single_component",
     "user_query": "只检查 BDS 作业 bds_order_aggregate_daily 为什么一直停在源表读取阶段。",
     "scenario_id": "cross_chain_pk_conflict",
+    "requested_components": ["bds"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": [
       "bds.get_task_status",
@@ -167,11 +174,12 @@
     "expected_risk_level": "medium"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_flashsync_pk_conflict_single",
     "case_category": "single_component",
     "user_query": "只检查 FlashSync 的 ods_order_delta 为什么停止同步并产生积压。",
     "scenario_id": "cross_chain_pk_conflict",
+    "requested_components": ["flashsync"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": [
       "flashsync.get_sync_delay",
@@ -203,11 +211,12 @@
     "expected_risk_level": "medium"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_memory_lts_action_guidance",
     "case_category": "memory_recall",
     "user_query": "检查 LTS 上游未就绪，并参考已确认历史案例选择最有信息增益的只读检查。",
     "scenario_id": "cross_chain_pk_conflict",
+    "requested_components": ["lts"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": ["lts.get_dependency_topology"],
     "required_fault_paths": [
@@ -244,11 +253,12 @@
     "expected_risk_level": "low"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_memory_bds_conflict_guard",
     "case_category": "memory_recall",
     "user_query": "检查 BDS 源表读取停滞，并判断旧的数据倾斜案例能否直接复用。",
     "scenario_id": "cross_chain_pk_conflict",
+    "requested_components": ["bds"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": [
       "bds.get_task_status",
@@ -293,11 +303,12 @@
     "expected_risk_level": "medium"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_memory_flashsync_stable_reference",
     "case_category": "memory_recall",
     "user_query": "检查 FlashSync 主键冲突，并对照已确认的同根因历史案例。",
     "scenario_id": "cross_chain_pk_conflict",
+    "requested_components": ["flashsync"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": [
       "flashsync.get_sync_log",
@@ -341,11 +352,12 @@
     "expected_risk_level": "medium"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_bds_conflicting_partition_evidence",
     "case_category": "tool_anomaly_or_conflict",
     "user_query": "BDS 作业 bds_inventory_snapshot_hourly 对目标分区的读取结果互相矛盾，请判断是否能确认根因。",
     "scenario_id": "bds_conflicting_partition_evidence",
+    "requested_components": ["bds"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": [
       "bds.get_task_status",
@@ -376,11 +388,12 @@
     "expected_risk_level": "low"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_cross_lts_blocked_by_bds_partition",
     "case_category": "cross_component",
     "user_query": "LTS 日报任务 dws_order_report_daily 因上游未就绪失败，本次只检查 LTS 到 BDS 边界并定位阻塞链路。",
     "scenario_id": "cross_chain_pk_conflict",
+    "requested_components": ["lts", "bds"],
     "expected_intent": "cross_component_diagnosis",
     "required_tools": [
       "lts.get_task_status",
@@ -422,11 +435,12 @@
     "expected_risk_level": "medium"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_cross_bds_blocked_by_flashsync_conflict",
     "case_category": "cross_component",
     "user_query": "BDS 作业 bds_order_aggregate_daily 等待源分区，本次只检查 BDS 到 FlashSync 边界并定位同步侧根因。",
     "scenario_id": "cross_chain_pk_conflict",
+    "requested_components": ["bds", "flashsync"],
     "expected_intent": "cross_component_diagnosis",
     "required_tools": [
       "bds.get_task_status",
@@ -480,11 +494,12 @@
     "expected_risk_level": "medium"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_cross_lts_blocked_by_bds_resource_exhaustion",
     "case_category": "cross_component",
     "user_query": "LTS 客户画像日报因上游超时失败，请跨 LTS 和 BDS 判断是输入问题还是计算资源问题。",
     "scenario_id": "cross_lts_bds_resource_exhaustion",
+    "requested_components": ["lts", "bds"],
     "expected_intent": "cross_component_diagnosis",
     "required_tools": [
       "lts.get_task_status",
@@ -520,11 +535,12 @@
     "expected_risk_level": "medium"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_ambiguous_bds_missing_resource_context",
     "case_category": "ambiguous_or_insufficient",
     "user_query": "BDS 任务运行很慢，帮我看一下。",
     "scenario_id": "bds_resource_pressure",
+    "requested_components": ["bds"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": [],
     "required_fault_paths": [],
@@ -537,11 +553,12 @@
     "expected_risk_level": "low"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_ambiguous_flashsync_missing_causal_log",
     "case_category": "ambiguous_or_insufficient",
     "user_query": "ods_inventory_delta 同步延迟很高，请检查是否能确认根因。",
     "scenario_id": "flashsync_incomplete_root_cause_evidence",
+    "requested_components": ["flashsync"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": [
       "flashsync.get_sync_delay",
@@ -560,11 +577,12 @@
     "expected_risk_level": "low"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_ambiguous_lts_all_observations_unavailable",
     "case_category": "ambiguous_or_insufficient",
     "user_query": "lts_inventory_snapshot_daily 在 2026-07-09 00:00 到 01:00 是否失败？请结合状态、日志和依赖关系判断根因。",
     "scenario_id": "lts_empty_result",
+    "requested_components": ["lts"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": [
       "lts.get_task_status",
@@ -580,11 +598,12 @@
     "expected_risk_level": "low"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_lts_invalid_partition_parameter_single",
     "case_category": "single_component",
     "user_query": "LTS 任务 lts_finance_reconciliation_daily 重试三次后失败，请判断是否是上游依赖问题。",
     "scenario_id": "lts_parameter_validation_failure",
+    "requested_components": ["lts"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": [
       "lts.get_task_status",
@@ -621,11 +640,12 @@
     "expected_risk_level": "medium"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_bds_data_skew_single",
     "case_category": "single_component",
     "user_query": "BDS 作业 bds_customer_segment_daily 在聚合阶段长时间停在 83%，请判断是总数据量暴增还是数据倾斜。",
     "scenario_id": "bds_data_skew",
+    "requested_components": ["bds"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": [
       "bds.get_task_status",
@@ -662,11 +682,12 @@
     "expected_risk_level": "medium"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_flashsync_checkpoint_regression_single",
     "case_category": "single_component",
     "user_query": "FlashSync 的 ods_customer_status_delta 重启后延迟增加，请检查是否发生位点回退并说明恢复风险。",
     "scenario_id": "flashsync_checkpoint_regression",
+    "requested_components": ["flashsync"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": [
       "flashsync.get_sync_delay",
@@ -703,11 +724,12 @@
     "expected_risk_level": "high"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_flashsync_schema_mapping_outdated_single",
     "case_category": "single_component",
     "user_query": "FlashSync 的 ods_customer_profile_delta 在源端新增 customer_tier 后停止同步，请检查字段映射。",
     "scenario_id": "flashsync_schema_mapping_outdated",
+    "requested_components": ["flashsync"],
     "expected_intent": "single_component_diagnosis",
     "required_tools": [
       "flashsync.get_sync_delay",
@@ -744,11 +766,12 @@
     "expected_risk_level": "medium"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_cross_customer_profile_schema_propagation",
     "case_category": "cross_component",
     "user_query": "LTS 客户画像日报缺少 600 条上游记录，请沿 BDS 和 FlashSync 链路定位根因。",
     "scenario_id": "cross_customer_profile_schema_propagation",
+    "requested_components": ["lts", "bds", "flashsync"],
     "expected_intent": "cross_component_diagnosis",
     "required_tools": [
       "lts.get_task_status",
@@ -815,11 +838,12 @@
     "expected_risk_level": "medium"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_cross_bds_blocked_by_flashsync_checkpoint_regression",
     "case_category": "cross_component",
     "user_query": "BDS 客户状态快照缺少 1200 条输入，请检查是否由 FlashSync 位点异常导致。",
     "scenario_id": "cross_bds_flashsync_checkpoint_regression",
+    "requested_components": ["bds", "flashsync"],
     "expected_intent": "cross_component_diagnosis",
     "required_tools": [
       "bds.get_task_status",
@@ -886,11 +910,12 @@
     "expected_risk_level": "high"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_cross_lts_blocked_by_bds_data_skew",
     "case_category": "cross_component",
     "user_query": "LTS 客户分群日报等待上游超时，请检查 BDS 是资源不足、输入异常还是数据倾斜。",
     "scenario_id": "cross_lts_bds_data_skew",
+    "requested_components": ["lts", "bds"],
     "expected_intent": "cross_component_diagnosis",
     "required_tools": [
       "lts.get_task_status",
@@ -957,11 +982,12 @@
     "expected_risk_level": "medium"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_cross_lts_bds_flashsync_target_write_throttle",
     "case_category": "cross_component",
     "user_query": "LTS 收入日报等待上游超时，BDS 输入又缺 2600 条，请沿同步链定位是否为目标端写入问题。",
     "scenario_id": "cross_lts_bds_flashsync_target_throttle",
+    "requested_components": ["lts", "bds", "flashsync"],
     "expected_intent": "cross_component_diagnosis",
     "required_tools": [
       "lts.get_task_status",
@@ -1028,11 +1054,12 @@
     "expected_risk_level": "medium"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_cross_lts_bds_flashsync_source_authorization_expired",
     "case_category": "cross_component",
     "user_query": "LTS 结算摘要等待上游超时，BDS 输入缺 1800 条，请沿同步链确认是否为源端授权问题。",
     "scenario_id": "cross_lts_bds_flashsync_source_auth_expired",
+    "requested_components": ["lts", "bds", "flashsync"],
     "expected_intent": "cross_component_diagnosis",
     "required_tools": [
       "lts.get_task_status",
@@ -1099,11 +1126,12 @@
     "expected_risk_level": "high"
   },
   {
-    "contract_id": "golden-case:v8",
+    "contract_id": "golden-case:v9",
     "case_id": "golden_cross_lts_bds_flashsync_watermark_timezone_mismatch",
     "case_category": "cross_component",
     "user_query": "LTS 订单履约日报被质量门禁阻止，BDS 输入缺 900 条，但同步进程显示已完成，请沿链路检查是否有静默漏数。",
     "scenario_id": "cross_lts_bds_flashsync_watermark_timezone_mismatch",
+    "requested_components": ["lts", "bds", "flashsync"],
     "expected_intent": "cross_component_diagnosis",
     "required_tools": [
       "lts.get_task_status",

@@ -103,12 +103,8 @@ class FixtureBackedGoldenRunner:
         """
 
         scenario = self._registry.get(case.scenario_id)
-        # 普通案例由实际工具前缀收敛组件；零工具补参案例只能使用 Scenario 的已校验组件元数据。
-        components = (
-            _components_from_tools(case)
-            if case.required_tools
-            else tuple(scenario.components)
-        )
+        # 组件范围直接取案例声明：它与真实模型入口同源，两个 runner 不会在"该问哪些组件"上分叉。
+        components = tuple(dict.fromkeys(case.requested_components))
         run_id = f"run_{_digest(case.case_id)}"
         session_id = f"session_{_digest(case.case_id, 'session')}"
         tool_events: list[ToolEvent] = []
@@ -1474,21 +1470,6 @@ def _build_pending_memory(
         created_at=NOW,
         updated_at=NOW,
     )
-
-
-def _components_from_tools(case: GoldenCaseSpec) -> tuple[Component, ...]:
-    """按必要工具首次出现顺序推导案例涉及的受支持组件。
-
-    工具名是受控枚举并以组件前缀命名，因此转换不会解析用户自由文本；重复组件去重但保持顺序。
-    空工具案例会显式失败，因为当前能力 registry 至少需要一个组件。
-    """
-
-    components = tuple(
-        dict.fromkeys(Component(tool.value.split(".", 1)[0]) for tool in case.required_tools)
-    )
-    if not components:
-        raise ValueError("Golden diagnosis fixture runner requires at least one required tool")
-    return components
 
 
 def _react_events(case: GoldenCaseSpec, *, stop_reason: str) -> list[ReactPublicEvent]:
