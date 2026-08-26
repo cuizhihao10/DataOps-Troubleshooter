@@ -2,10 +2,14 @@
 
 ## 当前状态
 
-`live-golden-eval:v1` 已经在固定第三方 OpenAI 兼容端点的 `gpt-5.6-sol` 上执行，本文
+`live-golden-eval:v2` 已经在固定第三方 OpenAI 兼容端点的 `gpt-5.6-sol` 上执行，本文
 **只发布三案例 smoke 的实测成绩**（`metric_kind=measured`、`scope=smoke`、
 `case_coverage_rate=0.107`）。28 条完整 Golden 集合、真实生产故障分布和多模型对比都尚未测量，因此
 本文所有数字只能读作"这套链路在这三条案例上确实跑通并被评分"，不能读作模型质量结论。
+
+下表 Run A–G 是在 `live-golden-eval:v1` 契约下产生的。v1 到 v2 只把 `scope` 枚举从两档扩成三档
+（新增 `full`），没有改动案例选择、评分器、Prompt 或分母，因此这些行的口径与数值原样有效，不需要
+也不允许因为契约升版而改写。
 
 仓库仍然不提交任何密钥、端点地址或原始报告 JSON：`live-golden*.json` 已在 `.gitignore` 中，对外
 口径只保留本文的聚合数字与逐案例判定。
@@ -16,7 +20,7 @@
 阅读，不能相减、不能互相替换（详见"Run G"与"仍未达标"两节）。Run G 中途遇到端点不可用，多数指标
 低于 Run D/F，这一点也在对应小节里如实标注。
 
-## v1 默认冒烟集合
+## 默认冒烟集合与三档样本口径
 
 默认集合固定三条案例，并保持以下顺序：
 
@@ -24,9 +28,10 @@
 2. `golden_cross_lts_bds_flashsync_watermark_timezone_mismatch`：三组件传播，要求 900 条缺口闭合。
 3. `golden_bds_conflicting_partition_evidence`：三个工具均成功但事实冲突，要求无根因并人工复核。
 
-这个三案例集合只用于低成本接线和安全冒烟，不代表 28 条完整真实模型成绩。显式传多个
-`--case-id` 会生成 `scope=custom`，不能冒充标准 smoke；未来发布完整 28 条测量快照时应升级单独的
-运行/结果契约，并记录所有类别分母。
+这个三案例集合只用于低成本接线和安全冒烟，不代表 28 条完整真实模型成绩。`scope` 分三档且判定规则
+不对称：与上述序列逐个相同才是 `smoke`（保证多轮逐案可比），覆盖 Golden 全部 28 条才是 `full`
+（用集合比较，与执行顺序无关），其余显式子集一律 `custom`——少一条立即退回 `custom`，"接近全集"
+不能被读成全量。全量快照由 `--all-cases` 显式请求，它与 `--case-id` 互斥并在产生模型费用前失败。
 
 ## 三次实测对比（全部为实测值）
 
@@ -268,7 +273,7 @@ load golden-case:v8
   -> deterministic report policy + independent Auditor
   -> audited memory staging and persisted run/events/checkpoint
   -> golden-diagnosis-eval:v23 scores the public DiagnosisRunResult
-  -> live-golden-eval:v1 aggregates safe model-call telemetry
+  -> live-golden-eval:v2 aggregates safe model-call telemetry
 ```
 
 Live runner 不调用确定性 Golden runner，也不读取 Fixture 响应拼装答案。它只给 Planner 追加合成

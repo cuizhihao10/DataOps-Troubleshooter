@@ -204,7 +204,10 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
     assert "GoldenEvidenceConflictExpectation" in guide
     assert "统一作品集评测 manifest 与单命令运行器" in guide
     assert "portfolio-eval-run:v23" in guide
-    assert "live-golden-eval:v1" in guide
+    assert "live-golden-eval:v2" in guide
+    # 样本口径三档必须写在指南里：全量运行若与随手挑的子集共用 custom，读者无法分辨分母。
+    assert "`scope` 现在是 `smoke` / `full` / `custom`" in guide
+    assert "--all-cases" in guide
     assert "model-call-metric:v1" in guide
     assert "ContextVar" in guide
     assert "docs/frontend-design.md" in guide
@@ -372,7 +375,11 @@ def test_live_golden_status_document_separates_runnable_contract_from_measuremen
 
     report = Path("docs/live-golden-eval-results.md").read_text(encoding="utf-8")
 
-    assert "live-golden-eval:v1" in report
+    assert "live-golden-eval:v2" in report
+    # v1 到 v2 只扩了 scope 枚举，因此已发布的 Run A–G 数值必须原样保留而不是被改写。
+    assert "下表 Run A–G 是在 `live-golden-eval:v1` 契约下产生的" in report
+    assert "也不允许因为契约升版而改写" in report
+    assert "覆盖 Golden 全部 28 条才是 `full`" in report
     assert "只发布三案例 smoke 的实测成绩" in report
     assert "planner-react:v8" in report
     assert "golden_lts_invalid_partition_parameter_single" in report

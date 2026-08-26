@@ -42,7 +42,7 @@ from app.orchestration.run_models import (
     DiagnosisSession,
 )
 
-LIVE_GOLDEN_EVAL_CONTRACT_ID = "live-golden-eval:v1"
+LIVE_GOLDEN_EVAL_CONTRACT_ID = "live-golden-eval:v2"
 LIVE_GOLDEN_SMOKE_CASE_IDS = (
     "golden_lts_invalid_partition_parameter_single",
     "golden_cross_lts_bds_flashsync_watermark_timezone_mismatch",
@@ -106,9 +106,9 @@ class LiveGoldenEvalReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    contract_id: Literal["live-golden-eval:v1"]
+    contract_id: Literal["live-golden-eval:v2"]
     metric_kind: Literal["measured"] = "measured"
-    scope: Literal["smoke", "custom"]
+    scope: Literal["smoke", "full", "custom"]
     code_revision: str = Field(min_length=1, max_length=100, pattern=r"\S")
     selected_case_ids: tuple[str, ...] = Field(min_length=1)
     chat_provider: Literal["openai-compatible"]
@@ -286,11 +286,31 @@ def select_live_golden_cases(
     return tuple(case_by_id[case_id] for case_id in selected_ids)
 
 
+def resolve_live_golden_scope(
+    selected_case_ids: Sequence[str],
+    all_case_ids: Sequence[str],
+) -> Literal["smoke", "full", "custom"]:
+    """判定一次真实模型评测的样本口径，使读者无需数案例就知道分母是什么。
+
+    三档的存在意义是防止小样本冒充更大的口径：只有与版本化 smoke 集合逐个相同才是 ``smoke``，
+    只有覆盖 Golden 数据集全部案例才是 ``full``，其余显式子集统一是 ``custom``。``full`` 用集合
+    比较而不是序列比较，因为"是否覆盖全集"与执行顺序无关；smoke 仍用序列比较以保证多轮可比。
+    """
+
+    selected = tuple(selected_case_ids)
+    if selected == LIVE_GOLDEN_SMOKE_CASE_IDS:
+        return "smoke"
+    if set(selected) == set(all_case_ids):
+        return "full"
+    return "custom"
+
+
 def build_live_golden_report(
     *,
     settings: Settings,
     code_revision: str,
     cases: Sequence[GoldenCaseSpec],
+    all_case_ids: Sequence[str],
     golden_report: GoldenDiagnosisEvalReport,
     model_calls: tuple[ModelCallMetric, ...],
     started_at: datetime,
@@ -299,8 +319,9 @@ def build_live_golden_report(
 ) -> LiveGoldenEvalReport:
     """从设置、Golden 得分和调用明细构建自校验的实测报告。
 
-    聚合只计算存在的 usage；缺失计入 ``unreported_usage_call_count``。scope 仅在案例序列与版本化
-    smoke 集合完全一致时标记 smoke，任意显式子集都标记 custom，防止小样本冒充标准冒烟结果。
+    聚合只计算存在的 usage；缺失计入 ``unreported_usage_call_count``。scope 由
+    :func:`resolve_live_golden_scope` 按 smoke / full / custom 三档判定，因此 28 条全集运行不会与
+    随手挑选的子集共用同一个标签，小样本也无法冒充标准冒烟或全量成绩。
     """
 
     reported_usage = [call.token_usage for call in model_calls if call.token_usage is not None]
@@ -309,7 +330,7 @@ def build_live_golden_report(
     case_ids = tuple(case.case_id for case in cases)
     return LiveGoldenEvalReport(
         contract_id=LIVE_GOLDEN_EVAL_CONTRACT_ID,
-        scope="smoke" if case_ids == LIVE_GOLDEN_SMOKE_CASE_IDS else "custom",
+        scope=resolve_live_golden_scope(case_ids, all_case_ids),
         code_revision=code_revision,
         selected_case_ids=case_ids,
         chat_provider=settings.chat_provider,
@@ -339,12 +360,14 @@ async def run_live_golden_evaluation(
     settings: Settings,
     code_revision: str,
     requested_case_ids: Sequence[str] = (),
+    run_all_cases: bool = False,
 ) -> LiveGoldenEvalReport:
     """启动生产 lifespan，执行所选案例并返回真实模型测量报告。
 
     配置预检先于 app 启动，disabled Provider 或缺失 PostgreSQL 时不会产生模型费用。lifespan 负责
     Fixture/Prompt/MCP/数据库审计与资源释放；记录器仅包围逐案 workflow，并在 ``finally`` 恢复，
-    避免污染同进程后续任务。
+    避免污染同进程后续任务。``run_all_cases`` 按 Golden 文件声明顺序展开全集，与显式 ``--case-id``
+    互斥，避免"以为跑了全集其实只跑了子集"这类无法从报告分辨的口径错误。
     """
 
     if settings.chat_provider == "disabled":
@@ -357,6 +380,11 @@ async def run_live_golden_evaluation(
         raise LiveGoldenSetupError("live Golden evaluation requires DATAOPS_DATABASE_URL")
 
     cases = load_golden_cases(settings.golden_case_file)
+    all_case_ids = tuple(case.case_id for case in cases)
+    if run_all_cases:
+        if requested_case_ids:
+            raise LiveGoldenSetupError("live Golden --all-cases cannot be combined with --case-id")
+        requested_case_ids = all_case_ids
     selected = select_live_golden_cases(cases, requested_case_ids)
 
     # 延迟导入确保配置错误在 FastAPI 模块初始化前报告，也避免普通评测导入触发应用生命周期。
@@ -390,6 +418,7 @@ async def run_live_golden_evaluation(
         settings=settings,
         code_revision=code_revision,
         cases=selected,
+        all_case_ids=all_case_ids,
         golden_report=golden_report,
         model_calls=recorder.snapshot(),
         started_at=started_at,
@@ -401,8 +430,9 @@ async def run_live_golden_evaluation(
 def build_argument_parser() -> argparse.ArgumentParser:
     """创建真实模型评测 CLI 参数解析器，不接受任意 shell 命令。
 
-    code revision 必填以保证结果可追溯；``--case-id`` 可重复选择低成本子集，缺省运行标准三案例。
-    output 缺省写 stdout，指定文件时仅写已校验 JSON，不创建目录或覆盖其他隐式路径。
+    code revision 必填以保证结果可追溯；``--case-id`` 可重复选择低成本子集，``--all-cases`` 展开
+    Golden 全集以取得 ``scope=full`` 报告，缺省运行标准三案例。output 缺省写 stdout，指定文件时仅写
+    已校验 JSON，不创建目录或覆盖其他隐式路径。
     """
 
     parser = argparse.ArgumentParser(
@@ -410,12 +440,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--code-revision", required=True)
     parser.add_argument("--case-id", action="append", default=[])
+    parser.add_argument("--all-cases", action="store_true")
     parser.add_argument("--output", type=Path)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """解析参数、运行异步评测并把 ``live-golden-eval:v1`` JSON 输出到目标位置。
+    """解析参数、运行异步评测并把 ``live-golden-eval:v2`` JSON 输出到目标位置。
 
     异常保持非零进程退出并由 Python 输出错误，不生成半成品报告。成功时使用 Pydantic JSON 序列化
     枚举和时间；输出文件采用 UTF-8 且保留中文，便于作品集审阅和后续机器比较。
@@ -429,6 +460,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 settings=get_settings(),
                 code_revision=args.code_revision,
                 requested_case_ids=args.case_id,
+                run_all_cases=args.all_cases,
             )
         )
     except LiveGoldenSetupError as exc:

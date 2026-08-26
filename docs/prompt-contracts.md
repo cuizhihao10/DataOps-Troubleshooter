@@ -1131,7 +1131,7 @@ Schema 兼容，但 7200 条预期事件只到 6300 条。FlashSync 日志必须
 
 ## 9. 真实模型 Golden 运行与观测契约
 
-`live-golden-eval:v1` 复用 `golden-diagnosis-eval:v23` 的评分器，但 runner 必须经过生产
+`live-golden-eval:v2` 复用 `golden-diagnosis-eval:v23` 的评分器，但 runner 必须经过生产
 PostgreSQL GraphRAG、Planner/Auditor Structured Outputs、LangGraph 和 stdio MCP。默认三案例 smoke
 不加入 `portfolio-eval-manifest:v24`，因为它需要用户显式提供本地模型密钥；缺少 Provider、密钥或
 数据库时必须在任何模型调用前失败，不能生成假的 `metric_kind=measured` 报告。

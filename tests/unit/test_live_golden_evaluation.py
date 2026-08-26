@@ -16,7 +16,9 @@ from app.core.settings import Settings
 from app.evaluation.live_golden import (
     LIVE_GOLDEN_SMOKE_CASE_IDS,
     LiveGoldenRunner,
+    build_argument_parser,
     build_live_golden_message,
+    resolve_live_golden_scope,
     run_live_golden_evaluation,
     select_live_golden_cases,
 )
@@ -163,3 +165,60 @@ async def test_live_evaluation_rejects_disabled_provider_before_app_lifespan() -
             settings=Settings(),
             code_revision="test-revision",
         )
+
+
+def test_scope_separates_smoke_full_and_arbitrary_subsets() -> None:
+    """验证三档 scope 真正区分冒烟集、Golden 全集与随手挑选的子集。
+
+    scope 是读者判断分母的唯一字段：若全集运行和任意子集共用 ``custom``，28/28 的成绩就无法与
+    "我挑了 28 条里的 5 条"区分。smoke 用序列比较以保证多轮可比，full 用集合比较因为覆盖全集与
+    执行顺序无关；少一条即退回 custom，不允许"接近全集"被读成全量。
+    """
+
+    all_case_ids = tuple(case.case_id for case in load_golden_cases(GOLDEN_CASE_FILE))
+
+    assert resolve_live_golden_scope(LIVE_GOLDEN_SMOKE_CASE_IDS, all_case_ids) == "smoke"
+    assert resolve_live_golden_scope(all_case_ids, all_case_ids) == "full"
+    assert resolve_live_golden_scope(tuple(reversed(all_case_ids)), all_case_ids) == "full"
+    assert resolve_live_golden_scope(all_case_ids[:-1], all_case_ids) == "custom"
+    assert resolve_live_golden_scope(all_case_ids[:1], all_case_ids) == "custom"
+
+
+@pytest.mark.asyncio
+async def test_all_cases_and_explicit_case_ids_are_mutually_exclusive() -> None:
+    """验证同时给出 ``--all-cases`` 与 ``--case-id`` 会在付费调用前失败而不是静默取其一。
+
+    两个选项都表达"跑哪些案例"，静默偏向任何一侧都会产生 scope 与实际分母不符的报告；因此拒绝
+    发生在 Provider 预检之后、加载 app 与产生模型费用之前。
+    """
+
+    settings = Settings(
+        chat_provider="openai-compatible",
+        chat_api_key="test-key-not-used-because-selection-fails-first",
+        database_url="postgresql+asyncpg://user:pass@127.0.0.1:5432/db",
+    )
+
+    with pytest.raises(ValueError, match="--all-cases cannot be combined with --case-id"):
+        await run_live_golden_evaluation(
+            settings=settings,
+            code_revision="test-revision",
+            requested_case_ids=(LIVE_GOLDEN_SMOKE_CASE_IDS[0],),
+            run_all_cases=True,
+        )
+
+
+def test_all_cases_flag_is_off_by_default_in_the_cli() -> None:
+    """验证 CLI 默认不展开全集，避免一次误敲命令产生 28 条真实模型调用的费用。
+
+    真实模型评测是显式 opt-in 的付费路径，全量运行必须由 ``--all-cases`` 明确请求；解析器同时保留
+    ``--case-id`` 的可重复语义，两者的组合由运行期边界拒绝。
+    """
+
+    parser = build_argument_parser()
+
+    default_args = parser.parse_args(["--code-revision", "abc1234"])
+    assert default_args.all_cases is False
+    assert default_args.case_id == []
+
+    full_args = parser.parse_args(["--code-revision", "abc1234", "--all-cases"])
+    assert full_args.all_cases is True
