@@ -577,6 +577,18 @@ class PortfolioEvalRunReport(BaseModel):
         return self
 
 
+# 与 `app/evaluation/live_golden.py` 同一条理由：本模块也能以 `__main__` 身份被执行，届时 Pydantic
+# 按 `cls.__module__` 回查命名空间会拿不到本模块的 `Literal` 与前向引用，schema 推迟到实例化才补建。
+# 评测报告恰好是整轮跑完才构造的对象，把补建失败留到那一刻等于让几十分钟的执行结果全部作废，因此
+# 在导入期一次性补建，让任何 schema 错误都在第一个套件启动之前暴露。
+PortfolioMetricSnapshot.model_rebuild()
+PortfolioSuiteSpec.model_rebuild()
+PortfolioEvalManifest.model_rebuild()
+PytestExecutionResult.model_rebuild()
+PortfolioSuiteRun.model_rebuild()
+PortfolioEvalRunReport.model_rebuild()
+
+
 class PytestExecutor(Protocol):
     """声明统一运行器需要的最小同步 pytest 执行接口。
 

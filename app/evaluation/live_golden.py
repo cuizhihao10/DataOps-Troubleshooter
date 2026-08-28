@@ -165,6 +165,15 @@ class LiveGoldenEvalReport(BaseModel):
         return self
 
 
+# 显式补建 schema，因为本模块会以 `__main__` 身份被执行。`from __future__ import annotations` 让所有
+# 注解都是字符串，而 Pydantic 按 `cls.__module__` 回查命名空间；用 `runpy.run_module(run_name=
+# "__main__")` 这类嵌套方式装载时，`sys.modules["__main__"]` 并不是正在执行的这份命名空间，于是
+# `Literal` 解析不到，schema 被推迟成 mock，直到第一次实例化才补建。报告恰好是全部案例跑完后才构造
+# 的对象：实测有一次 28 条案例全部执行完毕、在 asyncio 深栈里补建失败抛 PydanticUserError，付费结果
+# 一条未落盘。导入期补建把这类失败从"整轮结果作废"降级为"进程起不来"。
+LiveGoldenEvalReport.model_rebuild()
+
+
 class LiveGoldenRunner:
     """把 Golden 输入投影为生产 ``DiagnosisMessage`` 并执行完整诊断运行时。
 
