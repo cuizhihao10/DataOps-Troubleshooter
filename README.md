@@ -37,7 +37,7 @@
 - `golden-case:v9` 同时覆盖安全降级、反证、Schema、检查点、倾斜、限流、授权和水位线时区传播；当前 28 条案例使用 18 个脱敏 Fixture，类别配额完整达到 8/10/4/3/3，并为其中 14 条声明知识图 `root_cause` 节点锚点。
 - `golden-diagnosis-eval:v23` 要求三层 900 条缺口闭合，并用 `WATERMARK_TIMEZONE_MISMATCH` 与一致性抽检识别“同步完成但静默漏数”；当前 28/28 确定性脚本满分不冒充真实 LLM 成绩。新增 `root_cause_anchor_hit_rate` 直接判定 Top-1 根因是否引用了正确的 `kn_root_cause_*` 节点，它与文本相等的 `root_cause_top1_hit_rate` 是两个分母不同的独立指标，必须并列阅读、不可相减。
 - `portfolio-eval-run:v23` 通过 `python -m app.evaluation` 一次执行五层、20 个独立指标。
-- `live-golden-eval:v2` 提供显式 opt-in 的真实模型 Golden 评测（默认三案例冒烟，`--all-cases` 展开全部 28 条），经生产 PostgreSQL GraphRAG、双 Agent、LangGraph 与 stdio MCP 执行，并只记录版本、状态、耗时和 token，不记录 Prompt、原始响应或 Thought。已在固定 `gpt-5.6-sol` 端点执行多轮：`planner-react:v8` + 定位修订下必要 Action 覆盖与证据来源覆盖实测 1.0000（v7 为 0.7778）、必要因果链完整率实测 0.6667（v7 为 0.1667）、风险等级命中实测 0.6667（v7 为 0.3333），同时模型调用从 15 次降到 12 次。`root_cause_top1_hit_rate` 实测仍为 0，原因是评分器用精确字符串比较根因与知识节点名；`golden-diagnosis-eval:v23` 新增的 `root_cause_anchor_hit_rate` 在最近一轮实测 0.500（分母 `anchored_case_count=2`），它是与文本相等口径**并列**发布的独立指标，不是把 0 提升成 0.5——两者分母与判定口径都不同，文本相等口径一个字未改。三案例 smoke 不能外推到 28 条；`scope` 分 `smoke` / `full` / `custom` 三档，覆盖全集才是 `full`，少一条即退回 `custom`，因此报告本身就能说明分母。P95 ≤ 30 s 仍是设计目标值而非实测值（实测每案例 58–125 s），完整口径与未达标项见 [`docs/live-golden-eval-results.md`](docs/live-golden-eval-results.md)。
+- `live-golden-eval:v2` 提供显式 opt-in 的真实模型 Golden 评测（默认三案例冒烟，`--all-cases` 展开全部 28 条），经生产 PostgreSQL GraphRAG、双 Agent、LangGraph 与 stdio MCP 执行，并只记录版本、状态、耗时和 token，不记录 Prompt、原始响应或 Thought。已在固定 `gpt-5.6-sol` 端点执行多轮：`planner-react:v8` + 定位修订下必要 Action 覆盖与证据来源覆盖实测 1.0000（v7 为 0.7778）、必要因果链完整率实测 0.6667（v7 为 0.1667）、风险等级命中实测 0.6667（v7 为 0.3333），同时模型调用从 15 次降到 12 次。`root_cause_top1_hit_rate` 实测仍为 0，原因是评分器用精确字符串比较根因与知识节点名；`golden-diagnosis-eval:v23` 新增的 `root_cause_anchor_hit_rate` 在最近一轮实测 0.500（分母 `anchored_case_count=2`），它是与文本相等口径**并列**发布的独立指标，不是把 0 提升成 0.5——两者分母与判定口径都不同，文本相等口径一个字未改。三案例 smoke 不能外推到 28 条；`scope` 分 `smoke` / `full` / `custom` 三档，覆盖全集才是 `full`，少一条即退回 `custom`，因此报告本身就能说明分母。`--all-cases` 已完成一次 `scope=full` 全量实测（Run H，28/28，`case_coverage_rate=1.0000`），但那一轮 142 次模型调用里有 50 次失败（44 次为端点超时）、11 条案例以 `planner_provider_error` 零工具结束，因此**只能读作"链路在全量案例上完整跑通并被评分"，不是模型能力基线**；同轮锚点口径在分母 14 下实测 0.0714，与 smoke 的 0.500（分母 2）分母不同、不可相减。P95 ≤ 30 s 仍是设计目标值而非实测值（实测每案例 58–125 s，全量轮均摊约 152.5 s），完整口径与未达标项见 [`docs/live-golden-eval-results.md`](docs/live-golden-eval-results.md)。
 - `audited-diagnosis-workflow:v2` 按 history trigger 召回 confirmed 案例，在 ReAct 前后两次确定性比较同批候选，再串联独立 Auditor 和审计后 memory staging。
 - `diagnosis-resources:v4` 提供 session/message/run/event PostgreSQL 资源，并通过 cancel/resume 扩展可恢复生命周期；最终报告可直接展示相似度、共同点、差异点、参考方案、避坑提示与引用。
 - `session-checkpoint:v1` 在成功 run 的同一事务保存最新公开状态；同 session 追问恢复报告、证据、路径和工具事件，失败 run 不覆盖旧快照，跨 run 同参 Action 仍会被拦截。
@@ -48,7 +48,7 @@
 - 双 Agent 契约是四级降级阶梯而不是装饰性审计：确定性规则与独立 Auditor 拥有**非对称**否决权（任何规则问题非空即强制 `revise`，模型的 `accept` 无法覆盖它），放行需要两层都同意；返工预算属于工作流（`max_audit_revisions` 上限为 1，模型无法扩大）且修订器只删不加；预算耗尽转安全降级；Auditor 不可用直接降级且不消耗返工预算——"审计不可用"绝不等于"审计通过"，degraded 报告永远不会进入长期记忆。同一轨迹按读者需要分四档暴露：run 结果给出完整 `AuditResult`，`run_events` 与 `/demo` 裁决卡只给稳定问题码与被否决的字段路径，trace 给出 `report.draft/audit/revise/degrade` 节点 span 与只包住模型往返的 `auditor.review` span。
 - `model-transient-retry:v1` 在 Provider 外侧包一层有界指数退避重试（默认最多 2 次尝试、1s 起、上限 8s），只重复供应商已判定为瞬时的失败（429/5xx/超时/连接失败），**401/403 认证失败一次即上抛且不进入退避**；Schema 修复预算与之完全独立，refusal 不可被重发规避。重试留在包装层而不是 Provider 内部，因此具体 Provider 仍保持 `max_retries=0`、一次 `complete` 一次网络请求，"第一次 429、第二次成功"在 `model-call-metric:v1` 与 `model_call` span 里仍是两条可归因记录；启动阶段强制 `react_total_timeout_seconds` 覆盖一次重试的最坏开销，避免加了重试却在退避途中被墙钟掐断。
 
-当前已完成全部 MCP 工具、GraphRAG 检索闭环、文档 RAG 第二知识通道、五项固定 runtime capabilities、Planner ReAct、独立 Auditor、长期案例记忆、五层小样本统一评测运行器、顶层诊断工作流、PostgreSQL Worker、run 取消/恢复、同 session 有界滚动 checkpoint、记忆删除 API、资源 API、前端 Demo 和 28 条 Golden Case 数据集。默认模型 Provider 仍为 disabled，Embedding 与 Reranker 未配置 API 时回退到确定性哈希 Provider；确定性回归与合成数据验证不冒充真实模型质量。真实模型三案例 smoke 已在固定端点实测并公开口径；复杂语义历史比较和 28 条完整真实模型 Golden 快照仍保留为明确接入点，等待固定模型与预算后再测量。详细前端信息架构、状态机和验收条件见 [`docs/frontend-design.md`](docs/frontend-design.md)。
+当前已完成全部 MCP 工具、GraphRAG 检索闭环、文档 RAG 第二知识通道、五项固定 runtime capabilities、Planner ReAct、独立 Auditor、长期案例记忆、五层小样本统一评测运行器、顶层诊断工作流、PostgreSQL Worker、run 取消/恢复、同 session 有界滚动 checkpoint、记忆删除 API、资源 API、前端 Demo 和 28 条 Golden Case 数据集。默认模型 Provider 仍为 disabled，Embedding 与 Reranker 未配置 API 时回退到确定性哈希 Provider；确定性回归与合成数据验证不冒充真实模型质量。真实模型三案例 smoke 已在固定端点实测并公开口径，28 条完整 Golden 集合也已完成一次 `scope=full` 实测（Run H，端点大量超时，只作链路完整性证据）；复杂语义历史比较、live 模式的 confirmed 记忆预置和一次端点稳定条件下的全量快照仍保留为明确接入点，等待固定模型与预算后再测量。详细前端信息架构、状态机和验收条件见 [`docs/frontend-design.md`](docs/frontend-design.md)。
 
 ## 本地启动
 
@@ -82,7 +82,7 @@ $env:DATAOPS_CHAT_API_KEY='仅保存在本机环境中的密钥'
 
 默认只运行单组件、三组件链路、成功响应证据冲突三个代表案例。命令只有真正完成运行时才生成
 `metric_kind=measured` 报告；没有密钥或数据库会在模型调用前失败。当前仓库没有伪造或占位的真实
-模型分数；已发布的三案例 smoke 实测成绩、未达标项与评分口径缺陷见 [`docs/live-golden-eval-results.md`](docs/live-golden-eval-results.md)。
+模型分数；已发布的三案例 smoke 实测成绩、一次 `scope=full` 全量实测（Run H）、未达标项与评分口径缺陷见 [`docs/live-golden-eval-results.md`](docs/live-golden-eval-results.md)。
 
 ## Docker 启动
 

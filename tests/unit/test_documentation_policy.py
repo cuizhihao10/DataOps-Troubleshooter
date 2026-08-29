@@ -370,12 +370,13 @@ def test_model_transient_retry_documents_pin_wrapper_boundary_and_budget_guard()
 
 
 def test_live_golden_status_document_separates_runnable_contract_from_measurement() -> None:
-    """确认真实模型评测文档标明 smoke 范围、答案隔离、安全 token 遥测与未达标项。
+    """确认真实模型评测文档标明样本范围、答案隔离、安全 token 遥测与未达标项。
 
-    该门禁防止作品集把三案例 smoke 包装成完整真实模型成绩；文档必须保留默认三案例、生产运行路径、
-    measured-only、usage 缺失、不保存 Prompt/Thought，以及"未达成 P95 目标"和评分口径缺陷的自述。
-    额外锁定根因锚点这一新增指标的并列口径：它与文本相等的 Top-1 命中率分母不同，文档必须写明
-    0.500 不是把 0.000 提升了，否则新增指标会被当成旧指标的改进对外宣称。
+    该门禁防止作品集把三案例 smoke 包装成完整真实模型成绩，也防止把 Run H 的 28/28 覆盖率包装成
+    模型能力基线：文档必须保留默认三案例、生产运行路径、measured-only、usage 缺失、不保存
+    Prompt/Thought，以及"未达成 P95 目标"和评分口径缺陷的自述。额外锁定两处并列口径——根因锚点
+    与文本相等的 Top-1 分母不同（0.500 不是把 0.000 提升了），以及 Run H 的 `scope=full` 必须与
+    142 次调用中的失败次数、记忆类别前置缺失一起阅读。
     """
 
     report = Path("docs/live-golden-eval-results.md").read_text(encoding="utf-8")
@@ -396,9 +397,15 @@ def test_live_golden_status_document_separates_runnable_contract_from_measuremen
     assert "Prompt、模型原始响应或 Thought" in report
     assert "不能把三案例 smoke 外推到 28 条" in report
     # 首次全量尝试是一次真实的失败运行：它花掉了前五条案例的模型费用却不写报告，文档必须
-    # 保留这段成因，否则"跑过全量"会被误读成已经有 scope=full 的成绩。
+    # 保留这段成因，否则后来的 Run H 会被误读成"一次就跑通了全量"。
     assert "被中止的首次全量运行" in report
-    assert "`scope=full` 的实测数字目前仍然不存在" in report
+    assert "那次仍然没有任何可发布数字" in report
+    # Run H 是第一组 scope=full 实测数字，但它是一次端点大量超时的运行：文档必须把分母、失败
+    # 次数与"不是模型质量结论"绑在一起，否则 28/28 会被当成模型能力基线对外宣称。
+    assert "Run H：第一次完成的 28 条全量运行" in report
+    assert "142 次调用" in report
+    assert "不是模型推理质量结论" in report
+    assert "这四个指标不具备发布意义" in report
     # 未达标项与口径缺陷必须留在文档里：删掉它们等于把设计目标当成实测成绩对外宣称。
     assert "不能宣称达成 P95 ≤ 30 s" in report
     assert "评分口径缺陷而非报告质量下降" in report

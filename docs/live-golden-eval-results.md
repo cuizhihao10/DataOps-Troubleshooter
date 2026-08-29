@@ -2,10 +2,11 @@
 
 ## 当前状态
 
-`live-golden-eval:v2` 已经在固定第三方 OpenAI 兼容端点的 `gpt-5.6-sol` 上执行，本文
-**只发布三案例 smoke 的实测成绩**（`metric_kind=measured`、`scope=smoke`、
-`case_coverage_rate=0.107`）。28 条完整 Golden 集合、真实生产故障分布和多模型对比都尚未测量，因此
-本文所有数字只能读作"这套链路在这三条案例上确实跑通并被评分"，不能读作模型质量结论。
+`live-golden-eval:v2` 已经在固定第三方 OpenAI 兼容端点的 `gpt-5.6-sol` 上执行。本文的 Run A–G
+**只发布三案例 smoke 的实测成绩**（`metric_kind=measured`、`scope=smoke`、`case_coverage_rate=0.107`）；
+Run H 是第一组 `scope=full` 实测数字（28/28、`case_coverage_rate=1.000`），但那一轮 142 次调用里有 50 次
+失败（44 次超时），**成绩主要由端点状况与超时配置决定，不能读作模型质量结论**。真实生产故障分布与
+多模型对比仍未测量。
 
 下表 Run A–G 是在 `live-golden-eval:v1` 契约下产生的。v1 到 v2 只把 `scope` 枚举从两档扩成三档
 （新增 `full`），没有改动案例选择、评分器、Prompt 或分母，因此这些行的口径与数值原样有效，不需要
@@ -14,11 +15,11 @@
 仓库仍然不提交任何密钥、端点地址或原始报告 JSON：`live-golden*.json` 已在 `.gitignore` 中，对外
 口径只保留本文的聚合数字与逐案例判定。
 
-最近一次真实模型运行是 Run G（评分器 `golden-diagnosis-eval:v23`），它给出了新增指标
-`root_cause_anchor_hit_rate` 的第一个实测值 0.500，分母 `anchored_case_count=2`；同一轮里
-`root_cause_top1_hit_rate` 仍然是 0.000。这两个数字是**分母与口径都不同的两个独立指标**，必须并列
-阅读，不能相减、不能互相替换（详见"Run G"与"仍未达标"两节）。Run G 中途遇到端点不可用，多数指标
-低于 Run D/F，这一点也在对应小节里如实标注。
+最近一次真实模型运行是 Run H（`scope=full`，28 条，见"Run H"一节）。在它之前的 Run G（评分器
+`golden-diagnosis-eval:v23`）给出了新增指标 `root_cause_anchor_hit_rate` 的第一个实测值 0.500，分母
+`anchored_case_count=2`；同一轮里 `root_cause_top1_hit_rate` 仍然是 0.000。这两个数字是**分母与口径都
+不同的两个独立指标**，必须并列阅读，不能相减、不能互相替换（详见"Run G"与"仍未达标"两节）。Run G
+中途遇到端点不可用，多数指标低于 Run D/F，这一点也在对应小节里如实标注。
 
 ## 默认冒烟集合与三档样本口径
 
@@ -235,6 +236,82 @@ token/耗时明细——本文无法给出它的任何数字，只能给出失�
 继续有效。同时补了一条零成本单测逐条构造 28 个生产消息，等价缺陷今后会在离线单测里失败，而不是
 在花掉五条案例的模型费用之后失败。
 
+## Run H：第一次完成的 28 条全量运行（实测值，`scope=full`）
+
+`golden-case:v9` 修好组件范围契约之后，`--all-cases` 的第二次尝试跑完了全部 28 条案例并写出报告。
+这是本文第一组 `scope=full` 实测数字：`live-golden-eval:v2`、评分器 `golden-diagnosis-eval:v23`、
+`code_revision=efe0cc5`、`case_coverage_rate=1.000`、`target_coverage_complete=true`，类别配额实测
+8 / 10 / 4 / 3 / 3 与目标一致。
+
+**先读这一段再读数字：这一轮端点大量超时，成绩主要由基础设施状况决定，不是模型推理质量结论。**
+142 次调用里只有 92 次成功，44 次 `timeout`、3 次 `connection_error`、3 次 `output_invalid`；11 条案例
+以 `planner_provider_error` 结束，其中 9 条一个工具都没执行（`logical_action_count=0`）。下面所有低分
+指标都必须连着这个事实一起读。
+
+| 指标 | Run G（smoke，3 条） | Run H（full，28 条） |
+|---|---|---|
+| `scope` / 分母 | `smoke` / 3 | **`full` / 28** |
+| `case_coverage_rate` | 0.107 | **1.000** |
+| `intent_accuracy` | 1.000 | 1.000 |
+| `root_cause_top1_hit_rate` | 0.000 | 0.000（分母 21） |
+| `root_cause_anchor_hit_rate` | 0.500（分母 2） | **0.071（分母 14）** |
+| `necessary_action_coverage` | 0.667 | 0.702 |
+| `evidence_source_coverage` | 0.667 | 0.696 |
+| `fault_path_completeness` | 0.500 | 0.300 |
+| `stop_reason_hit_rate` | 0.333 | 0.464 |
+| `risk_level_hit_rate` | 0.667 | 0.500 |
+| `citation_completeness` | 1.000 | 0.975 |
+| `unsupported_critical_claim_rate` | 0.000 | 0.025 |
+| `duplicate_action_rate` | 0.000 | 0.000 |
+| `tool_attempt_success_rate` | 0.818 | 0.682 |
+| `safe_degradation_rate` | 1.000 | 1.000 |
+| `evidence_conflict_safe_resolution_rate` | 0.000 | 0.000 |
+| `history_trigger_hit_rate` | 未列 | 1.000 |
+| `history_recall_coverage` | 未列 | **0.000（见下）** |
+| `accepted_report_rate` | 0.333 | 0.464（13/28） |
+| 模型调用次数 | 14（8 成功、6 失败） | 142（92 成功、50 失败） |
+| 总 token | 88,819 | 1,306,915（输入 1,257,151 / 输出 49,764） |
+| 总耗时 | 375.3 s | 4271.3 s（71.2 min，均摊 152.5 s/案例） |
+
+停止原因分布（28 条）：`planner_provider_error` 11、`evidence_sufficient` 9、`react_budget_exhausted` 3、
+`evidence_insufficient` 3、`tool_unavailable_degraded` 1、`planner_output_invalid` 1。
+
+### Run H 暴露的三件事（都不是模型质量结论）
+
+**1. Planner 的 30 s 墙钟预算就是这一轮的主要瓶颈。** 成功的 49 次 Planner 调用耗时 6.5 s / 中位
+15.3 s / 最大 **29.9 s**，而 `DATAOPS_CHAT_TIMEOUT_SECONDS=30`——分布的右尾正好压在墙上，33 次超时
+全部落在 30.0–31.7 s。Auditor 侧同形：43 次成功为 7.2 s / 中位 24.7 s / 最大 89.2 s，11 次超时落在
+90.0–90.4 s（`DATAOPS_AUDITOR_TIMEOUT_SECONDS=90`）。也就是说失败调用不是"端点拒绝服务"，而是
+**这个推理模型在本项目的大 Structured Outputs schema 下，单次响应时间与配置的超时同量级**。调时限
+之前不能把这一轮的低分归因给模型定位能力；调时限之后也必须重新测量，不能沿用本轮数字。
+
+**2. 记忆类别的四个指标在真实链路上测不到东西，这是评测入口的前置缺陷。** `history_trigger_hit_rate`
+是 1.000（三条案例都触发了召回），但 `history_recall_coverage` / `confirmed_only_recall_rate` /
+`history_projection_pass_rate` / `realtime_priority_pass_rate` 全为 0.000，`forbidden_memory_hit_count=0`。
+原因不是模型忽略历史：三条案例要求召回 `mem_golden_lts_upstream_history` 等 ID，而**真实库里没有
+任何 confirmed 案例记忆**（实测 `case_memories` 只有 7 条 pending）。确定性 runner 把 Golden 标注
+投影成 confirmed 匹配，真实 runner 走的是生产召回路径，于是 `recalled_memory_ids` 必然为空。
+其中 `golden_memory_flashsync_stable_reference` 这一条链路完全正常（3 个工具、`evidence_sufficient`），
+它的 0.000 同样只反映"库里没有可召回的历史"。**结论：live 模式缺一步 confirmed 记忆预置，在补上
+之前这四个指标不具备发布意义，不能写成"历史召回失败"。**
+
+**3. `RiskLevel.HIGH` 在真实报告里一次都没出现。** `risk_level_hit_rate=0.500`，14 条未命中案例的
+实测等级**全部是 low**（其中 3 条期望 high、11 条期望 medium）。`graph-seed:v12` 已让 high 在生产路径
+可达，但可达不等于被选中：一个案例的实测等级取被召回方案节点的最大值，本轮大量案例在 Planner 首次
+调用就失败、或没走到方案召回，因此这个 0.500 主要测的还是链路完成度，不是风险判定能力。
+
+其余逐项：`root_cause_anchor_hit_rate=0.071` 的唯一命中是 `golden_bds_data_skew_single`（Top-1 引用了
+`kn_root_cause_bds_data_skew`，同一条结论 `root_cause_top1_hit=false`——又一次两个口径分离的实测例证）；
+`citation_completeness=0.975` 与 `unsupported_critical_claim_rate=0.025` 来自单一案例
+`golden_flashsync_checkpoint_regression_single` 的 6 条关键结论里有 1 条缺实时支撑；
+`duplicate_action_rate=0.000`、`safe_degradation_rate=1.000`、`forbidden_conflict_root_hit_count=0`
+说明**去重、安全降级与禁止根因三条安全门禁在 28 条案例上全部守住了**——这是本轮唯一可以正面陈述的
+结果，而它们恰好都是确定性规则负责的部分。
+
+`evidence_conflict_safe_resolution_rate=0.000` 与 Run G 同因：`golden_bds_conflicting_partition_evidence`
+再次以 `planner_provider_error` 零工具结束，三个矛盾 source 一个都没被观察。Run G2 已单独证明端点恢复
+后该案例可复现安全处置，但那是 `scope=custom` 分母 1 的旁证，不能并入本轮。
+
 ## Run D 相对 Run C 的两项结构性修复
 
 1. **可引用 ID 白名单与报告层同源。** v7 的 Planner 白名单比 `collect_reference_sources` 更窄，模型
@@ -276,7 +353,21 @@ token/耗时明细——本文无法给出它的任何数字，只能给出失�
   `docs/portfolio-eval-results.md`），Golden 层 28/28 不变。
 - `stop_reason_hit_rate` 卡在 0.667：跨组件案例八步用尽后以 `react_budget_exhausted` 结束，
   Golden 期望 `evidence_sufficient`。它拿满了必要工具覆盖与证据来源覆盖，属于"证据够了但没在预算内
-  主动收口"，需要在 Prompt 里进一步强化剩余步数临界时的收口判断。
+  主动收口"，需要在 Prompt 里进一步强化剩余步数临界时的收口判断。（Run H 的 0.464 分母是 28，
+  其中 11 条根本没走到收口就 `planner_provider_error`，两者不可直接比较。）
+- **Planner 超时配置与该模型的响应分布同量级，这是 Run H 最大的单一失分来源。** 实测成功调用中位
+  15.3 s、最大 29.9 s，而 `DATAOPS_CHAT_TIMEOUT_SECONDS=30`，33/86 次 Planner 调用在 30 s 墙上失败。
+  调大时限或缩小单次 schema 都可能改善，但**任何调整之后本轮全部数字作废、必须重测**；在重测之前
+  不能把 Run H 的低分归因给模型定位能力，也不能把预期的改善写成成绩。
+- **live 模式缺少 confirmed 记忆预置，记忆类别四个指标暂不具备发布意义。** Run H 实测
+  `history_trigger_hit_rate=1.000` 但 `history_recall_coverage` / `confirmed_only_recall_rate` /
+  `history_projection_pass_rate` / `realtime_priority_pass_rate` 全为 0.000，原因是真实库里只有 7 条
+  pending 记忆、没有任何 confirmed 案例。确定性 runner 把 Golden 标注投影成 confirmed 匹配，真实 runner
+  走生产召回路径，因此这四个指标测的是"库里有没有历史"，不是"模型会不会用历史"。补一步显式的
+  confirmed 记忆预置（并保持 pending/rejected 禁止命中不变）之前，这四个数字只能标注为前置缺失。
+- **`RiskLevel.HIGH` 在真实报告中尚未被观测到一次。** Run H 的 14 条未命中案例实测等级全部是 low
+  （3 条期望 high、11 条期望 medium）。`graph-seed:v12` 解除的是实现上限，不是检索选中率；这条缺口
+  要等 Planner 侧链路完成度恢复之后才能重新测量。
 
 ## 真实执行路径
 
@@ -339,10 +430,17 @@ $env:DATAOPS_CHAT_API_KEY='本地密钥，不写入文件'
 ## 当前不能宣称什么
 
 - 不能把三案例 smoke 外推到 28 条或生产故障分布；`target_coverage_complete=false` 必须一起给出。
-- 不能宣称"已经跑过全量"：`--all-cases` 的首次尝试因组件范围契约缺陷在第六条案例中止且不写报告，
-  `scope=full` 的实测数字目前仍然不存在（详见"被中止的首次全量运行"一节）。
+- 不能拿 Run H 的 `scope=full` 当成"28 条真实模型成绩"对外宣称：那一轮 142 次调用有 50 次失败
+  （44 次超时），11 条案例零工具结束，**`scope=full` 的实测数字现在存在，但只能读作"链路在全量案例上
+  完整跑通并被评分"**，不是模型能力基线。首次 `--all-cases` 尝试因组件范围契约缺陷在第六条案例中止且
+  不写报告，那次仍然没有任何可发布数字（详见"被中止的首次全量运行"一节）。
 - 不能宣称达成 P95 ≤ 30 s：实测三案例平均端到端 Run D 约 58 s、Run F 约 75.7 s、Run G 约 125.1 s
-  （Run G 含超时与重试，属端点不可用事件，但仍不构成达标证据）。该目标仍是设计目标值。
+  （Run G 含超时与重试，属端点不可用事件，但仍不构成达标证据）；Run H 全量均摊约 152.5 s/案例。
+  该目标仍是设计目标值。
+- 不能把 Run H 记忆类别的四个 0.000 说成"历史召回不work"：真实库里没有 confirmed 案例记忆，那是
+  评测前置缺失，`history_trigger_hit_rate` 同轮实测 1.000。
+- 不能把 Run H 的 `risk_level_hit_rate=0.500` 说成风险判定能力：未命中案例实测等级全部是 low，多数
+  案例没走到方案召回。
 - 不能把 Run G 的 `root_cause_anchor_hit_rate=0.500` 当成模型定位能力的成绩：分母只有 2
   （`anchored_case_count=2`），且另一条未命中是因为步数预算耗尽后报告里根本没有根因。
 - 不能把 Run F 说成"重试已在真实端点验证"：那次运行没有出现瞬时失败，重试路径一次都没执行。被丢弃的
