@@ -346,7 +346,7 @@ class CaseMemoryService:
         管理元数据改变语义相似度。Provider 错误阻止整个事务提交。
         """
 
-        vectors = await self._embedding_provider.embed_texts([_memory_text(memory)])
+        vectors = await self._embedding_provider.embed_texts([memory_embedding_text(memory)])
         if len(vectors) != 1 or len(vectors[0]) != self._embedding_provider.dimensions:
             raise ValueError("embedding provider returned an invalid case memory vector")
         return vectors[0]
@@ -425,11 +425,12 @@ def _candidate_from_result(result: ReportRunResult, *, now: datetime) -> CaseMem
     )
 
 
-def _memory_text(memory: CaseMemory) -> str:
+def memory_embedding_text(memory: CaseMemory) -> str:
     """按稳定字段顺序组合案例语义内容，作为去重和搜索 embedding 输入。
 
     管理字段（ID、status、occurrence、时间）不进入文本；换行区分症状、根因、路径、方案和标签，
-    同一结构化内容跨状态切换保持相同向量。
+    同一结构化内容跨状态切换保持相同向量。该函数是公开的向量空间构造契约：任何绕过它写入
+    case_memories 的路径（例如评测预置）都会产生与生产检索不同空间的向量，因此必须复用它。
     """
 
     return "\n".join(

@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-`live-golden-eval:v2` 已经在固定第三方 OpenAI 兼容端点的 `gpt-5.6-sol` 上执行。本文的 Run A–G
+`live-golden-eval:v3` 已经在固定第三方 OpenAI 兼容端点的 `gpt-5.6-sol` 上执行。本文的 Run A–G
 **只发布三案例 smoke 的实测成绩**（`metric_kind=measured`、`scope=smoke`、`case_coverage_rate=0.107`）；
 Run H 是第一组 `scope=full` 实测数字（28/28、`case_coverage_rate=1.000`），但那一轮 142 次调用里有 50 次
 失败（44 次超时），**成绩主要由端点状况与超时配置决定，不能读作模型质量结论**。真实生产故障分布与
@@ -10,7 +10,14 @@ Run H 是第一组 `scope=full` 实测数字（28/28、`case_coverage_rate=1.000
 
 下表 Run A–G 是在 `live-golden-eval:v1` 契约下产生的。v1 到 v2 只把 `scope` 枚举从两档扩成三档
 （新增 `full`），没有改动案例选择、评分器、Prompt 或分母，因此这些行的口径与数值原样有效，不需要
-也不允许因为契约升版而改写。
+也不允许因为契约升版而改写。v2 到 v3 同样不改评分器与 Prompt，只新增 opt-in 的 `--seed-history`
+历史预置与报告字段 `history_seed`。
+
+**Run A–H 全部在没有历史预置的条件下运行**，因此四个记忆类指标（`history_recall_coverage`、
+`confirmed_only_recall_rate`、`history_projection_pass_rate`、`realtime_priority_rate`）在这些轮次里
+一律为 0，含义是"数据库里没有 confirmed 历史案例，这四项没测"，**不是"模型没做到"**。v3 的
+`--seed-history` 提供了这个前置条件（详见"历史预置与记忆类分母"一节），但截至本文撰写时尚未执行
+过一次预置运行，因此仍没有这四个指标的实测值。
 
 仓库仍然不提交任何密钥、端点地址或原始报告 JSON：`live-golden*.json` 已在 `.gitignore` 中，对外
 口径只保留本文的聚合数字与逐案例判定。
@@ -33,6 +40,33 @@ Run H 是第一组 `scope=full` 实测数字（28/28、`case_coverage_rate=1.000
 不对称：与上述序列逐个相同才是 `smoke`（保证多轮逐案可比），覆盖 Golden 全部 28 条才是 `full`
 （用集合比较，与执行顺序无关），其余显式子集一律 `custom`——少一条立即退回 `custom`，"接近全集"
 不能被读成全量。全量快照由 `--all-cases` 显式请求，它与 `--case-id` 互斥并在产生模型费用前失败。
+
+## 历史预置与记忆类分母（`--seed-history`）
+
+确定性 Golden runner 由脚本替身直接合成 `CaseMemoryMatch`，而 live 模式走的是生产 confirmed-only
+检索路径。数据库里没有 confirmed 案例时，`history_recall_coverage`、`confirmed_only_recall_rate`、
+`history_projection_pass_rate`、`realtime_priority_rate` 必然全部为 0——这是**分母为空**，与模型行为
+无关。Run A–H 都处于这个状态。
+
+`live-golden-eval:v3` 新增 opt-in 的 `--seed-history`，在任何付费聊天调用之前把 Golden 的
+`history_expectation` 标注投影成真实数据库行：required 记忆经生产 `decide(CONFIRM)` 事务变成
+confirmed（因此动态 case 图节点与 `SIMILAR_TO` 边与用户在 `/demo` 点击确认时完全同源），forbidden
+记忆按声明顺序分别落在 pending 与 rejected，用来真正执行状态过滤而不是靠"向量刚好不相似"侥幸通过。
+顺序固定为"按 ID 删除旧行 → 单事务批量插入 pending → 逐条走生产决策"，任何一步失败都整批抛错终止
+评测，绝不降级成一轮记忆指标为 0 的付费运行。
+
+三条必须一起阅读的口径约束：
+
+1. 预置内容只来自案例的用户问题与 `history_expectation`，`allowed_root_causes`、`required_tools`、
+   必要 Evidence source、故障路径与预期停止原因都不进入任何字段。
+2. 但 `historical_root_cause` 本身是标注的一部分，非冲突案例的历史根因就等于本次正确根因。因此
+   **开了预置的运行与 Run A–H 不可同列比较**：记忆类案例的根因指标分母口径已经变了。
+3. 报告里的 `history_seed` 字段公开本轮实际写入了哪些 confirmed / pending / rejected ID 以及向量
+   空间（Provider ID 与维度）；缺少该字段或为 `null` 就表示这一轮没有历史分母。
+
+默认关闭是有意的：预置会真实写库，默认打开等于替使用者决定数据库内容，之后没人能从报告分辨某条
+confirmed 案例是评测放进去的还是用户确认的。截至本文撰写时**尚未执行过一次带预置的真实模型运行**，
+因此这四个指标仍然没有实测值，机制存在不等于已测量。
 
 ## 三次实测对比（全部为实测值）
 
@@ -378,6 +412,7 @@ session：
 load golden-case:v9
   -> validate local settings and select case IDs
   -> FastAPI lifespan validates Fixture / Prompt / Graph / real MCP discovery
+  -> optional live-history-seed writes confirmed / pending / rejected case memories
   -> PostgreSQL GraphRAG retrieves an Evidence Bundle
   -> Planner Structured Outputs chooses Action
   -> LangGraph executes the Action through stdio MCP
@@ -385,7 +420,7 @@ load golden-case:v9
   -> deterministic report policy + independent Auditor
   -> audited memory staging and persisted run/events/checkpoint
   -> golden-diagnosis-eval:v23 scores the public DiagnosisRunResult
-  -> live-golden-eval:v2 aggregates safe model-call telemetry
+  -> live-golden-eval:v3 aggregates safe model-call telemetry
 ```
 
 Live runner 不调用确定性 Golden runner，也不读取 Fixture 响应拼装答案。它只给 Planner 追加合成
@@ -427,6 +462,16 @@ $env:DATAOPS_CHAT_API_KEY='本地密钥，不写入文件'
 明细、Golden 指标、调用次数、结构失败数、usage 缺失数、token 和耗时。生成的本地报告在公开前还
 应人工检查模型名和错误分类；任何真实密钥、内部 URL 或生产数据都不得加入仓库。
 
+要测量四个记忆类指标，需要额外追加 `--seed-history`（它会向 `case_memories` 真实写入预置行，因此
+只在本地测试库上使用）：
+
+```powershell
+.venv\Scripts\python -m app.evaluation.live_golden `
+  --code-revision '<git commit>' `
+  --all-cases --seed-history `
+  --output 'live-golden-seeded.json'
+```
+
 ## 当前不能宣称什么
 
 - 不能把三案例 smoke 外推到 28 条或生产故障分布；`target_coverage_complete=false` 必须一起给出。
@@ -439,6 +484,9 @@ $env:DATAOPS_CHAT_API_KEY='本地密钥，不写入文件'
   该目标仍是设计目标值。
 - 不能把 Run H 记忆类别的四个 0.000 说成"历史召回不work"：真实库里没有 confirmed 案例记忆，那是
   评测前置缺失，`history_trigger_hit_rate` 同轮实测 1.000。
+- 不能因为 `--seed-history` 已经实现就宣称这四个记忆指标已被真实模型测量：目前一次带预置的运行都
+  没跑过。将来跑出的成绩也不能与 Run A–H 放在同一列，因为预置会把 `historical_root_cause` 送进
+  记忆类案例的历史上下文。
 - 不能把 Run H 的 `risk_level_hit_rate=0.500` 说成风险判定能力：未命中案例实测等级全部是 low，多数
   案例没走到方案召回。
 - 不能把 Run G 的 `root_cause_anchor_hit_rate=0.500` 当成模型定位能力的成绩：分母只有 2

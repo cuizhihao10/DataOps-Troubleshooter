@@ -1136,10 +1136,17 @@ Schema 兼容，但 7200 条预期事件只到 6300 条。FlashSync 日志必须
 
 ## 9. 真实模型 Golden 运行与观测契约
 
-`live-golden-eval:v2` 复用 `golden-diagnosis-eval:v23` 的评分器，但 runner 必须经过生产
+`live-golden-eval:v3` 复用 `golden-diagnosis-eval:v23` 的评分器，但 runner 必须经过生产
 PostgreSQL GraphRAG、Planner/Auditor Structured Outputs、LangGraph 和 stdio MCP。默认三案例 smoke
 不加入 `portfolio-eval-manifest:v24`，因为它需要用户显式提供本地模型密钥；缺少 Provider、密钥或
 数据库时必须在任何模型调用前失败，不能生成假的 `metric_kind=measured` 报告。
+
+v3 的 `--seed-history` 预置历史案例时，写入内容同样受 Prompt 隔离约束：预置只能使用案例的用户问题
+与 `history_expectation` 标注，`allowed_root_causes`、`required_tools`、必要 Evidence source、故障
+路径和停止原因都不得进入 CaseMemory 任一字段。预置后的历史上下文经生产 confirmed-only 检索进入
+Planner 与 Auditor，因此它改变的是"模型看到什么历史"这一前置条件，而不是 Prompt 模板本身，
+`planner-react:v8` 与 `auditor-report:v2` 的 Prompt ID 不提升；报告必须用 `history_seed` 公开这一轮
+是否预置，未预置的运行不得把四个记忆指标的 0 解释成模型行为。
 
 合成 `scenario_id`、资源 ID 和观察窗口只作为 Mock MCP 寻址信息进入 Planner 的不可信 user 消息。
 runner 不得把 `required_tools`、允许根因、必要 Evidence source、故障路径、预期停止原因或风险标注

@@ -983,7 +983,7 @@ Windows 终端默认 GBK 代码页，而 manifest 的指标说明全是中文。
 
 ## 14.10 真实模型入口：付费之前先失败
 
-`app/evaluation/live_golden.py`（491 行，`live-golden-eval:v2`）是唯一会产生真实费用的评测入口。它的设计目标只有一个：**任何配置错误都必须在第一次付费调用之前暴露**。
+`app/evaluation/live_golden.py`（523 行，`live-golden-eval:v3`）是唯一会产生真实费用的评测入口。它的设计目标只有一个：**任何配置错误都必须在第一次付费调用之前暴露**。
 
 ### 14.10.1 预检顺序
 
@@ -1083,6 +1083,71 @@ if snapshot is None:
 这是 §14.2 第三条约束最实际的一次应用。真实模型评测的失败原因分布很宽：Provider 限流、网络超时、数据库连接池耗尽、MCP 子进程被杀。这些全都可能在一次 28 条案例的运行中间发生。如果它们被记成 0 分案例，那么 `root_cause_top1_hit_rate` 这个数字就同时受两个因素影响——模型能力和网络质量——而报告的读者会把它整个理解成前者。
 
 宁可整轮失败重跑（重跑要再花一次钱），也不发布一份混着基础设施噪声的分数。
+
+### 14.10.6 `--seed-history`：给四个记忆指标补上分母
+
+`live-golden-eval:v3` 相对 v2 只加了一件事，而这件事来自 §14.12.1 那条最难看的自我批评：确定性 runner 把 Golden 标注直接投影成 `CaseMemoryMatch`，live runner 走的是生产 confirmed-only 检索路径，而真实库里一条 confirmed 案例都没有。于是四个记忆指标必然是 0——**不是模型没做到，是这四项没测**。
+
+补分母的模块是 `app/evaluation/live_history_seed.py`（264 行）。它最值得学的地方不是"往表里插几行数据"，而是它拒绝走的那几条捷径。
+
+**第一，confirmed 状态不许自己写。** 模块只声明两个协议方法：
+
+```python
+class SeededMemoryRuntime(Protocol):
+    async def delete(self, memory_id: str) -> CaseMemory | None: ...
+    async def decide(self, memory_id: str, decision: MemoryDecision) -> CaseMemory | None: ...
+```
+
+插入阶段所有行一律写 `MemoryStatus.PENDING`，之后逐条调用 `decide(memory_id, MemoryDecision.CONFIRM)`。为什么不直接 `INSERT ... status='confirmed'`？因为第 10 章讲过，confirm 是一个**事务**：它更新状态、注册动态 case 图节点、按独立阈值建立双向 `SIMILAR_TO` 边。直接写一行 confirmed 会得到一条"向量能召回、图通道召回不到"的畸形数据，而 `confirmed_only_recall_rate` 恰好要验证图通道。绕过状态机就等于把被测对象换掉了。
+
+**第二，forbidden 记忆必须真的相似。** 一个记忆案例的 `history_expectation` 有两部分：`required_memories`（必须召回）和 `forbidden_memory_ids`（不得召回）。后者的行症状取的是**声明它的那些案例的原始用户问题**：
+
+```python
+forbidden_symptoms.setdefault(memory_id, []).append(f"历史合成症状：{case.user_query}")
+```
+
+如果给 forbidden 行编一段无关文本，向量本来就不相似，"非 confirmed 不得被召回"这条门禁就永远是空过——测的是余弦距离，不是状态过滤。让它们和查询足够像，SQL 里那个 `status = 'confirmed'` 条件才是唯一把它们挡住的东西。
+
+同一个原因还决定了状态怎么分配：
+
+```python
+target_status=(MemoryStatus.PENDING if order % 2 == 0 else MemoryStatus.REJECTED)
+```
+
+两个 forbidden ID 分别落在 pending 和 rejected。都写成 pending 的话，rejected 分支在整轮 live 评测里一次都不会被执行。
+
+**第三，向量必须落在同一个数学空间。** 预置复用了生产的嵌入文本构造函数——这也是本次改动把 `app/memory/service.py` 里的私有 `_memory_text` 改名成公开 `memory_embedding_text` 的原因：
+
+```python
+texts = [memory_embedding_text(row.memory) for row in rows]
+vectors = await embedding_provider.embed_texts(texts)
+```
+
+`embedding_provider` 是从 `app.state.embedding_provider` 取的，也就是检索时用的那一个实例。如果预置自己 `new` 一个 Provider，Provider ID 或维度只要差一点，pgvector 就永远召回不到预置数据——**而那种失败看起来和"模型没召回"一模一样**。报告里的 `history_seed` 因此同时记录 Provider ID 和维度，让读者能自己排除这种可能。
+
+**第四，顺序和事务边界。** 流程固定为"按 ID 删除旧行 → 单事务批量插入 pending → 逐条走生产决策"：
+
+```python
+for row in rows:
+    await memory_runtime.delete(row.memory.memory_id)
+
+async with session_factory.begin() as session:
+    ...
+```
+
+删除在前，重复运行才不会撞签名唯一约束，也不会把上一轮的 occurrence 计数和图边继承进来。插入共享一个事务，任何一行失败就整批回滚——半套历史数据会让召回率变成一个无法解释的中间值，比直接失败更难查。签名还额外混入了 `memory_id` 和一个命名空间常量，因为 Golden 标注里多条历史案例完全可能共享同一组件与根因文本，而 `find_exact` 是按签名精确去重的。
+
+**第五，这个开关默认关闭，而且它改变口径。** `--seed-history` 是 `action="store_true"`，默认 False。两个理由：它会真实写库（默认打开等于替使用者决定数据库内容，事后谁都分不清某条 confirmed 是评测放进去的还是用户确认的）；更重要的是，非冲突记忆案例的 `historical_root_cause` **就等于本次的正确根因**。这不是泄漏——它是 Golden 标注刻意设计的输入，冲突案例的历史根因故意与本次不同，用来测冲突保护。但它意味着**开了预置的运行和 Run A–H 不能放在同一列比较**，记忆类案例的根因指标分母口径已经变了。报告里的 `history_seed` 字段就是这个提醒的载体：
+
+```python
+# None 表示本轮没有预置历史案例：数据库里没有 confirmed 案例时四个记忆指标必然是 0，那是前置
+# 条件缺失而不是模型表现。字段可选而不是必填，是为了让 v1/v2 时代已发布的运行仍能被原样解释。
+history_seed: LiveHistorySeedReport | None = None
+```
+
+预置的调用位置也是设计的一部分——它在 `worker.stop()` 之后、计时和第一次付费调用之前。写库失败要以异常终止整轮，而不是先烧掉模型费用再拿到一份记忆指标全为 0、且无法判断原因的报告。
+
+最后一句诚实声明：**截至本书写作时，这个机制没有跑过一次。** 机制存在不等于指标已测量，四个记忆指标至今没有实测值。
 
 ## 14.11 一次真实事故：28 条案例跑完之后才崩
 
@@ -1191,7 +1256,7 @@ assert not incomplete, (
 这一轮最有价值的产出不是任何一个比率，而是三个**用小样本 smoke 测不出来的**结构性发现：
 
 1. **Planner 的超时配置和这个模型的响应分布是同一个量级。** 成功的 49 次 Planner 调用耗时中位 15.3 s、最大 **29.9 s**，而 `DATAOPS_CHAT_TIMEOUT_SECONDS=30`——分布的右尾正好压在墙上，33 次超时全部落在 30.0–31.7 s。Auditor 同形：成功中位 24.7 s、最大 89.2 s，11 次超时落在 90.0–90.4 s（配置 90 s）。三案例 smoke 里这个尾巴只有几次采样，看不出是配置问题还是端点问题；28 条 × 5 次调用才让它变成一条清晰的截断分布。
-2. **记忆类别的四个指标在真实链路上什么都没测到，而且原因在评测入口。** `history_trigger_hit_rate=1.000`（三条案例都触发了召回），但 `history_recall_coverage` / `confirmed_only_recall_rate` / `history_projection_pass_rate` / `realtime_priority_pass_rate` 全是 0.000。原因不是模型忽略历史：真实库里只有 7 条 pending 记忆、**没有任何 confirmed 案例**，而 Golden 要求召回 `mem_golden_*_history`。确定性 runner 把 Golden 标注投影成 confirmed 匹配（§14.8），真实 runner 走生产召回路径，于是必然为空——连那条链路完全正常的 `golden_memory_flashsync_stable_reference`（3 个工具、`evidence_sufficient`）也是 0.000。这正是 §14.8 那条"用 Fixture 冒充模型，但不冒充口径"的反面教训：**替身补上的前置数据，真实运行时必须有人显式补上，否则指标会静默地测成 0。**
+2. **记忆类别的四个指标在真实链路上什么都没测到，而且原因在评测入口。** `history_trigger_hit_rate=1.000`（三条案例都触发了召回），但 `history_recall_coverage` / `confirmed_only_recall_rate` / `history_projection_pass_rate` / `realtime_priority_pass_rate` 全是 0.000。原因不是模型忽略历史：真实库里只有 7 条 pending 记忆、**没有任何 confirmed 案例**，而 Golden 要求召回 `mem_golden_*_history`。确定性 runner 把 Golden 标注投影成 confirmed 匹配（§14.8），真实 runner 走生产召回路径，于是必然为空——连那条链路完全正常的 `golden_memory_flashsync_stable_reference`（3 个工具、`evidence_sufficient`）也是 0.000。这正是 §14.8 那条"用 Fixture 冒充模型，但不冒充口径"的反面教训：**替身补上的前置数据，真实运行时必须有人显式补上，否则指标会静默地测成 0。** 这条教训后来变成了 §14.10.6 的 `--seed-history`。
 3. **`RiskLevel.HIGH` 在真实报告里一次都没被观测到。** `risk_level_hit_rate=0.500`，14 条未命中案例的实测等级**全部是 low**（3 条期望 high、11 条期望 medium）。`graph-seed:v12` 解除的是"HIGH 在生产路径不可达"这个实现上限（§14.14），但可达不等于被选中——一个案例的实测等级取被召回方案节点的最大值。
 
 有三个数字在这一轮是可以正面陈述的，而且它们的共同点很说明问题：`duplicate_action_rate=0.000`、`safe_degradation_rate=1.000`、`forbidden_conflict_root_hit_count=0` 与 `forbidden_memory_hit_count=0`——**28 条案例上守住的全部是确定性规则负责的门禁**，模型质量相关的指标则被端点状况压得看不清。这恰好是第 9 章那条"确定性规则对模型有非对称否决权"的价值：模型可以不稳定，安全边界不能跟着不稳定。
@@ -1255,7 +1320,7 @@ Run G2 还留下一个必须一起读的约定：它的 `root_cause_anchor_hit_r
 4. **`risk_level_hit_rate` 三案例最后一次实测 0.667、Run H 全量实测 0.500。** 实现约束已在 `graph-seed:v12` 解除（风险等级改由知识节点的 `remediation_risk_level` 声明，`RiskLevel.HIGH` 现在在生产路径上可达），但**两个数字都是各自口径下的最后一次实测值，不得改写或互相替换**；一个案例的实测等级取被召回方案节点的最大值，仍然依赖检索是否选中那个 high 方案。**解除实现约束不等于指标自动达标。**
 5. **28 条全量真实模型评测已完成一次，但那一轮由端点超时主导。** Run H（`scope=full`、28/28、142 次调用中 50 次失败）是目前唯一一组全量实测数字，只能读作"链路在全量案例上完整跑通并被评分"，不是模型能力基线（§14.12.1）。第一次 `--all-cases` 尝试在第六条案例上因组件范围推导缺陷中止（已由 `golden-case:v9` 的 `requested_components` 修复），前五条案例的费用已经发生但没有成绩——因为运行器按设计不写半成品 JSON。
 6. **Planner 30 s 超时与该模型的响应分布同量级。** Run H 实测成功调用中位 15.3 s、最大 29.9 s，33/86 次 Planner 调用在 30 s 墙上失败。这是当前最大的单一失分来源，但**调整时限之后本轮全部数字作废、必须重测**，预期的改善不能当成成绩。
-7. **live 模式缺一步 confirmed 记忆预置，记忆类别四个指标暂不具备发布意义。** Run H 的 `history_recall_coverage` 等四项为 0.000，原因是真实库里没有 confirmed 案例记忆（§14.12.1 第 2 点），不是模型忽略历史。
+7. **live 模式的 confirmed 记忆预置机制已经补上，但一次都没跑过，记忆类别四个指标仍不具备发布意义。** Run H 的 `history_recall_coverage` 等四项为 0.000，原因是真实库里没有 confirmed 案例记忆（§14.12.1 第 2 点），不是模型忽略历史。`live-golden-eval:v3` 的 `--seed-history` 用生产 confirm 事务补上了这个前置条件（§14.10.6），但截至本书写作时尚未执行过带预置的真实模型运行；并且预置轮与 Run A–H **不可同列比较**，因为记忆案例的历史根因就是本次正确根因。
 8. **`RiskLevel.HIGH` 在真实报告中尚未被观测到一次。** Run H 的 14 条未命中案例实测等级全部是 low。`graph-seed:v12` 解除的是实现上限，不是检索选中率。
 
 **确定性侧：**

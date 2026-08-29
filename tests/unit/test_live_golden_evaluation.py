@@ -224,6 +224,20 @@ def test_all_cases_flag_is_off_by_default_in_the_cli() -> None:
     assert full_args.all_cases is True
 
 
+def test_history_seeding_is_off_by_default_in_the_cli() -> None:
+    """验证历史预置默认关闭，只有显式 ``--seed-history`` 才会往长期记忆写入 confirmed 案例。
+
+    预置会改变记忆类指标的分母，也会真实写库；默认打开等于让评测悄悄替使用者决定数据库内容，之后
+    没人能从报告分辨"这些 confirmed 案例是评测放进去的还是用户确认的"。
+    """
+
+    parser = build_argument_parser()
+
+    assert parser.parse_args(["--code-revision", "abc1234"]).seed_history is False
+    seeded = parser.parse_args(["--code-revision", "abc1234", "--seed-history"])
+    assert seeded.seed_history is True
+
+
 def test_every_golden_case_builds_a_valid_live_message_without_model_calls() -> None:
     """验证全部 28 条案例都能离线构造出合法生产消息，使 ``--all-cases`` 不会跑到一半才失败。
 

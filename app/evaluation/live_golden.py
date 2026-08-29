@@ -26,6 +26,10 @@ from app.evaluation.golden_diagnosis import (
     GoldenDiagnosisEvalReport,
     evaluate_golden_diagnosis,
 )
+from app.evaluation.live_history_seed import (
+    LiveHistorySeedReport,
+    seed_live_golden_history,
+)
 from app.observability import (
     InMemoryModelCallRecorder,
     ModelCallMetric,
@@ -42,7 +46,7 @@ from app.orchestration.run_models import (
     DiagnosisSession,
 )
 
-LIVE_GOLDEN_EVAL_CONTRACT_ID = "live-golden-eval:v2"
+LIVE_GOLDEN_EVAL_CONTRACT_ID = "live-golden-eval:v3"
 LIVE_GOLDEN_SMOKE_CASE_IDS = (
     "golden_lts_invalid_partition_parameter_single",
     "golden_cross_lts_bds_flashsync_watermark_timezone_mismatch",
@@ -101,12 +105,13 @@ class LiveGoldenEvalReport(BaseModel):
     """封装一次真实模型评测的可复现版本、成本遥测和 Golden 得分。
 
     报告只允许 ``measured``，因为没有密钥时 CLI 会失败而不会生成占位成绩。模型调用明细不含文本；
-    聚合字段通过 validator 从明细重算，防止手工修改 token、调用数或修复失败数。
+    聚合字段通过 validator 从明细重算，防止手工修改 token、调用数或修复失败数。v3 增加
+    ``history_seed``：记忆类指标是否有非空分母属于运行前置条件而不是模型表现，报告必须自己说清楚。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    contract_id: Literal["live-golden-eval:v2"]
+    contract_id: Literal["live-golden-eval:v3"]
     metric_kind: Literal["measured"] = "measured"
     scope: Literal["smoke", "full", "custom"]
     code_revision: str = Field(min_length=1, max_length=100, pattern=r"\S")
@@ -127,6 +132,9 @@ class LiveGoldenEvalReport(BaseModel):
     output_tokens: int = Field(ge=0)
     total_tokens: int = Field(ge=0)
     model_calls: tuple[ModelCallMetric, ...] = Field(min_length=1)
+    # None 表示本轮没有预置历史案例：数据库里没有 confirmed 案例时四个记忆指标必然是 0，那是前置
+    # 条件缺失而不是模型表现。字段可选而不是必填，是为了让 v1/v2 时代已发布的运行仍能被原样解释。
+    history_seed: LiveHistorySeedReport | None = None
     golden_report: GoldenDiagnosisEvalReport
 
     @model_validator(mode="after")
@@ -328,12 +336,14 @@ def build_live_golden_report(
     started_at: datetime,
     completed_at: datetime,
     duration_ms: float,
+    history_seed: LiveHistorySeedReport | None = None,
 ) -> LiveGoldenEvalReport:
     """从设置、Golden 得分和调用明细构建自校验的实测报告。
 
     聚合只计算存在的 usage；缺失计入 ``unreported_usage_call_count``。scope 由
     :func:`resolve_live_golden_scope` 按 smoke / full / custom 三档判定，因此 28 条全集运行不会与
-    随手挑选的子集共用同一个标签，小样本也无法冒充标准冒烟或全量成绩。
+    随手挑选的子集共用同一个标签，小样本也无法冒充标准冒烟或全量成绩。``history_seed`` 原样透传，
+    使"记忆指标为 0"能被区分成"过滤生效"与"数据库里根本没有 confirmed 案例"两种完全不同的结论。
     """
 
     reported_usage = [call.token_usage for call in model_calls if call.token_usage is not None]
@@ -363,6 +373,7 @@ def build_live_golden_report(
         output_tokens=output_tokens,
         total_tokens=input_tokens + output_tokens,
         model_calls=model_calls,
+        history_seed=history_seed,
         golden_report=golden_report,
     )
 
@@ -373,13 +384,16 @@ async def run_live_golden_evaluation(
     code_revision: str,
     requested_case_ids: Sequence[str] = (),
     run_all_cases: bool = False,
+    seed_history: bool = False,
 ) -> LiveGoldenEvalReport:
     """启动生产 lifespan，执行所选案例并返回真实模型测量报告。
 
     配置预检先于 app 启动，disabled Provider 或缺失 PostgreSQL 时不会产生模型费用。lifespan 负责
     Fixture/Prompt/MCP/数据库审计与资源释放；记录器仅包围逐案 workflow，并在 ``finally`` 恢复，
     避免污染同进程后续任务。``run_all_cases`` 按 Golden 文件声明顺序展开全集，与显式 ``--case-id``
-    互斥，避免"以为跑了全集其实只跑了子集"这类无法从报告分辨的口径错误。
+    互斥，避免"以为跑了全集其实只跑了子集"这类无法从报告分辨的口径错误。``seed_history`` 在计时和
+    模型调用之前写入 confirmed/pending/rejected 历史案例，使记忆类指标拥有真实分母；它不改变任何
+    评分规则，只改变前置条件，因此开与不开的两轮不能放在同一列比较。
     """
 
     if settings.chat_provider == "disabled":
@@ -414,6 +428,21 @@ async def run_live_golden_evaluation(
         # lifespan 默认已启动后台循环；评测在当前 task 中绑定 recorder，因此先停掉循环，
         # 再由 runner.run_once() 驱动同一 claim 路径，避免 ContextVar 只绑定到错误的 task。
         await worker.stop()
+        # 预置必须在计时和第一次付费聊天调用之前完成：写库失败要以异常终止整轮，而不是先烧掉
+        # 模型费用再得到一份记忆指标全为 0、且无法判断原因的报告。
+        history_seed: LiveHistorySeedReport | None = None
+        if seed_history:
+            memory_runtime = app.state.memory_runtime
+            session_factory = app.state.session_factory
+            embedding_provider = app.state.embedding_provider
+            if memory_runtime is None or session_factory is None:
+                raise RuntimeError("live Golden history seeding requires the memory runtime")
+            history_seed = await seed_live_golden_history(
+                selected,
+                memory_runtime=memory_runtime,
+                session_factory=session_factory,
+                embedding_provider=embedding_provider,
+            )
         runner = LiveGoldenRunner(runtime, fixture_registry, worker=worker)
         started_at = datetime.now(UTC)
         started_clock = perf_counter()
@@ -436,6 +465,7 @@ async def run_live_golden_evaluation(
         started_at=started_at,
         completed_at=completed_at,
         duration_ms=duration_ms,
+        history_seed=history_seed,
     )
 
 
@@ -443,8 +473,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     """创建真实模型评测 CLI 参数解析器，不接受任意 shell 命令。
 
     code revision 必填以保证结果可追溯；``--case-id`` 可重复选择低成本子集，``--all-cases`` 展开
-    Golden 全集以取得 ``scope=full`` 报告，缺省运行标准三案例。output 缺省写 stdout，指定文件时仅写
-    已校验 JSON，不创建目录或覆盖其他隐式路径。
+    Golden 全集以取得 ``scope=full`` 报告，缺省运行标准三案例。``--seed-history`` 显式打开历史案例
+    预置：它会写数据库，因此默认关闭，不能由代码悄悄替使用者决定往长期记忆里放东西。output 缺省写
+    stdout，指定文件时仅写已校验 JSON，不创建目录或覆盖其他隐式路径。
     """
 
     parser = argparse.ArgumentParser(
@@ -453,12 +484,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--code-revision", required=True)
     parser.add_argument("--case-id", action="append", default=[])
     parser.add_argument("--all-cases", action="store_true")
+    parser.add_argument("--seed-history", action="store_true")
     parser.add_argument("--output", type=Path)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """解析参数、运行异步评测并把 ``live-golden-eval:v2`` JSON 输出到目标位置。
+    """解析参数、运行异步评测并把 ``live-golden-eval:v3`` JSON 输出到目标位置。
 
     异常保持非零进程退出并由 Python 输出错误，不生成半成品报告。成功时使用 Pydantic JSON 序列化
     枚举和时间；输出文件采用 UTF-8 且保留中文，便于作品集审阅和后续机器比较。
@@ -473,6 +505,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 code_revision=args.code_revision,
                 requested_case_ids=args.case_id,
                 run_all_cases=args.all_cases,
+                seed_history=args.seed_history,
             )
         )
     except LiveGoldenSetupError as exc:

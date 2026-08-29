@@ -708,6 +708,11 @@ async def lifespan(app: FastAPI):
         app.state.diagnosis_worker = diagnosis_worker
         app.state.memory_counts = memory_counts
         app.state.database_engine = database_engine
+        # 会话工厂与 Embedding Provider 公开给进程内工具（当前是真实模型评测的历史预置），使它们
+        # 复用与检索完全同一个向量空间，而不是自己再造一个 Provider——ID 或维度一旦不同，pgvector
+        # 就永远召回不到预置数据，而那种失败看起来和"模型没召回"一模一样。
+        app.state.session_factory = session_factory
+        app.state.embedding_provider = embedding_provider
         app.state.database_status = database_status
         app.state.knowledge_nodes_loaded = knowledge_nodes_loaded
         app.state.knowledge_edges_loaded = knowledge_edges_loaded

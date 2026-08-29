@@ -31,6 +31,7 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/orchestration/history_evaluation.py"),
     Path("app/evaluation/portfolio.py"),
     Path("app/evaluation/live_golden.py"),
+    Path("app/evaluation/live_history_seed.py"),
     Path("app/observability/model_calls.py"),
     Path("app/reporting/draft.py"),
     Path("app/reporting/policy.py"),
@@ -209,7 +210,11 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
     assert "GoldenEvidenceConflictExpectation" in guide
     assert "统一作品集评测 manifest 与单命令运行器" in guide
     assert "portfolio-eval-run:v23" in guide
-    assert "live-golden-eval:v2" in guide
+    assert "live-golden-eval:v3" in guide
+    # v3 只新增历史预置这一个前置条件，指南必须同时保留开关名与分母字段名：少了任何一个，读者就
+    # 无法判断某一轮记忆指标为 0 是"没预置"还是"模型没召回"。
+    assert "--seed-history" in guide
+    assert "history_seed" in guide
     # 样本口径三档必须写在指南里：全量运行若与随手挑的子集共用 custom，读者无法分辨分母。
     assert "`scope` 现在是 `smoke` / `full` / `custom`" in guide
     assert "--all-cases" in guide
@@ -381,7 +386,12 @@ def test_live_golden_status_document_separates_runnable_contract_from_measuremen
 
     report = Path("docs/live-golden-eval-results.md").read_text(encoding="utf-8")
 
-    assert "live-golden-eval:v2" in report
+    assert "live-golden-eval:v3" in report
+    # 记忆类四指标的 0 必须被明确写成"分母为空"，并且必须声明预置机制存在 ≠ 已测量：
+    # 少了后半句，读者会把"已经实现 --seed-history"读成"这四项已经有实测值"。
+    assert "--seed-history" in report
+    assert "history_seed" in report
+    assert "机制存在不等于已测量" in report
     # v1 到 v2 只扩了 scope 枚举，因此已发布的 Run A–G 数值必须原样保留而不是被改写。
     assert "下表 Run A–G 是在 `live-golden-eval:v1` 契约下产生的" in report
     assert "也不允许因为契约升版而改写" in report

@@ -1462,7 +1462,7 @@ python -m pytest -m postgres
 
 确定性 Golden runner 的职责是验证数据集、评分器和安全门禁，不是测量 Planner/Auditor 模型质量。
 为了让真实模型可以复用完全相同的评分逻辑，`app/evaluation/live_golden.py` 实现独立
-`live-golden-eval:v2`：它进入 FastAPI lifespan，取得生产 `DiagnosisApplicationRuntime` 与已验证
+`live-golden-eval:v3`：它进入 FastAPI lifespan，取得生产 `DiagnosisApplicationRuntime` 与已验证
 Fixture registry，为每条案例创建独立 PostgreSQL session，再顺序运行 GraphRAG、双 Agent、真实
 stdio MCP、Auditor 和 memory staging。它没有加入默认 `portfolio-eval-manifest:v24`，因为离线 CI
 没有密钥时应明确不运行，而不是让完整 Portfolio 永久 blocked 或偷偷换回确定性替身。
@@ -1478,6 +1478,25 @@ v1 只有 `smoke` 与 `custom` 两个值，全量运行会和“我从 28 条里
 `full` 用集合比较，因为“是否覆盖全集”与执行顺序无关；少一条立即退回 `custom`，不允许“接近全集”
 被读成全量。`--all-cases` 与显式 `--case-id` 互斥并在产生模型费用前失败，避免报告 scope 与实际
 分母不一致。全量运行是付费路径，因此仍然必须显式请求，默认命令不会替使用者花掉 28 条的调用。
+
+v2 到 v3 增加的是历史预置，而不是任何评分规则。`app/evaluation/live_history_seed.py` 由
+`--seed-history` 显式打开，在计时和第一次付费聊天调用之前把 Golden 记忆类案例的 `required_memories`
+写成 confirmed 案例、把 `forbidden_memory_ids` 写成 pending 与 rejected 案例，报告里新增
+`history_seed` 字段公开这三组 ID 与向量空间。它解决的是一个被 Run H 暴露的口径缺陷：确定性 runner
+由脚本替身直接合成 `CaseMemoryMatch`，而 live 模式走生产 confirmed-only 检索路径，数据库里没有
+confirmed 案例时 `history_recall_coverage`、`confirmed_only_recall_rate`、
+`history_projection_pass_rate`、`realtime_priority_rate` 四个指标必然是 0——那是"没测"，不是"模型
+没做到"，而报告此前无法区分这两件事。
+
+预置刻意受三条约束。第一，内容只来自案例的用户问题与 `history_expectation` 标注，不写入
+`allowed_root_causes`、`required_tools`、必要证据来源或停止原因；但 `historical_root_cause` 本身是
+标注的一部分，非冲突案例的历史根因与本次正确根因相同，所以开了预置的记忆类案例根因指标与未开预置
+的历史运行**不可同列比较**，`history_seed` 字段的存在就是为了让这件事无法被忽略。第二，confirmed
+只能由 `PostgresMemoryRuntime.decide(CONFIRM)` 产生，与用户在 `/demo` 点确认完全同一个事务，因此
+动态 case 图节点与 `SIMILAR_TO` 边一并建立，图通道召回不是未经验证的假设。第三，forbidden 记忆的
+向量取自同一批案例问题而不是随机文本：只有和查询足够相似，"非 confirmed 不得被召回"才是真被测过的
+门禁，而不是因为向量不相关自动成立。顺序固定为"先按 ID 删除旧行 → 单事务批量插入 pending → 逐条
+决策"，重复运行因此幂等，任何一步失败都整批抛错终止评测，绝不降级成一轮记忆指标为 0 的付费运行。
 
 Live runner 必须解决一个只存在于 Mock 环境的路由问题：MCP 按 `scenario_id + tool_name + resource_id`
 精确查找 Fixture，而普通用户问题不一定包含所有机器资源 ID。`build_live_golden_message()` 因此只从
@@ -1495,7 +1514,7 @@ CLI creates InMemoryModelCallRecorder
   -> official SDK parse returns or raises a stable domain branch
   -> measurement records role/version/status/duration/optional usage
   -> CLI finally resets the ContextVar token
-  -> live-golden-eval:v2 aggregates calls and existing Golden report
+  -> live-golden-eval:v3 aggregates calls and existing Golden report
 ```
 
 选择 `ContextVar` 而不是在 Provider 保存 `last_usage`，是因为 Planner/Auditor 实例会被 FastAPI 并发
@@ -1572,7 +1591,7 @@ confirm/reject；不得展示 Thought、Prompt、Provider 响应或凭据。所�
 - `auditor-impact-eval:v1` 三条语义缺陷案例、规则/Auditor 增量归因、危险残留与安全处置指标和真实报告 LangGraph 实测。
 - `golden-case:v9` Schema/位点/倾斜/参数/限流/授权/水位线反证、补参/降级/跨组件门禁、记忆与冲突标注、十四条案例的知识图根因锚点，以及 `golden-diagnosis-eval:v23` 二十八条案例评测。
 - `portfolio-eval-manifest:v24` 五层受限 pytest 入口、v1–v23 兼容读取、指标发布门禁，以及 `portfolio-eval-run:v23` 单命令 JSON 汇总。
-- `live-golden-eval:v2` 生产路径真实模型入口、smoke/full/custom 三档样本口径、Golden 答案隔离、ContextVar 安全遥测和 measured-only 报告契约。
+- `live-golden-eval:v3` 生产路径真实模型入口、smoke/full/custom 三档样本口径、`--seed-history` 历史预置与 `history_seed` 分母声明、Golden 答案隔离、ContextVar 安全遥测和 measured-only 报告契约。
 - `audited-diagnosis-workflow:v2` 按需召回、两阶段案例解释、ReAct、Auditor 和审计后 staging 顶层闭环。
 - `diagnosis-resources:v4` session/message/run/event PostgreSQL 资源 API、取消/恢复、完整相似案例结果和安全失败事件。
 - `session-checkpoint:v1` 同 session 成功快照、追问恢复、版本门禁、失败保护和跨 run Action 去重。
