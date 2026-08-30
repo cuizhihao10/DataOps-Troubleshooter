@@ -14,6 +14,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.domain.models import Component, RiskLevel
 from app.domain.tooling import McpToolRequest, McpToolResponse, ToolName
 
+# Golden 标注的历史案例 ID 必须与生产铸造格式完全一致（`mem_` + 16 位小写 hex）。放成共享别名而不是
+# 在两个字段里各写一遍正则，是为了让 required 与 forbidden 不可能被改成两套宽严不同的口径。
+GoldenMemoryId = Annotated[str, Field(pattern=r"^mem_[0-9a-f]{16}$")]
+
 
 class ScenarioToolResult(BaseModel):
     """绑定一个白名单工具、预期请求和该合成场景下的确定性响应。
@@ -138,11 +142,16 @@ class GoldenMemoryExpectation(BaseModel):
 
     memory ID、历史根因和固定相似度用于构造可重复强类型上下文；``expect_root_conflict`` 标记旧根因
     是否与本次允许根因不同，使评测器能单独验证实时 Observation 优先，而不把相似度当作事实。
+
+    ID 受生产格式约束而不只是"看起来像 memory ID"：``app/memory/service.py`` 铸造 ID 的唯一方式是
+    ``mem_{signature[:16]}``，而 ``app/memory/graph_registration.py`` 依赖该形状把案例映射成可逆的
+    ``case_<16hex>`` 图主键。标注一个生产永远铸造不出来的 ID，等于声明一个真实系统无法建立的前置
+    条件——确定性替身会照单合成它，真实运行则在 confirm 事务里失败。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    memory_id: str = Field(pattern=r"^mem_[a-z0-9][a-z0-9_-]{2,95}$")
+    memory_id: GoldenMemoryId
     historical_root_cause: str = Field(min_length=1, max_length=1000)
     similarity: float = Field(gt=0, le=1)
     expect_root_conflict: bool = False
@@ -158,7 +167,9 @@ class GoldenHistoryExpectation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     required_memories: list[GoldenMemoryExpectation] = Field(min_length=1, max_length=5)
-    forbidden_memory_ids: list[str] = Field(default_factory=list)
+    # forbidden ID 同样要求生产格式：reject 决策会调用图注册器的 remove，非规范 ID 在真实预置里
+    # 与 required 一样过不了那一步，只有确定性替身才会让它看起来可用。
+    forbidden_memory_ids: list[GoldenMemoryId] = Field(default_factory=list)
     require_realtime_priority: bool = True
 
     @model_validator(mode="after")
@@ -225,7 +236,7 @@ class GoldenCaseSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    contract_id: Literal["golden-case:v9"]
+    contract_id: Literal["golden-case:v10"]
     case_id: str = Field(pattern=r"^golden_[a-z0-9][a-z0-9_-]{2,79}$")
     case_category: GoldenCaseCategory
     user_query: str = Field(min_length=1, max_length=4000)

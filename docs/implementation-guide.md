@@ -1180,7 +1180,21 @@ v8 到 v9 只新增一个输入字段 `requested_components`，评分规则、�
 测试只对 runner 追加的路由段做泄漏断言，因为 `user_query` 本身是用户的措辞（有一条记忆案例的
 问题里就写着"FlashSync 主键冲突"）。
 
-`golden-case:v9` 的 `case_category` 当前为 8/10/4/3/3。28 条案例使用 18 个 Fixture；三条记忆案例
+v9 到 v10 同样不改评分规则、指标定义和分母，只把记忆标注里的 memory ID 收紧成生产真能铸造的形状：
+`GoldenMemoryId` 要求 `mem_` + 16 位小写 hex，`GoldenMemoryExpectation.memory_id` 与
+`GoldenHistoryExpectation.forbidden_memory_ids` 共用这一个别名，因此 required 与 forbidden 不可能被改成
+两套宽严不同的口径。触发它的是另一次真实失败：`--seed-history` 第一次执行时在
+`app/memory/graph_registration.py` 的 `case_graph_node_id` 抛出 `case graph memory_id must use
+mem_<16 hex> format`。生产铸造 ID 的唯一路径是 `app/memory/service.py` 的 `mem_{signature[:16]}`，
+而图注册器依赖这个形状构造可逆的 `case_<16hex>` 主键；旧标注写的是 `mem_lts_dependency_stall` 这类
+可读 ID，等于声明了一个真实系统永远建立不出来的前置条件。确定性替身的 `RecordingMemoryRuntime.decide`
+不校验 ID 形状，所以这个谎言在离线回归里完全不可见。修法刻意选择收紧数据集而不是放宽
+`case_graph_node_id`：后者会破坏 `case_<16hex>` ↔ `mem_<16hex>` 的可逆溯源、改写已有图主键，等于为了
+测试方便削弱生产约束。五个 ID 由案例语义经 blake2s 派生（`mem_ebc78324034714d6` /
+`mem_43fb5df2a9cf66da` / `mem_4c0ab7ebba8e2aaa` / `mem_fdd472fc47cd485d` / `mem_079acbd5fc8f2fbc`），
+评分器仍按精确字符串比较 memory ID，所以只做"评测期 ID 映射"会让分母与真实库脱钩，因此被否决。
+
+`golden-case:v10` 的 `case_category` 当前为 8/10/4/3/3。28 条案例使用 18 个 Fixture；三条记忆案例
 增加 `history_expectation`，逐项保存 required memory ID、历史根因、相似度、冲突标记和 forbidden IDs。
 runner 构造 confirmed `CaseMemoryMatch` 与同 ID/相似度的 `SimilarCaseReference`，评分器检查触发、召回
 覆盖、confirmed-only、报告投影和实时优先。即使旧根因只引用有效 memory ID，若没有本次 TOOL
@@ -1199,7 +1213,7 @@ Evidence 或与允许根因冲突，实时优先仍失败。
 领域 Evidence，评分器按以下顺序处理：
 
 ```text
-load golden-case:v9
+load golden-case:v10
   -> validate conflict sources / forbidden roots / no-root obligation
   -> replay three successful ToolEvent + Evidence objects
   -> verify every annotated conflict source was observed
@@ -1215,7 +1229,7 @@ load golden-case:v9
 引用完整率仍为 1；专用安全指标必须失败，证明两项指标职责不同。当前只有一条确定性冲突案例，不能
 外推为真实 LLM 的冲突识别准确率，未来新增同类案例或真实模型 runner 时必须提升契约并重新实测。
 
-`golden-case:v9` 延续把跨组件类别从“人工约定”升级为 Schema 不变量。加载器从每个
+`golden-case:v10` 延续把跨组件类别从“人工约定”升级为 Schema 不变量。加载器从每个
 `required_tools` 枚举值的前缀提取组件集合；`cross_component` 必须至少覆盖两个不同组件，并至少具有
 一条 `required_fault_paths`。先检查组件数量、再检查路径存在性，能分别暴露“单组件改标签”和“调用
 多个系统但没有因果关系”两种配额污染。普通单组件、记忆和冲突类别不受这条规则误伤。
@@ -1255,7 +1269,7 @@ BDS 状态、日志、表信息和 FlashSync 延迟、日志、一致性六项 O
 精简，同时把事实环境从“缺分区/主键冲突”扩展到“输入正常但计算资源耗尽”。
 
 第 16 条 `golden_ambiguous_bds_missing_resource_context` 覆盖真正的零工具补参边界。用户只说 BDS
-任务很慢，没有资源 ID 和时间窗；`golden-case:v9` 在加载阶段保证零 `required_tools` 只能属于
+任务很慢，没有资源 ID 和时间窗；`golden-case:v10` 在加载阶段保证零 `required_tools` 只能属于
 `ambiguous_or_insufficient`，并要求 path、Evidence source、allowed root 均为空。该类别还必须包含
 `missing_resource_id`、`need_user_input` 或 `evidence_insufficient` 之一，防止模糊输入被标成证据充分。
 
@@ -1498,6 +1512,13 @@ confirmed 案例时 `history_recall_coverage`、`confirmed_only_recall_rate`、
 门禁，而不是因为向量不相关自动成立。顺序固定为"先按 ID 删除旧行 → 单事务批量插入 pending → 逐条
 决策"，重复运行因此幂等，任何一步失败都整批抛错终止评测，绝不降级成一轮记忆指标为 0 的付费运行。
 
+这个机制已经执行过一轮（Run I，3 条记忆案例、`scope=custom`）：`history_recall_coverage` 与
+`confirmed_only_recall_rate` 实测 1.0000，`history_projection_pass_rate` 与
+`realtime_priority_pass_rate` 实测 0.0000。后两项的 0 是真实的但成因不在历史处理：三条案例的报告都在
+Auditor 两轮 `revise` 后 `safe_degraded`，而降级报告按设计清空 `root_causes` 与 `similar_cases`，因此这
+两个指标同时在测"报告是否被放行"。这是预置补上分母之后才暴露出来的口径缺陷，完整口径见
+`docs/live-golden-eval-results.md` 的 "Run I" 与"仍未达标"两节。
+
 Live runner 必须解决一个只存在于 Mock 环境的路由问题：MCP 按 `scenario_id + tool_name + resource_id`
 精确查找 Fixture，而普通用户问题不一定包含所有机器资源 ID。`build_live_golden_message()` 因此只从
 Scenario 读取 scenario ID、资源 ID、时间窗口和组件，并把它们作为明确标记的合成路由元数据追加到
@@ -1589,7 +1610,7 @@ confirm/reject；不得展示 Thought、Prompt、Provider 响应或凭据。所�
 - `memory-recall-eval:v1` 六条长期记忆召回案例、双模式消融、Recall/Precision/forbidden 指标和 PostgreSQL 实测报告。
 - `history-impact-eval:v1` 三条 Memory off/on 诊断案例、实际 ToolEvent 行为指标、实时事实优先门禁和真实 LangGraph 实测报告。
 - `auditor-impact-eval:v1` 三条语义缺陷案例、规则/Auditor 增量归因、危险残留与安全处置指标和真实报告 LangGraph 实测。
-- `golden-case:v9` Schema/位点/倾斜/参数/限流/授权/水位线反证、补参/降级/跨组件门禁、记忆与冲突标注、十四条案例的知识图根因锚点，以及 `golden-diagnosis-eval:v23` 二十八条案例评测。
+- `golden-case:v10` Schema/位点/倾斜/参数/限流/授权/水位线反证、补参/降级/跨组件门禁、记忆与冲突标注、十四条案例的知识图根因锚点，以及 `golden-diagnosis-eval:v23` 二十八条案例评测。
 - `portfolio-eval-manifest:v24` 五层受限 pytest 入口、v1–v23 兼容读取、指标发布门禁，以及 `portfolio-eval-run:v23` 单命令 JSON 汇总。
 - `live-golden-eval:v3` 生产路径真实模型入口、smoke/full/custom 三档样本口径、`--seed-history` 历史预置与 `history_seed` 分母声明、Golden 答案隔离、ContextVar 安全遥测和 measured-only 报告契约。
 - `audited-diagnosis-workflow:v2` 按需召回、两阶段案例解释、ReAct、Auditor 和审计后 staging 顶层闭环。

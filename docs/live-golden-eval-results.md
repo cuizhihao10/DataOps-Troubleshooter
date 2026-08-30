@@ -16,13 +16,15 @@ Run H 是第一组 `scope=full` 实测数字（28/28、`case_coverage_rate=1.000
 **Run A–H 全部在没有历史预置的条件下运行**，因此四个记忆类指标（`history_recall_coverage`、
 `confirmed_only_recall_rate`、`history_projection_pass_rate`、`realtime_priority_rate`）在这些轮次里
 一律为 0，含义是"数据库里没有 confirmed 历史案例，这四项没测"，**不是"模型没做到"**。v3 的
-`--seed-history` 提供了这个前置条件（详见"历史预置与记忆类分母"一节），但截至本文撰写时尚未执行
-过一次预置运行，因此仍没有这四个指标的实测值。
+`--seed-history` 提供了这个前置条件，Run I 是第一轮带预置的实测运行：四个指标终于拥有真实非空分母，
+其中两项实测 1.0000、两项实测 0.0000，而后两项的 0 由**报告被安全降级**而不是历史处理错误造成（详见
+"Run I"一节）。Run I 只覆盖 3 条记忆案例（`scope=custom`），与 Run A–H 不可同列比较。
 
 仓库仍然不提交任何密钥、端点地址或原始报告 JSON：`live-golden*.json` 已在 `.gitignore` 中，对外
 口径只保留本文的聚合数字与逐案例判定。
 
-最近一次真实模型运行是 Run H（`scope=full`，28 条，见"Run H"一节）。在它之前的 Run G（评分器
+最近一次真实模型运行是 Run I（`scope=custom`，3 条记忆案例，第一轮带 `--seed-history` 预置，见
+"Run I"一节）；最近一次全量运行仍是 Run H（`scope=full`，28 条）。在它们之前的 Run G（评分器
 `golden-diagnosis-eval:v23`）给出了新增指标 `root_cause_anchor_hit_rate` 的第一个实测值 0.500，分母
 `anchored_case_count=2`；同一轮里 `root_cause_top1_hit_rate` 仍然是 0.000。这两个数字是**分母与口径都
 不同的两个独立指标**，必须并列阅读，不能相减、不能互相替换（详见"Run G"与"仍未达标"两节）。Run G
@@ -65,8 +67,12 @@ confirmed（因此动态 case 图节点与 `SIMILAR_TO` 边与用户在 `/demo` 
    空间（Provider ID 与维度）；缺少该字段或为 `null` 就表示这一轮没有历史分母。
 
 默认关闭是有意的：预置会真实写库，默认打开等于替使用者决定数据库内容，之后没人能从报告分辨某条
-confirmed 案例是评测放进去的还是用户确认的。截至本文撰写时**尚未执行过一次带预置的真实模型运行**，
-因此这四个指标仍然没有实测值，机制存在不等于已测量。
+confirmed 案例是评测放进去的还是用户确认的。第一次真实预置在付费调用之前就失败了——
+`app/memory/graph_registration.py` 的 `case_graph_node_id` 抛出 `case graph memory_id must use
+mem_<16 hex> format`，因为 Golden 标注写的是生产永远铸造不出来的可读 ID。修法是收紧数据集到
+`golden-case:v10`（形状 `mem_` + 16 位小写 hex，required 与 forbidden 共用同一别名），而不是放宽生产
+约束；这个缺陷在离线回归里完全不可见，因为确定性替身的 `RecordingMemoryRuntime.decide` 不校验 ID
+形状。修复后的第一轮预置运行即 Run I，机制到那一刻才从"已实现"变成"已测量"。
 
 ## 三次实测对比（全部为实测值）
 
@@ -329,6 +335,12 @@ token/耗时明细——本文无法给出它的任何数字，只能给出失�
 它的 0.000 同样只反映"库里没有可召回的历史"。**结论：live 模式缺一步 confirmed 记忆预置，在补上
 之前这四个指标不具备发布意义，不能写成"历史召回失败"。**
 
+> 记录时的 ID 已在 `golden-case:v10` 被替换：`mem_golden_*_history` 这类可读 ID 生产永远铸造不出来
+> （唯一铸造路径是 `mem_{signature[:16]}`），因此现在的标注是 `mem_ebc78324034714d6`（LTS）、
+> `mem_43fb5df2a9cf66da`（BDS）、`mem_4c0ab7ebba8e2aaa`（FlashSync），forbidden 为
+> `mem_fdd472fc47cd485d` 与 `mem_079acbd5fc8f2fbc`。上文保留旧 ID 是因为它如实记录了 Run A–H 当时
+> 读到的标注；这一轮的 0.000 与 ID 形状无关，换 ID 不改变任何已发布数字。
+
 **3. `RiskLevel.HIGH` 在真实报告里一次都没出现。** `risk_level_hit_rate=0.500`，14 条未命中案例的
 实测等级**全部是 low**（其中 3 条期望 high、11 条期望 medium）。`graph-seed:v12` 已让 high 在生产路径
 可达，但可达不等于被选中：一个案例的实测等级取被召回方案节点的最大值，本轮大量案例在 Planner 首次
@@ -345,6 +357,59 @@ token/耗时明细——本文无法给出它的任何数字，只能给出失�
 `evidence_conflict_safe_resolution_rate=0.000` 与 Run G 同因：`golden_bds_conflicting_partition_evidence`
 再次以 `planner_provider_error` 零工具结束，三个矛盾 source 一个都没被观察。Run G2 已单独证明端点恢复
 后该案例可复现安全处置，但那是 `scope=custom` 分母 1 的旁证，不能并入本轮。
+
+## Run I：第一轮带历史预置的运行（实测值，`scope=custom`）
+
+Run I 是 `--seed-history` 修复 ID 形状后的第一次真实执行，也是四个记忆类指标第一次拥有非空分母。
+它刻意不跑 28 条：默认 smoke 集合里没有任何记忆案例，预置了也测不到东西，因此只选三条
+`memory_recall` 案例（`scope=custom`、`case_count=3`、`case_coverage_rate=0.107`）。
+
+运行元数据（实测值）：`live-golden-eval:v3`、`golden-case:v10`、`golden-diagnosis-eval:v23`、
+`planner-react:v8`、`auditor-report:v2`、`bge-m3:v1`、代码版本 `a354591`、`metric_kind=measured`。
+15 次模型调用**全部成功**（0 次失败、0 次结构化输出无效、0 次缺 usage），261,911 token，251.0 s
+（均摊 83.7 s/案例）。这是目前唯一一轮端点全程稳定的运行，因此它的低分不能再归因给端点。
+
+`history_seed` 实际写入：confirmed `mem_ebc78324034714d6` / `mem_43fb5df2a9cf66da` /
+`mem_4c0ab7ebba8e2aaa`，pending `mem_fdd472fc47cd485d`，rejected `mem_079acbd5fc8f2fbc`，
+向量空间 `bge-m3:v1` / 1024 维。
+
+四个记忆类指标（实测值，分母为 3 条记忆案例）：
+
+| 指标 | Run A–H | Run I | 读法 |
+| --- | --- | --- | --- |
+| `history_trigger_hit_rate` | 1.0000 | 1.0000 | 两轮都触发了召回 |
+| `history_recall_coverage` | 0.0000（空分母） | **1.0000** | 三条案例各自的 required 记忆都被真实生产检索召回 |
+| `confirmed_only_recall_rate` | 0.0000（空分母） | **1.0000** | pending 与 rejected 行确实存在且一条都没被召回 |
+| `history_projection_pass_rate` | 0.0000（空分母） | 0.0000 | 真实的 0，但成因是报告被安全降级，见下 |
+| `realtime_priority_pass_rate` | 0.0000（空分母） | 0.0000 | 同上；该指标要求 Top-1 根因命中允许标签 |
+| `forbidden_memory_hit_count` | 0 | 0 | Run I 的 0 是真实的"禁止案例存在但没被召回" |
+
+**前两项从"没测"变成了实测 1.0000，后两项从"没测"变成了实测 0.0000。这不是四项都提升。**
+
+后两项的 0 有精确成因，`run_events` 可复算：三条案例的确定性规则预检都是 0 个问题
+（`draft_created`），随后独立 Auditor 两轮都返回 `revise`（问题码 `unsupported_claim` /
+`report_incomplete`），唯一一次返工用完后转 `safe_degraded`。降级报告按设计清空 `root_causes` 与
+`similar_cases`（`app/reporting/revision.py`），于是 `history_projection_pass_rate` 要求的
+"`similar_cases` 顺序等于召回顺序"必然失败，`realtime_priority_pass_rate` 要求的"Top-1 根因落在允许
+标签内"也必然失败（`actual_top1_root_cause=None`）。**这两个指标因此同时测量"历史处理是否正确"和
+"报告是否被放行"，Run I 测到的是后者不通过；不能把它们读成"模型把历史根因当成了本次结论"。**
+同轮 `accepted_report_rate=0.0000`、`root_cause_top1_hit_rate=0.0000`、
+`root_cause_anchor_hit_rate=0.0000`（`anchored_case_count=1`）都是同一个降级链条的结果。
+
+降级边界本身守住了：三条 run 的 memory 事件全部是 `skipped_not_accepted`（`memory_id=null`），
+degraded 报告一条都没有进入长期记忆。
+
+同轮其余实测值：`intent_accuracy=1.0000`、`necessary_action_coverage=1.0000`、
+`evidence_source_coverage=1.0000`、`citation_completeness=1.0000`、
+`unsupported_critical_claim_rate=0.0000`、`duplicate_action_rate=0.0000`、
+`safe_degradation_rate=1.0000`、`stop_reason_hit_rate=0.6667`、`tool_attempt_success_rate=0.6429`、
+`risk_level_hit_rate=0.3333`、`fault_path_completeness=0.0000`。
+`golden_memory_flashsync_stable_reference` 单独拖低两项：它跑出 8 个逻辑 Action、以
+`react_budget_exhausted` 结束、该案例 `tool_attempt_success_rate=0.375`，另两条案例都是 3 个 Action、
+`evidence_sufficient`、1.000。
+
+Run I 不能与 Run A–H 放在同一列：案例集合不同（3 条记忆案例 vs 3 条 smoke / 28 条全量），且
+`historical_root_cause` 在非冲突案例里就等于本次正确根因，记忆类案例的根因指标分母口径已经变了。
 
 ## Run D 相对 Run C 的两项结构性修复
 
@@ -399,9 +464,21 @@ token/耗时明细——本文无法给出它的任何数字，只能给出失�
   pending 记忆、没有任何 confirmed 案例。确定性 runner 把 Golden 标注投影成 confirmed 匹配，真实 runner
   走生产召回路径，因此这四个指标测的是"库里有没有历史"，不是"模型会不会用历史"。补一步显式的
   confirmed 记忆预置（并保持 pending/rejected 禁止命中不变）之前，这四个数字只能标注为前置缺失。
+  **Run I 已经补上这一步**：前两项实测 1.0000，后两项实测 0.0000，前置缺失这条对召回类指标不再成立。
+- **`history_projection_pass_rate` 与 `realtime_priority_pass_rate` 把两件事混在一个数字里，这是 Run I
+  暴露的口径缺陷。** 前者要求报告 `similar_cases` 的顺序等于召回顺序，后者要求 Top-1 根因落在允许标签
+  内；而安全降级报告按设计清空 `root_causes` 与 `similar_cases`。因此只要报告没被放行，这两项必然为 0，
+  与模型如何处理历史无关。Run I 三条案例全部走到 `safe_degraded`（Auditor 两轮 `revise`，规则预检 0
+  问题），实测就是这个情形。要把它们变成纯粹的历史处理指标，需要在 accepted 报告子集上另立分母——那是
+  一次显式口径变更，必须重新发布定义，不能事后把 Run I 的 0 解释成别的意思。
+- **Run I 的 `accepted_report_rate=0.0000` 说明这三条记忆案例的报告一次都没被放行。** 问题码是
+  `unsupported_claim` 与 `report_incomplete`，且两轮 Auditor 判定一致、确定性规则预检 0 问题。这是目前
+  唯一一轮端点全程稳定（15/15 调用成功）的运行，因此这个 0 不能再归因给超时；但分母只有 3，也不能
+  外推成"报告放行率很低"。
 - **`RiskLevel.HIGH` 在真实报告中尚未被观测到一次。** Run H 的 14 条未命中案例实测等级全部是 low
   （3 条期望 high、11 条期望 medium）。`graph-seed:v12` 解除的是实现上限，不是检索选中率；这条缺口
-  要等 Planner 侧链路完成度恢复之后才能重新测量。
+  要等 Planner 侧链路完成度恢复之后才能重新测量。Run I 同形：`risk_level_hit_rate=0.3333`，两条未命中
+  案例实测等级都是 low。
 
 ## 真实执行路径
 
@@ -409,7 +486,7 @@ token/耗时明细——本文无法给出它的任何数字，只能给出失�
 session：
 
 ```text
-load golden-case:v9
+load golden-case:v10
   -> validate local settings and select case IDs
   -> FastAPI lifespan validates Fixture / Prompt / Graph / real MCP discovery
   -> optional live-history-seed writes confirmed / pending / rejected case memories
@@ -484,9 +561,13 @@ $env:DATAOPS_CHAT_API_KEY='本地密钥，不写入文件'
   该目标仍是设计目标值。
 - 不能把 Run H 记忆类别的四个 0.000 说成"历史召回不work"：真实库里没有 confirmed 案例记忆，那是
   评测前置缺失，`history_trigger_hit_rate` 同轮实测 1.000。
-- 不能因为 `--seed-history` 已经实现就宣称这四个记忆指标已被真实模型测量：目前一次带预置的运行都
-  没跑过。将来跑出的成绩也不能与 Run A–H 放在同一列，因为预置会把 `historical_root_cause` 送进
-  记忆类案例的历史上下文。
+- 不能因为 Run I 让四个记忆指标有了分母就宣称"记忆通道已达标"：只有
+  `history_recall_coverage` 与 `confirmed_only_recall_rate` 实测 1.0000，
+  `history_projection_pass_rate` 与 `realtime_priority_pass_rate` 实测 0.0000，而且分母只有 3 条记忆
+  案例。Run I 也不能与 Run A–H 同列，因为预置会把 `historical_root_cause` 送进记忆类案例的历史上下文。
+- 不能把 Run I 的两个 0.0000 说成"模型把历史结论当成了本次根因"：三条案例都在 Auditor 两轮 `revise`
+  后安全降级，降级报告按设计清空 `root_causes` 与 `similar_cases`，这两个指标同时受"报告是否被放行"
+  影响，Run I 测到的是后者不通过。
 - 不能把 Run H 的 `risk_level_hit_rate=0.500` 说成风险判定能力：未命中案例实测等级全部是 low，多数
   案例没走到方案召回。
 - 不能把 Run G 的 `root_cause_anchor_hit_rate=0.500` 当成模型定位能力的成绩：分母只有 2

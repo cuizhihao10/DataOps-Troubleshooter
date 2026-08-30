@@ -193,11 +193,17 @@ def test_implementation_guide_covers_current_technology_boundaries() -> None:
     assert "history-impact-eval:v1" in guide
     assert "独立 Auditor 增量影响消融评测" in guide
     assert "auditor-impact-eval:v1" in guide
-    assert "golden-case:v9" in guide
+    assert "golden-case:v10" in guide
     # v9 只新增组件范围这一个输入字段，指南必须同时写明"不改评分"与失败起因，否则下次读者
     # 会以为 28/28 与 Run A–G 需要重测，或者把组件范围误当成又一条泄漏给模型的答案。
     assert "requested_components" in guide
     assert "v8 到 v9 只新增一个输入字段" in guide
+    # v10 同样只收紧输入（记忆 ID 形状），因此指南必须写明"不改评分规则"、生产铸造格式，以及
+    # 为什么修数据集而不是放宽 `case_graph_node_id`：少了后半句，下一个人会为了让预置跑通而
+    # 直接削弱生产约束，`case_<16hex>` ↔ `mem_<16hex>` 的可逆溯源就此消失。
+    assert "v9 到 v10 同样不改评分规则" in guide
+    assert "mem_{signature[:16]}" in guide
+    assert "case_graph_node_id" in guide
     assert "组件范围是输入而不是答案" in guide
     assert "golden-diagnosis-eval:v23" in guide
     # v22 的唯一行为差异是引用判定拆成悬空/实时支撑两条独立规则，文档必须显式记录，
@@ -387,11 +393,16 @@ def test_live_golden_status_document_separates_runnable_contract_from_measuremen
     report = Path("docs/live-golden-eval-results.md").read_text(encoding="utf-8")
 
     assert "live-golden-eval:v3" in report
-    # 记忆类四指标的 0 必须被明确写成"分母为空"，并且必须声明预置机制存在 ≠ 已测量：
-    # 少了后半句，读者会把"已经实现 --seed-history"读成"这四项已经有实测值"。
+    # 记忆类四指标的 0 必须被明确写成"分母为空"；Run I 补上分母之后，文档必须继续区分"两项实测
+    # 1.0000"与"两项实测 0.0000"，否则读者会把"四个指标有分母了"读成"记忆通道已达标"。
     assert "--seed-history" in report
     assert "history_seed" in report
-    assert "机制存在不等于已测量" in report
+    assert "变成了实测 1.0000，后两项从" in report
+    assert "变成了实测 0.0000。这不是四项都提升。" in report
+    # Run I 的两个 0 必须写明成因是安全降级清空了 similar_cases 与 root_causes，而不是模型误用历史；
+    # 缺了这句，这一轮唯一端点稳定的运行会被当成"历史处理错误"的证据。
+    assert "Run I" in report
+    assert "safe_degraded" in report
     # v1 到 v2 只扩了 scope 枚举，因此已发布的 Run A–G 数值必须原样保留而不是被改写。
     assert "下表 Run A–G 是在 `live-golden-eval:v1` 契约下产生的" in report
     assert "也不允许因为契约升版而改写" in report
@@ -545,7 +556,7 @@ def test_golden_diagnosis_report_documents_scoring_and_twenty_eight_case_boundar
 
     report = Path("docs/golden-diagnosis-eval-results.md").read_text(encoding="utf-8")
 
-    assert "golden-case:v9" in report
+    assert "golden-case:v10" in report
     assert "golden-diagnosis-eval:v23" in report
     assert "28/28 = 100%" in report
     assert "target_coverage_complete=true" in report

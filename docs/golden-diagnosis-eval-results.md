@@ -1,6 +1,6 @@
 # Golden 诊断确定性回归实测报告
 
-本文记录 `golden-diagnosis-eval:v23` 在当前 28 条 `golden-case:v9` 合成案例上的可重复实测。产品目标是 28
+本文记录 `golden-diagnosis-eval:v23` 在当前 28 条 `golden-case:v10` 合成案例上的可重复实测。产品目标是 28
 条，因此当前覆盖率为 `28/28 = 100%`，`target_coverage_complete=true`。下列满分项只证明确定性
 脚本、强类型诊断结果和评分管线遵守当前标注，不能外推为真实 LLM 的意图识别或根因诊断准确率。
 
@@ -209,7 +209,7 @@ pgvector 种子召回和递归 CTE 得到该路径，Golden 报告必须引用�
 比对源目标 Schema、预览默认值与字段语义、小批量回放并复查一致性；该案例完成单组件 8/8 配额。
 
 第二条模糊/证据不足案例只提供“BDS 任务运行很慢”，缺少资源 ID 和时间窗，因此必须走零 MCP Action
-补参边界。`golden-case:v9` 要求
+补参边界。`golden-case:v10` 要求
 零工具案例只能属于该类别，且 paths、Evidence source 和 allowed root 必须为空；Golden runner 从
 引用 Scenario 取得 BDS 组件上下文，但不回放任何工具结果。生产 ReAct 的独立测试同时证明
 `need_user_input` 会以 `missing_resource_id`、`react_step=0` 停止且 executor 未被调用，避免无标识探测

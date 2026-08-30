@@ -39,7 +39,7 @@ def test_all_scenarios_load_and_match_golden_cases() -> None:
     assert len(registry) == 18
     assert len(golden_cases) == 28
     assert {case.scenario_id for case in golden_cases} == set(registry.scenario_ids)
-    assert {case.contract_id for case in golden_cases} == {"golden-case:v9"}
+    assert {case.contract_id for case in golden_cases} == {"golden-case:v10"}
     category_counts = {
         category: sum(case.case_category is category for case in golden_cases)
         for category in GoldenCaseCategory
