@@ -468,8 +468,8 @@ Run I 不能与 Run A–H 放在同一列：案例集合不同（3 条记忆案�
   "调查未完成"起草 → Auditor 两轮 `revise`（`report_incomplete`）→ 唯一一次返工预算用尽 →
   `safe_degraded` → `root_causes` 为 0。因此"让 Prompt 更早收口"是反方向的修法：那次 run 的最后两个
   Action 取的正是必需证据，提前收口只会用证据覆盖率换一个好看的 `stop_reason`。已做的处置是把
-  `DATAOPS_MAX_REACT_STEPS` 默认值从 8 提到 10（理由链条见 `docs/learning/08-有界ReAct循环.md`
-  §8.8.1），**这只降低命中概率、不消除失败面**：恰好用满 10 步仍会撞上同一条路。结构性解法已在
+  `DATAOPS_MAX_REACT_STEPS` 默认值从 8 提到 10（两条下界的完整理由链条见 `app/core/settings.py` 中
+  `max_react_steps` 的注释），**这只降低命中概率、不消除失败面**：恰好用满 10 步仍会撞上同一条路。结构性解法已在
   `langgraph-react-loop:v4` 落地——取证预算与收口额度拆成两笔，预算打满时控制器额外发放一次批次上限
   为 0 的收口回合（`planner-react:v9` 的 `{closing_turn}`），因此"恰好用满预算"不再等于"没有回合可
   用"。**但这条闭合只有测试证据，没有 live 实测证据**：v9/v4 尚未跑过任何真实模型运行。同时这意味着

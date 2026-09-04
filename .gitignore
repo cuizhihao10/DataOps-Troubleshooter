@@ -18,3 +18,7 @@ build/
 # 真实模型评测的原始 JSON 报告只在本机产生，含模型端点配置与逐案例明细；对外发布的口径与数字
 # 统一写进 docs/live-golden-eval-results.md，原始文件不进仓库以免夹带本机环境信息。
 live-golden*.json
+# 按开发顺序逐章讲源码的学习文档是本机自用的阅读材料，与运行、构建和测试都无关（文档策略测试
+# 只扫 app/mcp_server/tests 与 docs 下的三份对外文档），因此不进仓库，避免仓库对外呈现被学习笔记
+# 淹没。build_docx.py 只用于把这些章节打包成 DOCX，同样属于本机工具。
+docs/learning/
