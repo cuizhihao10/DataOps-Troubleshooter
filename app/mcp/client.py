@@ -1,59 +1,43 @@
-"""基于官方 MCP SDK 的 stdio 客户端适配器。
+"""基于官方 MCP SDK 的 stdio 客户端适配器（保留为可选传输与代码学习路线）。
 
 客户端负责启动独立 FastMCP 子进程、完成 initialize 握手、发现工具注解并解析结构化
 返回。所有传输异常都会被转换成带错误分类的 McpClientError，供确定性执行器记录。
+
+生产接入路径是 `app/mcp/streamable_http.py`（`mcp-transport:v1`），本模块保留为可选配置和
+"MCP 传输到底做了什么"的最短可读实现：它不再新增功能，也不再为它扩展测试。共享契约
+（错误分类、描述符、载荷提取）已迁到 `app/mcp/protocol.py`，此处仅 re-export 以保持既有导入。
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from mcp.types import CallToolResult, TextContent
-from pydantic import BaseModel, ConfigDict
 
 from app.domain.tooling import McpToolRequest, McpToolResponse, ToolErrorCode, ToolName
+from app.mcp.protocol import (
+    McpClientError,
+    McpToolClient,
+    McpToolDescriptor,
+    extract_payload,
+    to_tool_descriptors,
+)
 
-
-class McpClientError(RuntimeError):
-    """把 MCP 传输或协议失败映射为执行器可分类处理的领域异常。
-
-    异常保留可读消息和统一 ToolErrorCode，使上层无需依赖 SDK 私有异常类型即可决定是否重试。
-    该类型只表示尚未得到合法 `McpToolResponse` 的客户端失败，不用于包装工具返回的业务错误。
-    """
-
-    def __init__(self, message: str, error_code: ToolErrorCode) -> None:
-        """初始化错误消息与标准错误码，供重试策略和 ToolEvent 记录读取。
-
-        `message` 交给 RuntimeError 保持常规异常行为，`error_code` 单独保存以避免执行器解析文本；
-        调用方应限制最终公开消息长度，防止底层传输输出无限扩张。
-        """
-
-        super().__init__(message)
-        self.error_code = error_code
-
-
-class McpToolDescriptor(BaseModel):
-    """保存 MCP 工具发现阶段需要审计的名称、只读注解和输出 Schema 状态。
-
-    健康检查与集成测试使用该快照验证九个工具确实通过协议公开且保持非破坏性。模型不复制完整
-    JSON Schema，以减少启动状态体积；对外执行参数仍由领域 Pydantic 模型严格校验。
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    read_only: bool
-    destructive: bool
-    idempotent: bool
-    has_output_schema: bool
+# re-export 而不是让调用方改导入：这三个名字与传输无关，20 多处既有导入指向本模块只是历史原因，
+# 强行改签名会把一次分层重构变成一次全仓库改名。`__all__` 同时让 ruff 知道它们是有意导出的。
+__all__ = [
+    "McpClientError",
+    "McpToolClient",
+    "McpToolDescriptor",
+    "StdioMcpClient",
+    "extract_payload",
+    "to_tool_descriptors",
+]
 
 
 class StdioMcpClient:
@@ -113,22 +97,8 @@ class StdioMcpClient:
                 f"MCP list_tools transport failed: {exc}",
                 ToolErrorCode.SERVICE_UNAVAILABLE,
             ) from exc
-        # 只抽取安全门禁需要的字段，避免把 SDK 对象泄漏到应用领域层。
-        return tuple(
-            sorted(
-                (
-                    McpToolDescriptor(
-                        name=tool.name,
-                        read_only=bool(tool.annotations and tool.annotations.readOnlyHint),
-                        destructive=bool(tool.annotations and tool.annotations.destructiveHint),
-                        idempotent=bool(tool.annotations and tool.annotations.idempotentHint),
-                        has_output_schema=tool.outputSchema is not None,
-                    )
-                    for tool in result.tools
-                ),
-                key=lambda descriptor: descriptor.name,
-            )
-        )
+        # 描述符投影放在传输无关的 protocol 模块，两条传输共用同一份注解审计规则。
+        return to_tool_descriptors(result.tools)
 
     async def call_tool(
         self,
@@ -165,7 +135,7 @@ class StdioMcpClient:
             ) from exc
 
         # 传输成功不代表业务契约合法；必须在边界处再次进行 Pydantic 校验。
-        payload = _extract_payload(result)
+        payload = extract_payload(result)
         return McpToolResponse.model_validate(payload)
 
     def _server_parameters(self) -> StdioServerParameters:
@@ -245,42 +215,3 @@ class _McpSessionContext:
             await self._session_context.__aexit__(exc_type, exc, traceback)
         if self._stdio_context is not None:
             await self._stdio_context.__aexit__(exc_type, exc, traceback)
-
-
-def _extract_payload(result: CallToolResult) -> dict[str, Any]:
-    """从 MCP CallToolResult 提取结构化字典，并拒绝协议错误或不可解析内容。
-
-    优先使用规范的 `structuredContent`；兼容分支仅解析 TextContent 中的 JSON 对象，以支持不同
-    SDK/服务端版本。`isError` 始终先处理，防止错误文本碰巧是 JSON 时被误当成功响应。没有合法
-    字典则抛出 INTERNAL_ERROR，禁止客户端凭空构造默认成功载荷。
-    """
-
-    if result.isError:
-        # 聚合所有文本块保留服务端诊断，同时忽略图片等本项目不支持的内容类型。
-        message = "\n".join(
-            block.text for block in result.content if isinstance(block, TextContent)
-        )
-        raise McpClientError(
-            message or "MCP tool returned an error",
-            ToolErrorCode.INTERNAL_ERROR,
-        )
-
-    # 规范结构化字段具有最高优先级，避免对 SDK 已解析的数据做二次文本转换。
-    if result.structuredContent is not None:
-        return result.structuredContent
-
-    # 文本 JSON 是兼容旧返回形式的受限回退，只接受顶层对象以匹配统一响应 Schema。
-    for block in result.content:
-        if not isinstance(block, TextContent):
-            continue
-        try:
-            payload = json.loads(block.text)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            return payload
-
-    raise McpClientError(
-        "MCP tool returned no structured JSON payload",
-        ToolErrorCode.INTERNAL_ERROR,
-    )

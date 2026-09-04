@@ -252,7 +252,9 @@ similarity、共同点、差异点、参考动作、避坑提示和引用。两�
 
 ### 2.4 运行时防护
 
-- 默认最多 8 步 ReAct Action，默认单批最多 3 个并行 Action；一批 N 个 Action 消耗 N 个步数。
+- 默认最多 10 步 ReAct Action，默认单批最多 3 个并行 Action；一批 N 个 Action 消耗 N 个步数。
+  步数预算除了要大于最长的必需工具集，还要留出一个"只做收口"的 Planner 回合：循环在步数用尽时
+  先停机再判断，恰好填满预算的 Planner 拿不到最后一次决策，会以 `react_budget_exhausted` 结束。
 - 工具名必须命中白名单，参数必须通过对应 Schema 校验。
 - 批次门禁按固定顺序执行：无效 evidence 引用 → 非 call_tool 停止 → 批次超过并行上限
   (`parallel_limit_exceeded`) → 批次超过剩余步数预算 (`parallel_budget_exceeded`) → 逐个 Action 的
@@ -496,7 +498,7 @@ select_capabilities
 MCP 执行器内部的瞬时重试不增加 `react_step`，但每次尝试仍保留独立 ToolEvent。控制器在 Planner 前
 检查剩余 Action 预算，并把
 本轮批次上限收敛为 `min(配置并行度, 剩余步数)` 一并注入 Prompt 与门禁，避免两者漂移；独立墙钟预算
-覆盖图调度、Planner 和工具等待，默认值分别为 8 步、单批 3 个并行 Action 和 150 秒。
+覆盖图调度、Planner 和工具等待，默认值分别为 10 步、单批 3 个并行 Action 和 240 秒。
 
 确定性门禁在任何 MCP I/O 前执行：
 
@@ -1225,4 +1227,18 @@ span 必须与 run 终态、事件、checkpoint 在同一事务提交，不允�
 `TransientRetryPolicy` 被 Pydantic 限制在 `max_attempts ≤ 3`，退避按倍数增长并被 `max_backoff_seconds` 截断，且不加随机抖动（并发度是单个 run，抖动只会让实测耗时不可复现）。默认 `attempts=2`、`1s` 起、倍数 `2`、上限 `8s`。`worst_case_added_seconds(single_call_timeout)` = 重试次数 × 单次超时 + 有界退避和；`Settings._validate_transient_retry()` 在启动阶段强制 `react_total_timeout_seconds ≥ chat_timeout_seconds + worst_case_added_seconds`，默认值因此为 240 秒。缺这条校验就等于加了重试又不让它生效：第二次尝试会在退避途中被 `asyncio.timeout` 掐断，run 以 `total_timeout` 收口，把"预算够但时间不够"伪装成正常终止。
 
 预算耗尽后原样上抛最后一次失败：ReAct 循环照旧以 `planner_provider_error` 收口，报告工作流照旧走第 3 级 `auditor_unavailable` 降级且不消耗返工预算。重试只争取让调用真的发生，**绝不因为网络失败而放行报告**。契约版本写在 `app/core/settings.py` 的 `model_transient_retry_contract_id` 与 `app/agents/retrying.py` 的 `MODEL_TRANSIENT_RETRY_CONTRACT_ID`，由 lifespan 逐项比对，不一致就拒绝启动。
+
+### mcp-transport:v1：MCP 传输选型与网关边界
+
+`mcp-transport:v1` 只描述 **client↔server 那一跳**怎么走，九个工具名与 `McpToolResponse` 一个字未改，因此 `mcp-tools:v1` 保持不动——包装/传输层的变化不该假装成被包装契约的变化。生产形态是 Streamable HTTP：网关（`mcp-gateway` service）是独立部署单元，先于 API 启动、独立扩缩。仓库默认值仍是 `stdio`，因为测试与离线评测必须能在没有网关的机器上跑通；`compose.yaml` 显式把两个 service 都设成 `streamable-http`，生产形态不靠翻默认值。**stdio 自本契约起只作为可选配置与代码学习路线保留，不再新增功能或测试。**
+
+鉴权 fail-closed 且复用资源 API 的守卫：`mcp_server/security.py` 不实现任何鉴权算法，直接用 `app/api/security.py` 的 `ApiSecurityGuard`，因此 SHA-256 摘要比较、`hmac.compare_digest` 定长比较、先限流再鉴权的顺序和逐字相同的 401 全部与 `api-auth:v1` 同源。中间件保护网关的**全部 HTTP 路径**而不是某个前缀（网关只有一个用途），但必须透传非 `http` scope——`streamable_http_app()` 把 `StreamableHTTPSessionManager.run()` 挂在自己的 lifespan 上，拦掉它会让会话管理器永不启动。半配置两个方向都拒绝启动：`streamable-http` 缺令牌等于把整条链路的排障证据挂在公网上，`stdio` 却配了令牌说明部署者以为自己在跑网关。令牌强度沿用 `MINIMUM_API_TOKEN_CHARS = 32`，且必须是不含空白的可见 ASCII——含 `\r\n` 的令牌会变成请求头注入，因此在客户端构造期就拒绝而不是等第一次调用。
+
+网关限流有独立配额（默认 600/60s），不与资源 API 的 120/60s 共用：一次 `call_tool` 在无状态模式下是三个 POST，且全部来自同一个 api 容器地址，所以按来源计的窗口实际上是网关的全局闸门。网关以 `stateless_http=True` 运行——每请求一个全新 transport，没有服务端会话表、不需要粘性路由，因此可以随时重启；客户端保留 `terminate_on_close=True` 作为"哪天网关改成有状态"的安全网。
+
+客户端侧的三条硬约束：令牌只进 `Authorization: Bearer` 头，**绝不进 URL**（否则会出现在网关访问日志与异常文本里），`DATAOPS_MCP_HTTP_URL` 内嵌 userinfo 直接拒绝启动；`trust_env=False` 阻止 httpx 读取环境变量或 Windows 注册表里的系统代理，否则网关令牌会经一个不在信任边界内的代理转发，且"端口无人监听"会退化成代理侧读超时，把 `SERVICE_UNAVAILABLE` 误分类成 `TIMEOUT`；`follow_redirects=False`，因为网关地址是显式配置的内网地址，任何重定向都意味着配置错了。
+
+失败分类必须与执行器的重试预算对齐：连接被拒、5xx 与其它传输异常 → `SERVICE_UNAVAILABLE`（可重试一次），401/403 → `PERMISSION_DENIED`（不可重试，配错的令牌不会因为重试而变对）。分类时 HTTP 状态码优先于超时判断，因为网关在 401 之后关闭连接可能顺带产生一次读超时。错误消息由客户端自行构造（`MCP gateway returned HTTP <status>` / `MCP transport error <ExceptionType>`），不复用第三方异常文本，避免请求头或响应体细节进入 `ToolEvent`；SDK 的 anyio task group 会把真实异常包进 `BaseExceptionGroup`，因此分类要递归展开并取第一个非组叶子异常。
+
+`/health` 的 `mcp` 小节公开 `transport`、`contract_id`、`auth_required`、`tool_timeout_seconds` 与 `tool_retry_count`，禁止公开网关 URL、令牌原文或令牌摘要。这个小节存在的唯一理由是"以为在打网关、其实还在起 stdio 子进程"是一种不会报错的部署漂移；同理 compose 的网关 healthcheck 走 `python -m mcp_server.healthcheck mcp-gateway:8900`，两段断言（匿名 GET 必须 401；带令牌且 `Host` 为部署 service 名的 `initialize` 必须回出 `protocolVersion`）都要通过才算 healthy——只断言 401 会让请求停在鉴权中间件的短路返回上，走不到 MCP 应用，那正是"按 service 名访问被 421 挡下"能一路 healthy 的原因。探针令牌只从容器环境读，不进 argv、不进任何 reason 字符串。契约版本写在 `app/core/settings.py` 的 `mcp_transport_contract_id` 与 `app/mcp/protocol.py` 的 `MCP_TRANSPORT_CONTRACT_ID`，由 lifespan 逐项比对，不一致就拒绝启动。
 

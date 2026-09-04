@@ -12,6 +12,9 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+# IDE 的本机工作区状态（运行配置、索引、窗口布局）与代码无关，且会夹带本机绝对路径与解释器位置。
+.idea/
+.vscode/
 # 真实模型评测的原始 JSON 报告只在本机产生，含模型端点配置与逐案例明细；对外发布的口径与数字
 # 统一写进 docs/live-golden-eval-results.md，原始文件不进仓库以免夹带本机环境信息。
 live-golden*.json

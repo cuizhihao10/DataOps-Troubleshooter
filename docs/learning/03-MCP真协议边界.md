@@ -5,11 +5,13 @@
 ```bash
 .venv/Scripts/python -m pytest -q tests/unit/test_tooling_contracts.py tests/unit/test_observation.py
 .venv/Scripts/python -m pytest -q tests/integration/test_mcp_protocol.py
+.venv/Scripts/python -m pytest -q tests/integration/test_mcp_streamable_http.py
 ```
 
-第二条命令是本章的重点：它真的启动了一个 Python 子进程、真的做了 MCP 握手、真的跨 stdio 传了
-JSON-RPC。如果你把 `app/mcp/client.py` 换成"直接 import Fixture 然后返回"，第一条命令仍然全绿，
-第二条会立刻失败。
+第二条命令走 stdio：它真的启动了一个 Python 子进程、真的做了 MCP 握手、真的跨管道传了 JSON-RPC。
+第三条命令走生产传输：它在临时端口上拉起一个**真实 uvicorn 网关**（含鉴权中间件），再用生产客户端
+打过去。如果你把 `app/mcp/client.py` 换成"直接 import Fixture 然后返回"，第一条命令仍然全绿，后两条
+会立刻失败。
 
 本章解决的问题是：**怎么让"Agent 调用了工具"这件事有独立证据，而不是一句自我声明。**
 
@@ -17,7 +19,10 @@ JSON-RPC。如果你把 `app/mcp/client.py` 换成"直接 import Fixture 然后�
 
 MCP（Model Context Protocol）是 Anthropic 提出的一套标准协议，用来让"模型宿主"和"工具提供方"解耦。
 它规定了握手（`initialize`）、能力发现（`tools/list`）、调用（`tools/call`）等消息，传输层可以是
-stdio 子进程、HTTP 或 SSE。本项目用最简单的 stdio。
+stdio 子进程，也可以是 Streamable HTTP。本项目两条都实现了，由 `mcp-transport:v1` 选定：**生产路径
+是 Streamable HTTP**（网关是独立部署单元），stdio 保留为可选配置与"协议到底做了什么"的最短可读实现。
+本章先按 stdio 讲清协议语义，再在 §3.4.7 起讲 HTTP 那一跳多出来的东西——这个顺序不是历史顺序，而是
+因为**契约与传输无关**：九个工具名、注解和 `McpToolResponse` 在两条传输上逐字相同。
 
 Java 读者可以类比 JDBC：`tools/list` 相当于读元数据，`tools/call` 相当于执行语句，而 stdio
 子进程相当于驱动实现。你写代码时面对的是协议，不是某个具体实现。
@@ -34,10 +39,15 @@ Java 读者可以类比 JDBC：`tools/list` 相当于读元数据，`tools/call`
 
 CLAUDE.md 里那句"禁止在 Agent 节点里直接读 Fixture 冒充工具调用"就是这一条的硬化表述。
 
-## 3.3 服务端：`mcp_server/server.py` 只有 115 行
+## 3.3 服务端：`mcp_server/server.py` 只有 161 行
 
 ```python
-mcp = FastMCP(name="dataops-troubleshooter-mock", instructions=...)
+mcp = FastMCP(
+    name="dataops-troubleshooter-mock",
+    instructions=...,
+    stateless_http=True,
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
 
 READ_ONLY_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=True,
@@ -49,6 +59,19 @@ READ_ONLY_ANNOTATIONS = ToolAnnotations(
 
 `FastMCP` 是官方 Python SDK 提供的高层封装，负责协议细节（消息循环、Schema 生成、错误包装），
 你只需要注册处理函数。
+
+后两个构造参数只在 HTTP 传输下起作用，但必须写在这里（构造期），所以先说清楚：
+
+- **`stateless_http=True`**：每个 HTTP 请求新建一次性 transport，服务端不累积会话表，横向扩容也不
+  需要粘性路由。这与客户端"每次调用新建 MCP 会话"是同一个语义选择的两半。不这么配的后果不是报错
+  而是**慢性泄漏**：SDK 的会话表在显式 DELETE 后并不删除条目（`streamable_http_manager.py:314-326`
+  的清理分支要求 `not is_terminated`），于是每次工具调用都会留下一条永不回收的记录。
+- **`transport_security=...(enable_dns_rebinding_protection=False)`**：这个必须**显式**关闭，"不传参"
+  不等于"关闭"。FastMCP 在 `host` 属于 `127.0.0.1` / `localhost` / `::1`（默认值恰好就是
+  `127.0.0.1`）时会自动开启防护，并把 allowed_hosts 限死为三个回环形式；容器里按 service 名访问的
+  请求（`Host: mcp-gateway:8900`）因此会拿到 HTTP 421，而 api 的 lifespan 在启动期工具发现处失败、
+  进程以退出码 3 结束。关闭它的理由是这层防护在本部署里保护不到任何东西：网关不发布宿主端口、不对
+  浏览器开放，真正的门禁是 Bearer 令牌，而被 rebinding 诱骗的浏览器拿不到令牌，请求会先被挡成 401。
 
 `ToolAnnotations` 这四个标记是**给宿主看的元数据**，不影响执行：`readOnlyHint=True` 告诉宿主"这个
 工具不改变世界"，`idempotentHint=True` 表示"重复调用结果一致"，`openWorldHint=False` 表示"它不访问
@@ -87,18 +110,68 @@ def _register_tools() -> None:
 `structuredContent` 返回，而不是仅仅塞进 `TextContent`。客户端因此可以直接 `model_validate`，
 不需要解析自然语言文本。
 
-### 3.3.2 `main()` 只有一句关键代码
+### 3.3.2 `main()` 是一个传输开关，不是一个代码分支
 
 ```python
 def main() -> None:
-    mcp.run(transport="stdio")
+    settings = get_settings()
+    if settings.mcp_transport == "stdio":
+        # stdio 不开放网络端口，客户端以子进程方式通信，因此没有可鉴权的网络面。
+        mcp.run(transport="stdio")
+        return
+    _run_streamable_http(settings)
 ```
+
+同一份工具注册表在两条传输上暴露完全相同的九个工具与注解，因此切换传输不需要改动任何工具实现——
+"传输是部署形态"这句话在代码里的形态就是这个函数只有五行。
 
 `transport="stdio"` 意味着协议消息走标准输入输出。这带来一条**必须记住的纪律**：服务端进程绝对
 不能往 stdout 打印任何非协议内容。一个 `print("debug")` 就会破坏 JSON-RPC 帧，表现为客户端解析
-失败或握手挂死。调试信息只能走 stderr。
+失败或握手挂死。调试信息只能走 stderr。HTTP 那一侧没有这条约束（协议走 socket，stdout 是纯日志），
+但反过来多了一条 stdio 完全没有的东西：**一个可被扫描到的网络端点**。
 
-## 3.4 客户端：`app/mcp/client.py` 的每个细节都在防一种挂死
+```python
+def _run_streamable_http(settings: Settings) -> None:
+    import uvicorn
+
+    guard = build_gateway_guard(settings)
+    application = McpGatewaySecurityMiddleware(mcp.streamable_http_app(), guard)
+    uvicorn.run(application, host=settings.mcp_http_host, port=settings.mcp_http_port, ...)
+```
+
+三个决定：
+
+1. **不用 `mcp.run(transport="streamable-http")`。** 那条路径会直接把**未受保护的**应用交给 uvicorn，
+   中间件根本没有插入点。要在应用前面强制令牌，就必须自己拿到 ASGI 应用再包一层。
+2. **守卫在监听端口之前构造。** `build_gateway_guard` 在缺令牌时抛错，所以"忘配令牌"的后果是进程
+   起不来，而不是先开始服务再指望没人扫到。这就是 fail-closed：九个工具虽然全部只读，暴露出去的
+   却是整条链路的排障证据（任务状态、日志、依赖拓扑、一致性抽样）。
+3. **`import uvicorn` 写在函数里。** stdio 与测试的导入路径因此不必拉起整套 HTTP 服务栈。
+
+鉴权本身**一行都没有新写**：`mcp_server/security.py` 复用资源 API 的 `ApiSecurityGuard`（第 12 章讲
+它的 SHA-256 摘要与定长比较），同一套先限流后鉴权的顺序、逐字相同的 401 响应体。两处各写一份的后果
+是可预期的——其中一份会先长出"调试用后门"或"顺手放宽的 scheme 解析"。中间件写成纯 ASGI 而不是
+Starlette 的 `BaseHTTPMiddleware`，因为后者会缓冲流式响应，而 Streamable HTTP 正是靠 SSE 长流返回
+结果；`lifespan` 类型的 scope 必须原样透传，否则 `StreamableHTTPSessionManager.run()` 永不启动，
+网关会对每个请求回 500。
+
+## 3.4 客户端：两个实现、一个 Protocol，每个细节都在防一种挂死
+
+上层（执行器、ReAct 循环、评测脚本）只依赖 `app/mcp/protocol.py` 里的 `McpToolClient` Protocol：
+
+```python
+class McpToolClient(Protocol):
+    async def list_tools(self) -> tuple[str, ...]: ...
+    async def list_tool_descriptors(self) -> tuple[McpToolDescriptor, ...]: ...
+    async def call_tool(self, tool_name: ToolName, request: McpToolRequest) -> McpToolResponse: ...
+```
+
+`McpClientError`、`McpToolDescriptor` 和 `extract_payload` 也住在 `protocol.py`——它们与传输无关，
+搬过去之后两个实现共用同一份出口校验，而不是各自复制一份"顺手改一点"的版本。`app/mcp/factory.py`
+的 `create_mcp_client(settings)` 按配置返回其中之一，所以装配代码里没有任何 `if transport ==` 分支。
+
+下面 §3.4.1–3.4.6 讲 stdio 实现（`app/mcp/client.py`），它是理解协议语义最短的路径；§3.4.7 起讲
+生产实现（`app/mcp/streamable_http.py`）在网络那一跳上多出来的问题。
 
 ### 3.4.1 子进程参数：编码错误必须炸
 
@@ -182,7 +255,7 @@ ISO 8601 字符串。
 ```
 
 - `TimeoutError` → `TIMEOUT`：**可重试**（第 1 章的 `RETRYABLE_TOOL_ERRORS`）。
-- `except McpClientError: raise` 这句看起来是废话，其实很关键：`_extract_payload` 抛出的
+- `except McpClientError: raise` 这句看起来是废话，其实很关键：`extract_payload` 抛出的
   `INTERNAL_ERROR` 属于**不可重试**，如果没有这一句，它会被下面的 `except Exception` 捕获并
   改写成 `SERVICE_UNAVAILABLE`，于是一个确定性的协议错误被错分成瞬时错误，白白重试一次。
 - 兜底的 `except Exception` → `SERVICE_UNAVAILABLE`：子进程启动失败、管道断开这类都属于此类，
@@ -228,7 +301,7 @@ SDK 给了两个异步上下文：`stdio_client`（拥有子进程和管道）�
 `__aexit__` 不吞异常（返回 `None` 而非 `True`），所以原始错误还能一路传到 `except Exception` 被
 分类成 `SERVICE_UNAVAILABLE`。
 
-### 3.4.5 `_extract_payload`：`isError` 必须先判
+### 3.4.5 `extract_payload`：`isError` 必须先判
 
 ```python
     if result.isError:
@@ -293,6 +366,95 @@ Schema。
 
 `McpToolDescriptor` 只抽五个字段而不是保存整个 SDK 对象，docstring 给了理由：不把 SDK 类型泄漏到
 应用领域层，并减少启动状态体积（`/health` 会投影它）。
+
+### 3.4.7 为什么生产路径是 HTTP：与"被观测服务在不在云上"无关
+
+先驳掉一条听起来很顺但不成立的推理："LTS/BDS/FlashSync 在云上，所以 MCP 必须走 HTTP。"传输选的是
+**client↔server 那一跳**，也就是 Agent 到工具服务；工具服务自己用什么协议去访问被观测系统是另一件
+事。一个 stdio 子进程完全可以在内部调用远端 API。真正站得住的是五条：
+
+1. **审计记录点要在 Agent 信任边界之外。** stdio 下"谁在什么时候取了哪条证据"只有 Agent 自己的记录；
+   HTTP 下网关是独立进程，它的访问日志不受 Agent 影响。
+2. **多客户端复用同一套工具。** 人工排查、定时巡检、自愈流程、运维大盘都要这九个工具；stdio 意味着
+   每个客户端各起一份子进程、各复制一份启动逻辑。
+3. **限流闸门要放在被观测服务侧。** 保护 LTS 不被打爆是网关的职责，不是每个调用方自觉。
+4. **凭据面收敛。** 三套后端凭据只需存在网关一处，Agent 只持有一个网关令牌。
+5. **资源定界有现成答案。** 连接池、超时、健康检查 HTTP 生态都有；stdio 要自己写进程池化与孤儿
+   进程回收。
+
+反过来 stdio 的优势也很实在（零网络配置、无鉴权面、天然随进程回收），所以它不删——但**不再演进**：
+不为它新增功能，也不为它新增测试。这条决定必须写下来，否则下一个读代码的人会以为两条路径地位相同，
+然后在 stdio 上花时间。
+
+### 3.4.8 共享连接池，但每次调用新建 MCP 会话
+
+这是本章最值得记住的取舍。
+
+```python
+        self._http_client = httpx.AsyncClient(
+            headers=headers,
+            timeout=httpx.Timeout(timeout_seconds),
+            follow_redirects=False,
+            trust_env=False,
+        )
+```
+
+```python
+    @asynccontextmanager
+    async def _session(self) -> AsyncIterator[ClientSession]:
+        async with streamable_http_client(self._url, http_client=self._http_client) as (...):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                yield session
+```
+
+实例持有**一个长寿命连接池**，每次 `list_tools` / `call_tool` 新建**一个一次性 MCP 会话**。池化省掉
+每次调用的 TCP（以及将来的 TLS）握手，比 stdio 每次起一个解释器便宜得多；而会话一次性让"调用之间
+完全隔离"这个性质保留下来——`execute_tools` 用 `asyncio.gather` 并发 1–3 个 Action 时不需要任何额外的
+并发推理，因为没有共享的可变协议状态。
+
+那为什么不干脆长期持有一个 `ClientSession`（那才是"HTTP 长连接"的极致形态）？因为 SDK 的
+`streamable_http_client` 内部持有 anyio task group 与 cancel scope；`call_tool` 在 Worker 任务里被
+`asyncio.timeout` 取消时，取消会穿进这套内部结构，而 enter/exit 跨任务的 cancel scope 是已知的踩坑
+区。当前写法拿到了绝大部分收益，同时避开了这类难以复现的挂死。**这是取舍，不是偷懒**，所以它同时
+写在模块 docstring、实现指南 5.2 和这里。
+
+顺带两个 httpx 参数也值得记：`follow_redirects=False`（网关地址是显式配置的内网地址，跟随重定向等于
+把 Bearer 令牌送去一个没打算信任的主机）和 `trust_env=False`（httpx 默认读环境变量与 Windows 注册表
+里的系统代理，那会让网关令牌经一个不在信任边界内的代理转发，还会把"端口无人监听"变成代理侧读超时，
+让 SERVICE_UNAVAILABLE 被误分类成 TIMEOUT）。令牌只进 `Authorization` 头、绝不进 URL，并且在构造期
+就拒绝含空白或非 ASCII 的值——`\r\n` 会变成请求头注入，而 httpx 要到第一次真正调用工具时才报错，那时
+进程已经对外宣称健康。
+
+### 3.4.9 HTTP 特有的错误分类：401 不是瞬时故障
+
+stdio 的失败形态是"子进程崩了/挂住了"；HTTP 多出一整族 HTTP 状态码。分类规则只有三行，但顺序有讲究：
+
+```python
+    for candidate in flattened:
+        if isinstance(candidate, httpx.HTTPStatusError):
+            status = candidate.response.status_code
+            if status in {401, 403}:
+                return (ToolErrorCode.PERMISSION_DENIED, ...)
+            return (ToolErrorCode.SERVICE_UNAVAILABLE, ...)
+    for candidate in flattened:
+        if isinstance(candidate, httpx.TimeoutException):
+            return (ToolErrorCode.TIMEOUT, ...)
+```
+
+- **状态码优先于超时。** 网关在 401 之后关闭连接可能顺带产生一次读超时；若先看超时，"令牌配错了"会
+  被判成瞬时故障并白重试一次。
+- **401/403 → `PERMISSION_DENIED`**，它不在 `RETRYABLE_TOOL_ERRORS`（只含 TIMEOUT 与
+  SERVICE_UNAVAILABLE）里，所以错令牌恰好产生一个 ToolEvent。反过来把它归成 SERVICE_UNAVAILABLE 的
+  代价是：一个配置错误会在每个 Action 上都翻倍消耗预算。
+- **异常要先展平。** SDK 用 `tg.start_soon` 派发请求，因此一个 401 会以 `BaseExceptionGroup` 的形式
+  冒出 anyio task group，只看最外层类型只能得到"某个组失败了"。`_flatten_exceptions` 递归展开，让
+  分类规则与传输实现细节解耦。
+- **兜底只报异常类型名**（`ConnectError` / `ReadError`），不搬第三方消息原文：ToolEvent 是对外可见的。
+
+`_guarded` 里的外层 `asyncio.timeout` 与 stdio 同理——它必须包住**会话创建**，因为网关接受了 TCP
+连接却不回 `initialize` 时，单次读超时还没开始计。`aclose()` 幂等，且关闭后的调用直接返回分类错误
+而不是等 httpx 抛 "client has been closed"：那条消息随版本变化，一旦变了分类就退化成兜底值。
 
 ## 3.5 执行器：重试语义的唯一实现处
 
@@ -610,24 +772,57 @@ async def test_customer_profile_schema_failure_propagates_across_real_mcp_protoc
 不是代码，而是 **Fixture 数据的自洽性**：如果 FlashSync 说丢了 600 条而 BDS 说缺了 500 条，那么无论
 模型多聪明都推不出正确根因，而评测失败会被误读成"模型能力不足"。第 14 章讲评测诚实性时会回到这一点。
 
+`tests/integration/test_mcp_streamable_http.py` 对生产传输做同样的事，但它必须自己**拉起一个真实
+uvicorn 网关**（session 级 fixture，端口用预绑定 socket 交给 uvicorn，避免"先随机选端口再祈祷没被
+占用"的竞态）。不用 `ASGITransport` 在内存里直连应用，因为鉴权中间件的真实位置、TCP 连接被拒、跨进程
+JSON-RPC 往返恰好就是这条传输新增的失败面，内存替身会把它们全部抹掉。
+
+九工具与注解的断言与 stdio 文件**逐字相同**，两者因此构成"契约与传输无关"的对照组。剩下的用例覆盖
+HTTP 独有的失败面：
+
+```python
+async def test_rejected_token_is_permission_denied_without_retry(...) -> None:
+    """验证缺令牌/错令牌/错 scheme 都归 PERMISSION_DENIED，且执行器不重试（只有一个 ToolEvent）。"""
+
+async def test_service_name_host_header_reaches_the_mcp_app(...) -> None:
+    """验证按 service 名访问（Host: mcp-gateway:8900）不会被 DNS rebinding 防护挡成 421。"""
+
+async def test_unreachable_gateway_is_service_unavailable_and_retries_once() -> None:
+    """验证端口无人监听时归 SERVICE_UNAVAILABLE，并按预算恰好重试一次。"""
+
+async def test_concurrent_calls_share_one_pool_with_independent_sessions(...) -> None:
+    """验证三个并发 call_tool 全部成功——共享池 + 独立会话的组合真的成立。"""
+
+def test_gateway_healthcheck_probe_covers_both_legs(...) -> None:
+    """验证容器探针两段判定：匿名 GET 必须 401，带令牌的 initialize 必须打到 MCP 应用。"""
+```
+
+最后那条是**给探针本身做的测试**，理由见第 13 章：`api` 用 `service_healthy` 当启动闸门，探针放过的
+故障就是 compose 会放过的故障。421 那次正是这么跑到容器退出码 3 的。
+
 ## 3.8 本章小结
 
 | 边界 | 实现处 | 如果不这么写会怎样 |
 |---|---|---|
-| 工具调用必须跨真实协议 | `sys.executable -m mcp_server.server` | "调用了工具"变成自我声明 |
+| 工具调用必须跨真实协议 | stdio 子进程 / HTTP 网关 | "调用了工具"变成自我声明 |
+| 上层只依赖 Protocol | `McpToolClient` + `create_mcp_client` | 换传输要改执行器与循环 |
 | 服务端注册名与枚举同源 | `name=tool_name.value` | 客户端与服务端可能拼错不一致 |
 | 只读注解一份共享 | `READ_ONLY_ANNOTATIONS` | 某个工具漏声明且无人发现 |
 | 编码错误必须炸 | `encoding_error_handler="strict"` | 中文证据静默乱码且校验全过 |
 | 握手也要有超时 | 外层 `asyncio.timeout` | 服务卡在 initialize 时永久挂起 |
 | 协议错误不可重试 | `except McpClientError: raise` | 确定性错误被误分类并白重试 |
-| `isError` 先判 | `_extract_payload` 首个分支 | 错误文本恰好是 JSON 时被当成功 |
+| 401 不是瞬时故障 | 状态码分类先于超时分类 | 令牌配错在每个 Action 上翻倍消耗预算 |
+| 网络端点 fail-closed | `build_gateway_guard` 缺令牌抛错 | 全链路排障证据裸奔在网络上 |
+| 池共享但会话一次性 | `http_client=` 注入 + 每调用新会话 | 要么每次重握手，要么并行批次需要并发推理 |
+| `isError` 先判 | `extract_payload` 首个分支 | 错误文本恰好是 JSON 时被当成功 |
 | 失败不生成证据 | `evidence=[]` + 空引用推导 | "超时"变成可引用的根因依据 |
 | 重试成功保留首次失败 | 先 `append` 后判断 | 真实失败率不可测 |
 | 引用 ID 稳定可重放 | `_stable_id` + `sort_keys` | 评测无法复现、无法比较 |
 | 每次尝试可归因 | per-attempt span + `attempt` 进 ID | 重试延迟被平均掉 |
 
 一句话总结本章：**协议边界的价值不在于"能调通"，而在于失败形态是真实的。** 超时、权限拒绝、空结果
-这三种形态在本项目里都能被真实触发、被正确分类、被完整记录——这才是后面所有评测数字的地基。
+这三种形态在本项目里都能被真实触发、被正确分类、被完整记录——这才是后面所有评测数字的地基。换到
+生产传输后又多了两种真实形态（401 与连接被拒），而它们同样有各自的分类与各自的测试。
 
 下一章看 `app/capabilities/`：五项固定能力为什么是"配置"而不是"Agent"。
 

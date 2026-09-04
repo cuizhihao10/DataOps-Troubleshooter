@@ -21,6 +21,45 @@ services:
     volumes:
       - dataops-postgres:/var/lib/postgresql/data
 
+  # MCP 网关是独立部署单元而不是 API 的子进程：client↔server 那一跳走 Streamable HTTP，因此
+  # 审计记录点与限流闸门都落在 Agent 信任边界之外，多个客户端（人工排查、定时巡检、运维大盘）
+  # 也能复用同一套工具而不必各自复制一份启动逻辑。刻意不发布宿主端口——它只需要在 compose
+  # 网络内可达，发布出去等于凭空多一个持有全链路排障证据的攻击面。
+  mcp-gateway:
+    build:
+      context: .
+    env_file:
+      - .env
+    environment:
+      DATAOPS_ENVIRONMENT: docker
+      DATAOPS_MCP_TRANSPORT: streamable-http
+      DATAOPS_MCP_HTTP_HOST: 0.0.0.0
+      DATAOPS_MCP_HTTP_PORT: 8900
+      # `.env` 里存的键名是 DATAOPS_MCP_AUTH，由这里按 service 映射成真实字段名：宿主上直接跑
+      # stdio 的进程读同一份 `.env` 时因此看不到令牌，不会撞上"stdio 却配了令牌"的启动校验。
+      # 缺失即拒绝 `compose up`，与 DATAOPS_DB_AUTH 同一条 fail-closed 写法。
+      DATAOPS_MCP_AUTH_TOKEN: ${DATAOPS_MCP_AUTH:?set DATAOPS_MCP_AUTH in .env}
+    command:
+      - python
+      - -m
+      - mcp_server.server
+    # 探针有两段（见 mcp_server/healthcheck.py）：匿名 GET 必须被挡成 401，带令牌且 Host 写成部署
+    # service 名的 initialize 必须打到 MCP 应用。只探"端口能连上"或只探 401 都放过过真实故障——
+    # 401 在鉴权中间件就短路，走不到应用，于是"按 service 名访问被 421 挡下"那次一路 healthy，直到
+    # api 容器启动期工具发现失败、以退出码 3 结束才暴露。service 名写在命令里而令牌从容器环境读，
+    # 因为 `docker inspect` 会公开 healthcheck 命令。
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - mcp_server.healthcheck
+        - mcp-gateway:8900
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
   api:
     build:
       context: .
@@ -32,8 +71,18 @@ services:
     environment:
       DATAOPS_ENVIRONMENT: docker
       DATAOPS_DATABASE_URL: "postgresql+asyncpg://dataops:${DATAOPS_DB_AUTH}@database:5432/dataops"
+      # 生产传输在这里显式声明，而不是靠翻仓库默认值：默认仍是 stdio，因为测试与离线评测要能在
+      # 没有网关的机器上跑通。容器内必须走网络那一跳，否则 api 会静默起 stdio 子进程——"以为在
+      # 打网关、其实还在起子进程"是一种不会报错的部署漂移，`/health` 的 mcp 小节就是为此存在的。
+      DATAOPS_MCP_TRANSPORT: streamable-http
+      DATAOPS_MCP_HTTP_URL: http://mcp-gateway:8900/mcp
+      DATAOPS_MCP_AUTH_TOKEN: ${DATAOPS_MCP_AUTH:?set DATAOPS_MCP_AUTH in .env}
     depends_on:
       database:
+        condition: service_healthy
+      # 必须等网关 healthy：API 的 lifespan 会跨真实 MCP 握手发现九个工具，网关还没起来时启动
+      # 审计会直接失败。这条依赖把"顺序不对"从偶发启动错误变成确定性的等待。
+      mcp-gateway:
         condition: service_healthy
     command:
       - sh

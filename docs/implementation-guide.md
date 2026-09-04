@@ -107,16 +107,54 @@ Golden Case 描述“一个诊断应该做什么”，Fixture 描述“工具会
 
 当前实现使用官方 MCP Python SDK：
 
-1. `mcp_server.server` 启动独立 FastMCP stdio 进程。
+1. `mcp_server.server` 按配置启动独立 MCP 服务：`stdio` 子进程，或监听端口的 Streamable HTTP 网关。
 2. 服务通过 MCP `list_tools` 暴露九个固定名称、输入 Schema、输出 Schema 和只读注解。
-3. `StdioMcpClient` 启动子进程并完成 MCP initialize 握手。
+3. 客户端（`StdioMcpClient` 或 `StreamableHttpMcpClient`）建立连接并完成 MCP initialize 握手。
 4. 客户端通过 `call_tool` 发送结构化参数。
 5. 服务端工具调用 Fixture 仓储，返回经过 Pydantic 校验的统一响应。
 6. 客户端解析 `structuredContent`，再由执行器生成 `Evidence` 和 `ToolEvent`。
 
-这条路径确保 Fixture 只存在于 MCP 服务端，Agent 运行时看到的是标准协议 Observation。
+这条路径确保 Fixture 只存在于 MCP 服务端，Agent 运行时看到的是标准协议 Observation。两种传输共用第 2、4、5、6 步，因此契约与传输无关——`tests/integration/test_mcp_protocol.py` 与 `tests/integration/test_mcp_streamable_http.py` 里那六条工具注解断言逐字相同，就是这条性质的可执行证明。
 
-### 5.2 只读与安全属性
+### 5.2 传输选型：stdio 与 Streamable HTTP
+
+契约 ID `mcp-transport:v1`。九个工具名与 `McpToolResponse` 一个字未改，所以 `mcp-tools:v1` 保持不动：包装/传输层的变化不该假装成被包装契约的变化，这与 `model-transient-retry:v1` 单列 ID 是同一条理由。
+
+决定 transport 的是 **client↔server 这一跳的部署关系**，不是被观测服务在哪里。stdio 的适用条件是"服务与客户端同生命周期、同主机、单客户端"：一个由 Agent 进程亲自 fork 的子进程。Streamable HTTP 的适用条件是"服务是独立部署单元、有自己的生命周期与多个客户端"。本项目的目标形态属于后者：LTS / BDS / FlashSync 由一个独立部署的 MCP 运维网关代理，网关先于 Agent 启动、独立扩缩、独立升级。
+
+选 Streamable HTTP 作为生产路径的五条理由，全部与"被观测服务在不在云上"无关：
+
+1. **审计记录点必须落在 Agent 信任边界之外。** 谁在什么时候取了哪条链路的证据，这份记录不能由被审计方自己保管。网关是独立进程，它的访问日志与限流计数不受 Agent 代码影响。
+2. **多客户端复用同一套工具。** 人工排查、定时巡检、自愈脚本、运维大盘都要调这九个工具。stdio 下每个客户端各自 fork 一份服务并各自复制一份启动逻辑；HTTP 下它们共用一个已经在跑的网关。
+3. **限流闸门要放在被观测服务侧。** 保护 LTS / BDS / FlashSync 不被取证流量打爆，是网关的职责而不是每个调用方的自觉。闸门在客户端就等于没有闸门。
+4. **凭据面从三套收敛到一套。** 三个后端各自的访问凭据只存在于网关；Agent 只持有一个网关令牌。Agent 被攻破的后果因此从"三套后端凭据泄露"降级为"一个可撤销的网关令牌泄露"。
+5. **长连接的资源定界有现成答案。** 连接池上限、keep-alive、超时、重试语义在 HTTP 栈里是配置项；在 stdio 下要自己写进程池化与孤儿进程回收，那是一份没人愿意维护的基础设施代码。
+
+三条常见但**不成立**的论据，这里明确驳回，避免它们被当成本节的依据反复出现：
+
+- **"被观测服务在云上，所以必须用 HTTP。"** 不成立。MCP 的 transport 只描述 client↔server 这一跳；server 用什么协议访问下游（HTTPS、SDK、JDBC）是它自己的实现细节。一个 stdio 的 MCP server 完全可以访问云上 API。
+- **"stdio 不能长连接。"** 不成立，恰好相反：stdio 的管道天然是长连接，一个子进程可以服务成千上万次调用。真正的区别是资源定界谁来做（见理由 5）。
+- **"流式返回是 HTTP 独有的。"** 不成立。MCP 的进度通知与分块结果在 stdio 上同样工作，它们是协议层能力而不是传输层能力。
+
+**为什么共享连接池但不复用 MCP 会话。** 客户端持有一个长寿命 `httpx.AsyncClient`（省掉每次调用的 TCP/TLS 握手，也彻底省掉 stdio 的解释器启动开销），但**每次调用新建一个 MCP 会话**。长期持有一个 `ClientSession` 才是"HTTP 长连接"的极致形态，代价却是把 anyio task group 与 cancel scope 的生命周期挂在跨任务边界上：`call_tool` 在 Worker 任务里被 `asyncio.timeout` 取消时，取消会穿进这套内部结构，而 enter/exit 跨任务的 cancel scope 是 MCP SDK 上已知的踩坑区。现在的取舍拿到了绝大部分收益，同时保住"每次调用完全隔离"这个性质——正因为如此，`execute_tools` 的 1–3 个并行 Action 不需要任何额外并发推理。
+
+池化不需要任何 hack：`streamable_http_client(url, http_client=...)` 只在自己创建 client 时才 `enter_async_context`（`mcp/client/streamable_http.py:637-654`），调用方提供的 client 不会被 SDK 关闭。
+
+**网关跑 `stateless_http=True`。** 每个请求一个全新 transport，服务端没有会话表、没有 DELETE、不需要粘性路由，因此网关可以随时重启或水平扩容而不丢状态。客户端仍保留 `terminate_on_close=True` 作为安全网：当前不会真的发出 DELETE（无 session id），但一旦有人把网关改成有状态，这个默认值就是防止服务端会话泄漏的那道保险。
+
+**DNS rebinding 防护必须显式关闭，"不传参"不等于"关闭"。** `TransportSecuritySettings` 这个类的默认值是开启，但真正的陷阱在 `FastMCP.__init__`（`mcp/server/fastmcp/server.py:178-183`）：当 `host` 属于 `127.0.0.1` / `localhost` / `::1`——而 FastMCP 的 `host` 默认值恰好就是 `127.0.0.1`——它会**自动**替你构造一份开启防护的设置，并把 `allowed_hosts` 限死为三个回环形式。于是容器里按 service 名访问的请求（`Host: mcp-gateway:8900`）会得到 HTTP 421 Misdirected Request，api 的 lifespan 在启动期工具发现处失败、进程以退出码 3 结束。这个故障在 `docker compose up` 第一次真跑起来时才出现：集成测试全部通过 `127.0.0.1` 连接，正好落在允许列表里；网关 healthcheck 的**第一版**也看不到它，因为那一版只断言匿名 GET 得到 401，而 401 在鉴权中间件就短路了，根本走不到 MCP 应用——这条经验现在固化成 `mcp_server/healthcheck.py` 的第二段断言（带令牌、`Host` 写成 service 名的 `initialize` 必须回出 `protocolVersion`）。关闭防护的理由是它在本部署里保护不到任何东西：网关不发布宿主端口、不对浏览器开放，真正的门禁是 Bearer 令牌，而被 rebinding 诱骗的浏览器拿不到令牌，请求会先变成 401；反过来维护一份 `allowed_hosts` 等于把部署地址抄第二遍，换 service 名、加 ingress 或上 k8s 时必然漂移。`tests/integration/test_mcp_streamable_http.py` 里有一条用裸 httpx 覆写 `Host` 头的回归用例，把这条只在容器网络里出现的失败面钉在了不需要容器的测试里。
+
+**`trust_env=False` 与 `follow_redirects=False` 是安全要求，不是性能调优。** httpx 默认会读环境变量与 Windows 注册表里的系统代理，那会把网关 Bearer 令牌经一个不在信任边界内的代理转发；同时它会把"端口无人监听"变成代理侧读超时，让 `SERVICE_UNAVAILABLE` 被误分类成 `TIMEOUT`（后者与前者都可重试，但错误归因会把网关宕机读成网络抖动）。关掉重定向是同一条理由的另一半：网关地址是显式配置的内网地址，任何重定向都意味着配置错了，跟随它等于把令牌送去一个没打算信任的主机。
+
+**鉴权 fail-closed，且复用资源 API 的守卫。** `mcp_server/security.py` 不实现任何鉴权算法，而是复用 `app/api/security.py` 的 `ApiSecurityGuard`：同一套 SHA-256 摘要 + `hmac.compare_digest` 定长比较、同一套先限流后鉴权的顺序、逐字相同的 401 响应体。两处各写一份的后果是可预期的——其中一份会先长出"调试用后门"。`streamable-http` 缺令牌拒绝启动，`stdio` 却配了令牌同样拒绝启动（两个方向都拦，因为后者说明部署者以为自己在跑网关）。401/403 映射为 `PERMISSION_DENIED` 而不是 `SERVICE_UNAVAILABLE`：后者在 `RETRYABLE_TOOL_ERRORS` 内，会让一个配错的令牌把每次调用变成两次网关请求。
+
+网关限流有自己的配额（默认 600/60s），不与资源 API 的 120/60s 共用：一次 `call_tool` 在无状态模式下是三个 POST，而且全部来自同一个 api 容器地址，所以按来源计的窗口实际上是网关的全局闸门。
+
+**stdio 保留，但不再演进。** 它仍是仓库默认值（`DATAOPS_MCP_TRANSPORT=stdio`），因为测试与离线评测必须能在没有网关的机器上跑通，而 `tests/conftest.py` 会清空所有 `DATAOPS_*`。生产形态由 `compose.yaml` 显式声明成 `streamable-http`，而不是靠翻仓库默认值。从这一节起，stdio 的定位是**可选配置与代码学习路线**：不再为它新增功能，也不再为它新增测试；已有的 stdio 集成测试保留，因为它们同时充当"契约与传输无关"的对照组。
+
+`/health` 的 `mcp` 小节逐字公开 `transport`、`contract_id`、`auth_required`、工具超时与重试预算，但不公开 URL 里的任何凭据或令牌摘要。这个小节存在的唯一原因是：**"以为在打网关、其实还在起 stdio 子进程"是一种不会报错的部署漂移**，只有把实际传输暴露出来才能在不读代码的情况下发现它。同理，compose 里网关的 healthcheck（`python -m mcp_server.healthcheck mcp-gateway:8900`，见 `mcp_server/healthcheck.py`）断言的是两段而不是"端口能连上"：匿名 GET 必须被挡成 401（证明鉴权中间件真的插在应用前面），且带令牌、`Host` 写成部署 service 名的 `initialize` 必须打到 MCP 应用并回出 `protocolVersion`（证明请求真的穿过了中间件、传输安全策略没把这个主机名挡掉）。探针的强度就是部署门禁的强度——`api` 的 `depends_on` 挂在这个判定上，探针断言不到的东西就是 `compose up` 抓不住的东西。令牌只从容器环境读、不进 argv、不出现在任何 reason 字符串里，因为 `docker inspect` 会公开 healthcheck 命令并留存 `Health.Log`；`tests/integration/test_mcp_streamable_http.py` 有专门用例断言这一点，以及错令牌、缺令牌、端口无人监听三种失败各自的判定。
+
+### 5.3 只读与安全属性
 
 每个工具都声明：
 
@@ -127,11 +165,13 @@ Golden Case 描述“一个诊断应该做什么”，Fixture 描述“工具会
 
 协议集成测试读取这些注解，防止以后新增工具时意外变成写操作。项目不会实现自动重跑、删表、扩容或修改同步配置。
 
-### 5.3 重试原理
+### 5.4 重试原理
 
 执行器只对 `TIMEOUT` 和 `SERVICE_UNAVAILABLE` 重试一次。空结果、权限拒绝和非法请求继续重试不会增加信息，因此直接返回。
 
 每次尝试都生成独立 `ToolEvent`，事件 ID 包含 trace、工具名、规范化请求和 attempt 的稳定摘要。即使第二次成功，也保留第一次失败，便于观察延迟、失败率和真实调查过程；同一工具查询不同资源或时间窗时也不会发生 ID 冲突。
+
+传输换成 HTTP 之后，这套预算一个字未改，只是新增的失败面必须被正确归类才能落进同一套语义：连接被拒、5xx 与其他传输异常映射为 `SERVICE_UNAVAILABLE`（网关重启属于瞬时故障，值得重试一次），401/403 映射为 `PERMISSION_DENIED`（令牌配错不会因为重试而变对）。分类顺序上 HTTP 状态码优先于超时判断：网关在 401 之后关闭连接可能顺带产生一次读超时，若先看超时就会把"令牌错"误判成瞬时故障。执行器与 `McpToolExecutor` 的重试代码对两种传输完全共用，客户端只按 `McpToolClient` Protocol 注入。
 
 ## 6. FastAPI lifespan 与健康检查
 
@@ -419,7 +459,7 @@ PlannerDecision 通过 Pydantic 只证明 JSON 结构合法，仍不足以安全
 当前 run_id，不能借去重逻辑绕过审计。
 
 MCP 内部 TIMEOUT/SERVICE_UNAVAILABLE 重试仍由 McpToolExecutor 负责。一个 Planner Action
-无论产生一个还是两个 ToolEvent，react_step 都只增加一；这样“最多 8 步”表达调查决策预算，
+无论产生一个还是两个 ToolEvent，react_step 都只增加一；这样“最多 10 步”表达调查决策预算，
 不会被传输重试歪曲，同时总网络尝试仍完整可审计。
 
 ### 10.4 有界并行工具调用
@@ -455,19 +495,28 @@ OBSERVATION_RECORDED 事件，单个工具失败依旧单独可见，所以 `dia
 
 ### 10.5 总超时与最后完整状态
 
-`DATAOPS_REACT_TOTAL_TIMEOUT_SECONDS` 默认 150 秒，覆盖 LangGraph 调度、Planner 等待和 MCP
+`DATAOPS_REACT_TOTAL_TIMEOUT_SECONDS` 默认 240 秒，覆盖 LangGraph 调度、Planner 等待和 MCP
 执行，独立于单工具 timeout。控制器使用 `asyncio.timeout` 取消超时节点，并以 LangGraph
 `astream(stream_mode="values")` 持续保存最后一个完整 Pydantic 状态。这样第二次工具卡住时，
 第一次已经取得的证据不会因为总超时丢失；终态追加 `total_timeout`，但不会伪造失败节点结果。
 
-步数预算与墙钟预算的默认值都由首次真实模型评测校正过，这里记录校正理由，因为两个数字看起来
-只是"调大一点"，实际各自修掉一类结构性错误。步数从 6 调到 8：Golden 集里跨组件案例的
+步数预算与墙钟预算的默认值都由真实模型评测校正过，这里记录完整校正链条，因为这些数字看起来
+只是"调大一点"，实际每次各修掉一类结构性错误。**步数 6 → 8**：Golden 集里跨组件案例的
 `required_tools` 最多 6 个，6 步预算等于零余量，而真实模型总要花一到两步试探，于是每次试探都
 直接换掉一个必需取证——实测跨组件案例执行满 6 步后以 `react_budget_exhausted` 结束，却漏掉
-`bds.get_table_info`，满覆盖在这种配置下是不可达的。墙钟从 60 秒调到 150 秒是步数调整的必然
-后果：实测 Planner 单次决策 8–15 秒，8 步在最坏情况下要四次决策再加工具与检索时间，仍用 60 秒
-只会把"时间不够"伪装成"步数用完"，而这两种终止原因对使用者的含义完全不同（前者要加时间或减
-并发，后者要重新设计取证顺序）。
+`bds.get_table_info`，满覆盖在这种配置下是不可达的。**步数 8 → 10**：8 步修掉了覆盖率下界，却
+没有留出"收口回合"。循环在 `react_step >= max_steps` 时先停机再判断，所以恰好把预算用满的
+Planner 永远拿不到最后那次决策机会：证据其实已经齐了，run 却只能以 `react_budget_exhausted`
+结束，报告基于"调查未完成"起草，Auditor 判 `report_incomplete`，唯一一次返工预算用尽后转
+`safe_degraded`，最终 `root_causes` 为 0。这不是模型不收口，而是预算算术：一次真实 run 用
+3+3+2 的批次序列刚好填满 8 步，而最后那两个 Action 取的正是 Golden 要求的必需证据，因此"让
+Prompt 更早收口"只会用证据覆盖率换一个好看的 `stop_reason`，方向是反的。10 步在同一条轨迹上
+留出一个整批余量。要**结构性**地消除这条失败面，得给"只允许 finish 的最后一回合"单列保留额度，
+那会改动 `langgraph-react-loop` 的循环语义，属于另一个切片；在此之前它是一个已知的、可通过配置
+缓解但未被证明不可能命中的边界。**墙钟 60 → 240 秒**是步数调整的必然后果：实测 Planner 单次
+决策 8–18 秒，10 步在最坏情况下要五次决策再加工具与检索时间（一次 3 批次的真实 run 端到端
+96.7 秒），仍用 60 秒只会把"时间不够"伪装成"步数用完"，而这两种终止原因对使用者的含义完全不同
+（前者要加时间或减并发，后者要重新设计取证顺序）；240 秒还必须容得下一次瞬时重试的最坏开销。
 
 递归上限按 `max_steps * 2 + 6` 设置，覆盖路由、每次 execute/planner 回边和最终预算检查。
 它是框架死循环的第二道防线，业务停止仍由 react_step 和 stop_reason 决定。
@@ -1899,8 +1948,10 @@ RFC 7235 大小写不敏感，令牌部分只做 strip，因此"末尾多一个�
 .venv\Scripts\python -m ruff check .
 .venv\Scripts\python -m pytest -q tests/unit/test_api_security.py
 .venv\Scripts\python -m pytest -q tests/integration/test_api_authentication.py tests/integration/test_health.py
-docker compose config
+docker compose config --quiet
 ```
+
+`--quiet` 是刻意的：不带它的 `docker compose config` 会把插值后的完整配置打到 stdout，而插值输入是 `.env`，于是 `DATAOPS_CHAT_API_KEY` / `DATAOPS_DB_AUTH` / `DATAOPS_MCP_AUTH` 会以明文进入终端、shell 历史与 CI 日志。`--quiet` 保留全部校验能力（YAML 不合法或 `${VAR:?...}` 缺值仍非零退出），只是成功时不输出。要看拓扑用 `docker compose config --services`。
 
 单元测试用可控时钟覆盖判定逻辑：受保护前缀集合、disabled 模式仍限流、精确令牌放行与五种变体返回逐字
 相同的 401、限流先于鉴权、配额按身份独立且窗口滚出后恢复、匿名桶、LRU 淘汰后表大小收敛，以及五种

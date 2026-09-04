@@ -37,6 +37,7 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/reporting/policy.py"),
     Path("app/reporting/revision.py"),
     Path("app/mcp/client.py"),
+    Path("app/mcp/streamable_http.py"),
     Path("app/mcp/executor.py"),
     Path("app/mcp/observation.py"),
     Path("app/persistence/database.py"),
@@ -70,11 +71,14 @@ CRITICAL_INLINE_COMMENT_FILES = (
     Path("app/core/http_identity.py"),
     Path("app/agents/retrying.py"),
     Path("mcp_server/repository.py"),
+    Path("mcp_server/security.py"),
+    Path("mcp_server/healthcheck.py"),
 )
 REQUIRED_GUIDE_SECTIONS = (
     "Pydantic 契约",
     "Fixture 与 Golden Case",
     "MCP 真实协议边界",
+    "传输选型：stdio 与 Streamable HTTP",
     "FastAPI lifespan",
     "PostgreSQL、SQLAlchemy、Alembic 与 pgvector",
     "显式 GraphRAG 路径",
@@ -378,6 +382,41 @@ def test_model_transient_retry_documents_pin_wrapper_boundary_and_budget_guard()
     assert "等于**加了重试又不让它生效**" in guide
     assert "绝不因为网络失败而放行报告" in contracts
     assert "MODEL_TRANSIENT_RETRY_CONTRACT_ID" in contracts
+
+
+def test_mcp_transport_documents_pin_gateway_boundary_and_stdio_freeze() -> None:
+    """确认传输文档锁定网关信任边界、被驳回的错误论据、池化取舍与 stdio 冻结四条边界。
+
+    传输选型最容易退化成"照抄示例代码里的 stdio"或"因为后端在云上所以用 HTTP"：只要文档不写清
+    决定 transport 的是 client↔server 那一跳，后续维护者会用错误的理由做正确的选择，下一次就会用
+    同样的错误理由做错误的选择。池化取舍也必须写明——"共享连接池但每调用新建会话"看起来像疏漏，
+    不写清缘由就会有人"顺手优化"成复用会话，把取消语义带进 anyio cancel scope 的踩坑区。
+    """
+
+    guide = Path("docs/implementation-guide.md").read_text(encoding="utf-8")
+    contracts = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
+    design = Path("docs/product-design.md").read_text(encoding="utf-8")
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    assert "mcp-transport:v1" in guide
+    assert "mcp-transport:v1" in contracts
+    assert "mcp-transport:v1" in design
+    assert "mcp-transport:v1" in readme
+    assert "传输选型：stdio 与 Streamable HTTP" in guide
+    # 三条常见错误论据必须被逐条驳回，否则它们会以"文档没说不行"的形式重新长回来。
+    assert "被观测服务在云上，所以必须用 HTTP" in guide
+    assert "stdio 不能长连接" in guide
+    assert "流式返回是 HTTP 独有的" in guide
+    assert "决定 transport 的是 **client↔server 这一跳的部署关系**" in guide
+    assert "为什么共享连接池但不复用 MCP 会话" in guide
+    assert "mcp/client/streamable_http.py:637-654" in guide
+    assert "stateless_http=True" in guide
+    assert "stateless_http=True" in contracts
+    assert "`trust_env=False` 与 `follow_redirects=False` 是安全要求" in guide
+    assert "stdio 保留，但不再演进" in guide
+    assert "不再新增功能或测试" in contracts
+    assert "MCP_TRANSPORT_CONTRACT_ID" in contracts
+    assert "PERMISSION_DENIED" in contracts
 
 
 def test_live_golden_status_document_separates_runnable_contract_from_measurement() -> None:

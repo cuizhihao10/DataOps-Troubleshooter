@@ -10,12 +10,12 @@ from datetime import UTC, datetime
 
 from app.domain.planner import ToolAction
 from app.domain.tooling import RETRYABLE_TOOL_ERRORS, McpToolResponse
-from app.mcp.client import McpClientError, StdioMcpClient
 from app.mcp.observation import (
     ToolObservation,
     merge_observations,
     normalize_observation,
 )
+from app.mcp.protocol import McpClientError, McpToolClient
 from app.observability.tracing import TraceSpanKind, TraceSpanStatus, trace_span
 
 
@@ -27,11 +27,12 @@ class McpToolExecutor:
     更新假设。
     """
 
-    def __init__(self, client: StdioMcpClient, *, retry_count: int) -> None:
+    def __init__(self, client: McpToolClient, *, retry_count: int) -> None:
         """注入 MCP 客户端并校验重试预算只能为零或一次。
 
-        产品基线限制瞬时重试一次，构造期拒绝更大值可防止配置错误放大工具压力；客户端注入
-        便于集成真实 stdio 实现，也便于单元测试使用可控替身验证失败路径。
+        产品基线限制瞬时重试一次，构造期拒绝更大值可防止配置错误放大工具压力；客户端按
+        `McpToolClient` Protocol 注入而不绑定具体传输，因此 stdio 与 Streamable HTTP 共用同一段
+        重试与审计代码，测试也能使用可控替身验证失败路径。
         """
 
         if retry_count not in {0, 1}:

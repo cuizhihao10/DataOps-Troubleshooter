@@ -11,7 +11,8 @@
 - 提供 18 个脱敏且确定性的合成场景，以及对应 Golden Case 格式。
 - 启动时校验全部 Fixture 和 Golden Case 引用。
 - 提供 `GET /health`，返回契约版本、运行预算和已加载场景。
-- 通过官方 MCP Python SDK 和 stdio 协议暴露产品规定的 9 个只读工具，并将返回标准化为 Evidence 与 ToolEvent。
+- 通过官方 MCP Python SDK 暴露产品规定的 9 个只读工具，并将返回标准化为 Evidence 与 ToolEvent。
+- `mcp-transport:v1` 把传输选型显式化：生产形态是独立部署的 Streamable HTTP 网关（`StreamableHttpMcpClient` ↔ `mcp-gateway`），审计记录点与限流闸门因此落在 Agent 信任边界之外，多个客户端复用同一套工具且凭据面从三套收敛到一套；决定 transport 的是 client↔server 这一跳的部署关系，而不是被观测服务在不在云上。网关复用资源 API 同一个 `ApiSecurityGuard`（先限流后鉴权、逐字相同的 401、SHA-256 摘要定长比较），`streamable-http` 缺令牌直接拒绝启动。客户端共享一个 httpx 连接池但每次 `call_tool` 新建 MCP 会话，令牌只进 `Authorization` 头，`trust_env=False` 与 `follow_redirects=False` 是安全要求；401/403 归类为 `PERMISSION_DENIED` 因此错令牌不会被重试。stdio 保留为可选配置与代码学习路线，不再新增功能或测试。
 - 瞬时错误最多自动重试一次，每次尝试均保留独立 ToolEvent；空结果和权限错误不会重试。
 - PostgreSQL + pgvector 保存 `graph-seed:v12` 的 54 个显式知识节点、71 条关系边和带 Provider 溯源的向量，支持全文/向量混合召回、五项可解释评分与 1–2 跳路径扩展。方案类节点显式声明 `remediation_risk_level`，报告里的处置风险等级只能来自这条人工声明，不从动作文本猜、也没有默认值。
 - Evidence Bundle 按 UTF-8 JSON 字节、节点数和路径数三重预算原子选择证据，并返回稳定 `kn_*` / `path_*` 引用与 omitted IDs。
@@ -22,7 +23,7 @@
 - 报告只把 Runbook/SOP 的步骤小节提升为处置建议，复盘“改进项”、FAQ 与“禁止操作”即使被召回也只能作为证据；文档切片与图证据共用同一字节预算但拥有独立条数上限，加载顺序为路径 → 种子节点 → 文档切片，被裁切片 ID 出现在 `omitted_chunk_ids`。
 - 五项 capability 以 `runtime-capabilities:v1` 输出 Prompt 片段、工具优先级、输入要求和输出规则；历史匹配仅按需启用，实时 Observation 始终优先。
 - `langgraph-react-loop:v3` 真实执行 capability 注入、Planner 决策、MCP Action、Observation 回写和回到 Planner，并把 raw confirmed 案例与确定性解释绑定后注入 Planner。
-- 同一轮可提交 1–3 个互不依赖的只读 Action，批内经 `asyncio.gather` 真并发跨独立 stdio MCP 子进程执行；一批 N 个 Action 仍消耗 N 个步数，并行只压缩等待时间而不发放额外取证预算，任一门禁不通过整批拒绝而不截断。
+- 同一轮可提交 1–3 个互不依赖的只读 Action，批内经 `asyncio.gather` 真并发执行：HTTP 传输下共享连接池但各建独立 MCP 会话，stdio 传输下跨独立子进程，两者都不共享会话状态；一批 N 个 Action 仍消耗 N 个步数，并行只压缩等待时间而不发放额外取证预算，任一门禁不通过整批拒绝而不截断。
 - `planner-react:v8` 隔离 system/user 数据，注入同会话上一轮报告、历史案例共同点/差异点/参考动作/避坑提示，以及由渲染层算好的剩余步数、本轮批次上限、`trace_id`、带 `source` 标注的可引用 ID 白名单（与报告层同一份来源映射）和尚未执行的优先级工具；`hypothesis_updates` 是模型结论进入报告根因的唯一通道（`decision_summary` 不会被解析），升为 supported 只认实时 Observation 引用，`stop_reason` 收敛为七个可评测枚举值。Structured Outputs 仍只返回结构化 Action 数组，批次上限由 Pydantic 校验器执行（strict Schema 不接受 `maxItems`）。
 - 假设更新经同一道引用白名单门禁后确定性投影进 `AgentState.hypotheses`：组件取本次已批准的 capability 组件，置信度按状态映射（candidate 0.4 / supported 0.7 / rejected 0），模型不能自报这两项，报告里也就不会出现无法复算的自评数字。
 - 确定性 Builder 只把有有效支持引用且无反对证据的假设提升为根因；链路和建议分别引用 `path_id` 与知识节点证据。
@@ -37,7 +38,7 @@
 - `golden-case:v10` 同时覆盖安全降级、反证、Schema、检查点、倾斜、限流、授权和水位线时区传播；当前 28 条案例使用 18 个脱敏 Fixture，类别配额完整达到 8/10/4/3/3，并为其中 14 条声明知识图 `root_cause` 节点锚点。
 - `golden-diagnosis-eval:v23` 要求三层 900 条缺口闭合，并用 `WATERMARK_TIMEZONE_MISMATCH` 与一致性抽检识别“同步完成但静默漏数”；当前 28/28 确定性脚本满分不冒充真实 LLM 成绩。新增 `root_cause_anchor_hit_rate` 直接判定 Top-1 根因是否引用了正确的 `kn_root_cause_*` 节点，它与文本相等的 `root_cause_top1_hit_rate` 是两个分母不同的独立指标，必须并列阅读、不可相减。
 - `portfolio-eval-run:v23` 通过 `python -m app.evaluation` 一次执行五层、20 个独立指标。
-- `live-golden-eval:v3` 提供显式 opt-in 的真实模型 Golden 评测（默认三案例冒烟，`--all-cases` 展开全部 28 条），经生产 PostgreSQL GraphRAG、双 Agent、LangGraph 与 stdio MCP 执行，并只记录版本、状态、耗时和 token，不记录 Prompt、原始响应或 Thought。已在固定 `gpt-5.6-sol` 端点执行多轮：`planner-react:v8` + 定位修订下必要 Action 覆盖与证据来源覆盖实测 1.0000（v7 为 0.7778）、必要因果链完整率实测 0.6667（v7 为 0.1667）、风险等级命中实测 0.6667（v7 为 0.3333），同时模型调用从 15 次降到 12 次。`root_cause_top1_hit_rate` 实测仍为 0，原因是评分器用精确字符串比较根因与知识节点名；`golden-diagnosis-eval:v23` 新增的 `root_cause_anchor_hit_rate` 在最近一轮实测 0.500（分母 `anchored_case_count=2`），它是与文本相等口径**并列**发布的独立指标，不是把 0 提升成 0.5——两者分母与判定口径都不同，文本相等口径一个字未改。三案例 smoke 不能外推到 28 条；`scope` 分 `smoke` / `full` / `custom` 三档，覆盖全集才是 `full`，少一条即退回 `custom`，因此报告本身就能说明分母。`--all-cases` 已完成一次 `scope=full` 全量实测（Run H，28/28，`case_coverage_rate=1.0000`），但那一轮 142 次模型调用里有 50 次失败（44 次为端点超时）、11 条案例以 `planner_provider_error` 零工具结束，因此**只能读作"链路在全量案例上完整跑通并被评分"，不是模型能力基线**；同轮锚点口径在分母 14 下实测 0.0714，与 smoke 的 0.500（分母 2）分母不同、不可相减。P95 ≤ 30 s 仍是设计目标值而非实测值（实测每案例 58–125 s，全量轮均摊约 152.5 s）。四个记忆类指标在 Run A–H 里一律为 0，那是数据库中没有 confirmed 历史案例导致的**分母为空**而不是模型表现；v3 新增的 `--seed-history` 在付费调用前用生产 confirm 事务补上这个前置条件，Run I 是第一轮带预置的实测运行（3 条记忆案例、`scope=custom`、15/15 模型调用全部成功）：`history_recall_coverage` 与 `confirmed_only_recall_rate` 实测从"没测"变为 1.0000，`history_projection_pass_rate` 与 `realtime_priority_pass_rate` 实测为 0.0000——**这不是四项都提升**，后两项的 0 由三条案例全部走到 `safe_degraded`（Auditor 两轮 `revise`，规则预检 0 问题，降级报告按设计清空根因与相似案例）造成，与模型如何处理历史无关。预置轮与未预置轮不可同列比较。完整口径与未达标项见 [`docs/live-golden-eval-results.md`](docs/live-golden-eval-results.md)。
+- `live-golden-eval:v3` 提供显式 opt-in 的真实模型 Golden 评测（默认三案例冒烟，`--all-cases` 展开全部 28 条），经生产 PostgreSQL GraphRAG、双 Agent、LangGraph 与真实 MCP 协议（该命令默认走 stdio 传输）执行，并只记录版本、状态、耗时和 token，不记录 Prompt、原始响应或 Thought。已在固定 `gpt-5.6-sol` 端点执行多轮：`planner-react:v8` + 定位修订下必要 Action 覆盖与证据来源覆盖实测 1.0000（v7 为 0.7778）、必要因果链完整率实测 0.6667（v7 为 0.1667）、风险等级命中实测 0.6667（v7 为 0.3333），同时模型调用从 15 次降到 12 次。`root_cause_top1_hit_rate` 实测仍为 0，原因是评分器用精确字符串比较根因与知识节点名；`golden-diagnosis-eval:v23` 新增的 `root_cause_anchor_hit_rate` 在最近一轮实测 0.500（分母 `anchored_case_count=2`），它是与文本相等口径**并列**发布的独立指标，不是把 0 提升成 0.5——两者分母与判定口径都不同，文本相等口径一个字未改。三案例 smoke 不能外推到 28 条；`scope` 分 `smoke` / `full` / `custom` 三档，覆盖全集才是 `full`，少一条即退回 `custom`，因此报告本身就能说明分母。`--all-cases` 已完成一次 `scope=full` 全量实测（Run H，28/28，`case_coverage_rate=1.0000`），但那一轮 142 次模型调用里有 50 次失败（44 次为端点超时）、11 条案例以 `planner_provider_error` 零工具结束，因此**只能读作"链路在全量案例上完整跑通并被评分"，不是模型能力基线**；同轮锚点口径在分母 14 下实测 0.0714，与 smoke 的 0.500（分母 2）分母不同、不可相减。P95 ≤ 30 s 仍是设计目标值而非实测值（实测每案例 58–125 s，全量轮均摊约 152.5 s）。四个记忆类指标在 Run A–H 里一律为 0，那是数据库中没有 confirmed 历史案例导致的**分母为空**而不是模型表现；v3 新增的 `--seed-history` 在付费调用前用生产 confirm 事务补上这个前置条件，Run I 是第一轮带预置的实测运行（3 条记忆案例、`scope=custom`、15/15 模型调用全部成功）：`history_recall_coverage` 与 `confirmed_only_recall_rate` 实测从"没测"变为 1.0000，`history_projection_pass_rate` 与 `realtime_priority_pass_rate` 实测为 0.0000——**这不是四项都提升**，后两项的 0 由三条案例全部走到 `safe_degraded`（Auditor 两轮 `revise`，规则预检 0 问题，降级报告按设计清空根因与相似案例）造成，与模型如何处理历史无关。预置轮与未预置轮不可同列比较。完整口径与未达标项见 [`docs/live-golden-eval-results.md`](docs/live-golden-eval-results.md)。
 - `audited-diagnosis-workflow:v2` 按 history trigger 召回 confirmed 案例，在 ReAct 前后两次确定性比较同批候选，再串联独立 Auditor 和审计后 memory staging。
 - `diagnosis-resources:v4` 提供 session/message/run/event PostgreSQL 资源，并通过 cancel/resume 扩展可恢复生命周期；最终报告可直接展示相似度、共同点、差异点、参考方案、避坑提示与引用。
 - `session-checkpoint:v1` 在成功 run 的同一事务保存最新公开状态；同 session 追问恢复报告、证据、路径和工具事件，失败 run 不覆盖旧快照，跨 run 同参 Action 仍会被拦截。
@@ -91,9 +92,29 @@ $env:DATAOPS_CHAT_API_KEY='仅保存在本机环境中的密钥'
 
 ```powershell
 Copy-Item .env.example .env
-# 修改 .env 中的 DATAOPS_DB_AUTH
+# 修改 .env 中的 DATAOPS_DB_AUTH 与 DATAOPS_MCP_AUTH
 docker compose up --build
 ```
+
+Compose 启动三个服务：`database`（pgvector）、`mcp-gateway`（Streamable HTTP MCP 网关）和 `api`。
+`api` 通过 `depends_on: service_healthy` 等网关就绪后才启动，因为它的 lifespan 要跨真实 MCP 握手发现
+九个工具。容器内 `DATAOPS_MCP_TRANSPORT=streamable-http` 在 `environment` 块里显式声明而不是靠仓库
+默认值——默认仍是 `stdio`，让宿主上不起网关也能跑通测试与离线评测。
+
+`DATAOPS_MCP_AUTH` 与 `DATAOPS_DB_AUTH` 一样是必填的 fail-closed 变量（`${VAR:?...}`），缺失时
+`docker compose config` 与 `up` 直接拒绝而不是起一个无鉴权的工具端点；强度要求与 API 令牌一致，至少
+32 个不含空白的可见 ASCII 字符。`.env` 里的键名刻意是 `DATAOPS_MCP_AUTH` 而不是真实字段名
+`DATAOPS_MCP_AUTH_TOKEN`：Compose 按 service 映射成真实字段，宿主上直接跑 stdio 的进程读同一份文件
+时因此看不到令牌，不会撞上"stdio 却配了令牌"的启动校验。
+
+网关刻意不发布宿主端口，只在 compose 网络内可达——它持有全链路排障证据，发布出去等于凭空多一个
+攻击面。它的 healthcheck 是 `python -m mcp_server.healthcheck mcp-gateway:8900`，两段都必须通过：匿名
+GET 被挡成 401（证明鉴权中间件真的插在应用前面），且带令牌、`Host` 写成部署 service 名的 `initialize`
+必须打到 MCP 应用并回出 `protocolVersion`。只断言 401 是不够的——401 在中间件里就短路，走不到应用，
+所以"按 service 名访问被传输安全策略 421 挡下"那次一路 healthy，直到 `api` 启动期工具发现失败、以退出码
+3 结束才暴露。探针令牌只从容器环境读，不进命令行参数（`docker inspect` 会公开 healthcheck 命令）。
+部署后可用 `GET /health` 的 `mcp` 小节确认实际传输（`transport`、`auth_required`），该小节不公开网关
+URL、令牌或其摘要。
 
 Docker 默认将 API 暴露在 `http://localhost:18000/health`；可通过
 `DATAOPS_API_PORT` 修改宿主端口。容器内部端口保持为 8000。
@@ -108,8 +129,13 @@ Compose 只把 API 端口绑定到 `127.0.0.1`，因此默认 `DATAOPS_API_AUTH_
 ```powershell
 .venv\Scripts\python -m ruff check .
 .venv\Scripts\python -m pytest -q
-docker compose config
+docker compose config --quiet
 ```
+
+`--quiet` 不是为了输出干净：不带它的 `docker compose config` 会把插值后的完整配置打到 stdout，而插值
+输入正是 `.env`，于是 API key、数据库口令与网关令牌会明文进入终端、shell 历史与 CI 日志。加上 `--quiet`
+后校验能力不变（YAML 不合法或 `${VAR:?...}` 缺值仍非零退出），只是成功时不输出；要看拓扑用
+`docker compose config --services`。
 
 PostgreSQL 专项测试需要先启动数据库并显式选择 marker，具体命令和原理见实现指南的“测试分层”章节。
 

@@ -43,8 +43,9 @@ from app.core.fixture_registry import FixtureRegistry, load_golden_cases
 from app.core.settings import get_settings
 from app.domain.models import CaseMemory
 from app.domain.tooling import ToolName
-from app.mcp.client import StdioMcpClient
 from app.mcp.executor import McpToolExecutor
+from app.mcp.factory import create_mcp_client
+from app.mcp.protocol import MCP_TRANSPORT_CONTRACT_ID
 from app.memory import (
     CASE_MEMORY_CONTRACT_ID,
     CaseMemoryMatch,
@@ -136,6 +137,7 @@ class ContractVersions(BaseModel):
     api_auth: str
     run_stream: str
     model_transient_retry: str
+    mcp_transport: str
 
 
 class RuntimeLimits(BaseModel):
@@ -298,6 +300,25 @@ class ApiSecurityConfiguration(BaseModel):
     rate_limit_window_seconds: float
 
 
+class McpTransportConfiguration(BaseModel):
+    """公开 MCP 客户端走哪条传输、是否需要令牌，以及单次工具调用的超时预算。
+
+    传输必须可从外部观察：`mcp_tools_available` 只说明九个工具齐全，说不出它们是经本地子进程还是
+    经一个独立部署的网关取回的，而"以为在打网关、其实静默回退到子进程"正是最难在演示现场发现的
+    配置漂移。这里刻意不公开网关 URL、令牌或其摘要——URL 属于内网拓扑，摘要会把"令牌是否变更过"
+    变成可观测信号，对排障没有价值。`auth_required` 只在 HTTP 传输下有意义，stdio 恒为 false，
+    因为 stdio 根本没有可鉴权的网络面。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    transport: Literal["stdio", "streamable-http"]
+    contract_id: str
+    auth_required: bool
+    tool_timeout_seconds: float
+    tool_retry_count: int
+
+
 class HealthResponse(BaseModel):
     """定义 `/health` 返回的已验证依赖、数据规模与契约快照。
 
@@ -332,6 +353,7 @@ class HealthResponse(BaseModel):
     retrieval: RetrievalConfiguration
     security: ApiSecurityConfiguration
     stream: RunStreamConfiguration
+    mcp: McpTransportConfiguration
 
 
 class SessionCreateRequest(BaseModel):
@@ -516,6 +538,8 @@ async def lifespan(app: FastAPI):
         raise ValueError("configured API auth contract ID does not match the package")
     if settings.run_stream_contract_id != RUN_STREAM_CONTRACT_ID:
         raise ValueError("configured run stream contract ID does not match the package")
+    if settings.mcp_transport_contract_id != MCP_TRANSPORT_CONTRACT_ID:
+        raise ValueError("configured MCP transport contract ID does not match the package")
 
     # 守卫在任何 Provider、MCP 子进程和数据库连接之前构造：弱令牌或非法配额必须让进程拒绝开放
     # 端口，而不是等第一个请求到达时才发现"鉴权其实没生效"。
@@ -565,13 +589,10 @@ async def lifespan(app: FastAPI):
         timeout_seconds=settings.rerank_timeout_seconds,
     )
 
-    # 工具发现必须跨真实 stdio MCP 握手；直接比较本地枚举会掩盖服务进程注册失败。
-    mcp_client = StdioMcpClient(timeout_seconds=settings.tool_timeout_seconds)
-    mcp_tools_available = await mcp_client.list_tools()
-    required_mcp_tools = {tool.value for tool in ToolName}
-    missing_mcp_tools = sorted(required_mcp_tools - set(mcp_tools_available))
-    if missing_mcp_tools:
-        raise ValueError(f"required MCP tools are unavailable: {missing_mcp_tools}")
+    # 传输由配置选定：生产形态是独立部署的 Streamable HTTP 网关，stdio 保留为可选本地路径。
+    # 构造不发起 I/O（不起子进程、不建连接），因此可以留在 try 之外，让 finally 一定能拿到它去
+    # 关闭连接池；真正的协议握手发生在 try 里的工具发现。
+    mcp_client = create_mcp_client(settings)
 
     database_engine = None
     database_status = "disabled"
@@ -589,6 +610,13 @@ async def lifespan(app: FastAPI):
     session_factory = None
     memory_counts = MemoryCounts(pending=0, confirmed=0, rejected=0)
     try:
+        # 工具发现必须跨真实 MCP 握手（stdio 子进程或 HTTP 网关），直接比较本地枚举会把"服务端
+        # 没注册"和"网关不可达"都掩盖成九项齐全。放在 try 内，失败时连接池才会被 finally 回收。
+        mcp_tools_available = await mcp_client.list_tools()
+        required_mcp_tools = {tool.value for tool in ToolName}
+        missing_mcp_tools = sorted(required_mcp_tools - set(mcp_tools_available))
+        if missing_mcp_tools:
+            raise ValueError(f"required MCP tools are unavailable: {missing_mcp_tools}")
         if settings.database_url is not None:
             # 数据库是可选依赖：纯单测模式标记 disabled；配置后则必须真正连接并查询。
             database_engine = create_database_engine(settings.database_url.get_secret_value())
@@ -733,6 +761,10 @@ async def lifespan(app: FastAPI):
             await auditor_runtime.aclose()
         if planner_runtime is not None:
             await planner_runtime.aclose()
+        # MCP 客户端在 Streamable HTTP 下持有共享连接池，在 stdio 下什么都不持有（一次调用一个
+        # 子进程）。用 hasattr 与下面的 reranker 同一条惯例，避免为 stdio 补一个空的 aclose。
+        if hasattr(mcp_client, "aclose"):
+            await mcp_client.aclose()
         # 检索侧 Provider 也可能持有远程连接池与 Authorization 头；用 hasattr 而不是 isinstance，
         # 是为了让离线确定性实现和测试替身无需实现空的 aclose 就能通过同一条关闭路径。
         if reranker is not None and hasattr(reranker, "aclose"):
@@ -894,6 +926,7 @@ async def health(request: Request) -> HealthResponse:
             api_auth=settings.api_auth_contract_id,
             run_stream=settings.run_stream_contract_id,
             model_transient_retry=settings.model_transient_retry_contract_id,
+            mcp_transport=settings.mcp_transport_contract_id,
         ),
         limits=RuntimeLimits(
             max_react_steps=settings.max_react_steps,
@@ -975,6 +1008,15 @@ async def health(request: Request) -> HealthResponse:
             keepalive_seconds=settings.run_stream_keepalive_seconds,
             max_seconds=settings.run_stream_max_seconds,
             available_under_auth=request.app.state.api_security.mode == "disabled",
+        ),
+        mcp=McpTransportConfiguration(
+            transport=settings.mcp_transport,
+            contract_id=settings.mcp_transport_contract_id,
+            # 令牌是否存在直接决定网关是否 fail-closed；报告"配置里有没有令牌"而不是令牌本身，
+            # 因此这个字段可以放心公开。stdio 下 Settings 已保证令牌必须为空。
+            auth_required=settings.mcp_auth_token is not None,
+            tool_timeout_seconds=settings.tool_timeout_seconds,
+            tool_retry_count=settings.tool_retry_count,
         ),
     )
 

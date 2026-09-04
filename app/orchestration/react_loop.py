@@ -523,8 +523,9 @@ async def _execute_tools(
 ) -> ReactGraphState:
     """并发执行本轮整批只读 MCP Action，并把全部 Observation 原子回写状态。
 
-    批次用 `asyncio.gather` 同时发起：九个工具都是只读的，且 `StdioMcpClient` 每次调用都启动独立
-    子进程会话，因此并发调用之间没有共享连接或游标可被破坏。`return_exceptions=True` 让编程异常
+    批次用 `asyncio.gather` 同时发起：九个工具都是只读的，且两种传输都不共享会话状态——stdio 每次
+    调用起一个独立子进程，Streamable HTTP 共享 httpx 连接池但每次 `call_tool` 新建 MCP 会话——因此
+    并发调用之间没有共享连接或游标可被破坏。`return_exceptions=True` 让编程异常
     在所有兄弟协程收尾后再原样重抛，避免第一个失败留下仍在写 span 的孤儿任务。回写按 Action 顺序
     进行，`react_step` 增加批次长度，因此并行只买到更低延迟而不是更多取证预算。
     """

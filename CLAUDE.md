@@ -46,9 +46,11 @@ DATAOPS_TEST_DATABASE_URL='postgresql+asyncpg://...' .venv/Scripts/python -m app
 # 真实模型冒烟评测（opt-in，需要 DATAOPS_CHAT_PROVIDER/DATAOPS_CHAT_API_KEY/DATAOPS_DATABASE_URL）
 .venv/Scripts/python -m app.evaluation.live_golden --code-revision <git-sha> --output live-golden.json
 
-# Docker：宿主 18000 → 容器 8000；先 cp .env.example .env 并设置 DATAOPS_DB_AUTH
+# Docker：宿主 18000 → 容器 8000；先 cp .env.example .env 并设置 DATAOPS_DB_AUTH 与 DATAOPS_MCP_AUTH
+# compose 起三个服务：database、mcp-gateway（Streamable HTTP MCP 网关，不发布宿主端口）、api
 docker compose up --build
-docker compose config
+# 只校验配置，必须带 --quiet：不带它会把插值后的完整配置（含 .env 里的 key 与口令）打到 stdout
+docker compose config --quiet
 ```
 
 ## 架构：三层嵌套 LangGraph
@@ -72,8 +74,8 @@ AuditedDiagnosisWorkflow (audited-diagnosis-workflow:v2, app/orchestration/diagn
 
 ## 其余关键边界
 
-- **MCP 是真协议边界**：`app/mcp/client.py` 用 `sys.executable -m mcp_server.server` 起 stdio 子进程。禁止在 Agent 节点里直接读 Fixture 冒充工具调用。九个只读工具名以 `app/domain/tooling.py` 的 `ToolName` 为准，不得改名、合并或删减。瞬时错误最多重试一次，且重试不增加 `react_step`。
-- **并行只买延迟，不买预算**：Planner 单轮可提交 1–`max_parallel_tool_actions`（默认 3）个互不依赖的只读 Action，`execute_tools` 用 `asyncio.gather` 并发跨独立 stdio 子进程执行（`StdioMcpClient` 每次 `call_tool` 都开新会话，所以并发安全）。一批 N 个 Action 记 N 步，因此调大并行度不会让模型多看证据。所有门禁（并行上限 → 步数预算 → capability 范围 / `trace_id` / 指纹去重）都整批拒绝而不截断，否则 Planner 会基于"其余调用也发生了"的错误前提继续推理。Prompt 里的批次上限与门禁同源：控制器注入 `min(配置并行度, 剩余步数)`。
+- **MCP 是真协议边界，传输由 `mcp-transport:v1` 选定**：生产路径是 Streamable HTTP —— `app/mcp/streamable_http.py` 打一个独立部署的网关（compose 的 `mcp-gateway` service），`mcp_server/security.py` 复用 `ApiSecurityGuard` 做 fail-closed 鉴权，缺令牌拒绝启动，401/403 归 `PERMISSION_DENIED`（不在可重试集合内）。stdio（`app/mcp/client.py` 用 `sys.executable -m mcp_server.server` 起子进程）保留为可选配置与代码学习路线，**不再新增功能或测试**。执行器只依赖 `app/mcp/protocol.py` 的 `McpToolClient` Protocol，新传输不改上层。禁止在 Agent 节点里直接读 Fixture 冒充工具调用。九个只读工具名以 `app/domain/tooling.py` 的 `ToolName` 为准，不得改名、合并或删减。瞬时错误最多重试一次，且重试不增加 `react_step`。
+- **并行只买延迟，不买预算**：Planner 单轮可提交 1–`max_parallel_tool_actions`（默认 3）个互不依赖的只读 Action，`execute_tools` 用 `asyncio.gather` 并发执行（两种传输都不共享会话状态：HTTP 下共享 httpx 连接池但每次 `call_tool` 新建 MCP 会话，stdio 下每次 `call_tool` 起独立子进程，所以并发安全）。一批 N 个 Action 记 N 步，因此调大并行度不会让模型多看证据。所有门禁（并行上限 → 步数预算 → capability 范围 / `trace_id` / 指纹去重）都整批拒绝而不截断，否则 Planner 会基于"其余调用也发生了"的错误前提继续推理。Prompt 里的批次上限与门禁同源：控制器注入 `min(配置并行度, 剩余步数)`。
 - **PostgreSQL 是唯一状态服务**：业务表、pgvector 向量、显式图节点/边表全在里面。不要引入 Neo4j / Redis / 独立向量库。
 - **`app/capabilities/` 是配置不是 Agent**：五项固定能力只输出 Prompt 片段、工具优先级、输入要求和输出校验规则，不能自己调 LLM/MCP/检索。别和 `.agents/skills/` 的开发 Skill 混淆。
 - **模型默认 disabled**：`DATAOPS_CHAT_PROVIDER=disabled`。诊断资源 API 要求 PostgreSQL + Planner + Auditor 三者齐备才发布 runtime，否则明确返回 503（不静默降级）。
@@ -87,7 +89,7 @@ AuditedDiagnosisWorkflow (audited-diagnosis-workflow:v2, app/orchestration/diagn
 
 ## 两个容易踩的门禁
 
-**1. 契约 ID 必须多处同步。** 所有版本化契约（`planner-react:v8`、`langgraph-react-loop:v3`、`case-memory:v2`、`diagnosis-resources:v4`、`api-auth:v1`、`run-stream:v1` 等）在 `app/core/settings.py` 有一份期望值，模块里有一份常量，`app/api/main.py` 的 lifespan 逐项比对，不一致就拒绝启动。升版本要同时改：settings 默认值、模块常量、`docs/prompt-contracts.md`、`docs/implementation-guide.md`，以及 `tests/unit/test_documentation_policy.py` 里对应的字面量断言。
+**1. 契约 ID 必须多处同步。** 所有版本化契约（`planner-react:v8`、`langgraph-react-loop:v3`、`case-memory:v2`、`diagnosis-resources:v4`、`api-auth:v1`、`run-stream:v1`、`mcp-transport:v1` 等）在 `app/core/settings.py` 有一份期望值，模块里有一份常量，`app/api/main.py` 的 lifespan 逐项比对，不一致就拒绝启动。升版本要同时改：settings 默认值、模块常量、`docs/prompt-contracts.md`、`docs/implementation-guide.md`，以及 `tests/unit/test_documentation_policy.py` 里对应的字面量断言。
 
 **2. `tests/unit/test_documentation_policy.py` 是硬门禁**，AST + tokenize 扫描 `app/`、`mcp_server/`、`tests/`：
 

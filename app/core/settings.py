@@ -46,23 +46,50 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = Field(default=8000, ge=1, le=65535)
 
-    max_react_steps: int = Field(default=8, ge=1, le=20)
+    max_react_steps: int = Field(default=10, ge=1, le=20)
     # 并行度与步数预算是两个独立旋钮：并行只把"状态 + 日志 + 拓扑"这类互不依赖的取证压进同一段
     # 等待时间，一批 N 个 Action 仍然消耗 N 个步数。因此调大这个值只会降低 P95 延迟，不会让模型
     # 获得更多取证机会，也不需要同步调大 max_react_steps。
     max_parallel_tool_actions: int = Field(default=3, ge=1, le=MAX_PARALLEL_TOOL_ACTIONS)
-    # 步数预算必须严格大于 Golden 集里最长的必需工具集（跨组件案例 required_tools 最多 6 个），否则
-    # 系统被设计成必然拿不到满覆盖：真实模型总要花一到两步试探，零余量下每次试探都直接换掉一个必需
-    # 取证。首次真实模型评测就撞上了这一点——跨组件案例执行满 6 步后以 react_budget_exhausted 结束，
-    # 却漏掉 bds.get_table_info。墙钟预算随后从 60s 放宽到 240s：实测 Planner 单次 8–18s，8 步最坏
-    # 要四次决策加上工具与检索时间，仍按 60s 会把"预算够但时间不够"伪装成正常终止；240s 还必须容得下
-    # 至少一次瞬时重试的最坏开销（见下面 chat_transient_retry_* 与 model_transient_retry 校验），
-    # 否则一个本可恢复的 429 会被预算截断成 total_timeout，等于加了重试又不让它生效。
+    # 步数预算必须同时满足两个下界，两者都是被真实模型撞出来的，不是估算：
+    # (1) 严格大于 Golden 集里最长的必需工具集（跨组件案例 required_tools 最多 6 个），否则系统被
+    #     设计成必然拿不到满覆盖——真实模型总要花一到两步试探，零余量下每次试探都直接换掉一个必需
+    #     取证。首次真实模型评测就撞上了这一点：跨组件案例执行满 6 步后以 react_budget_exhausted
+    #     结束，却漏掉 bds.get_table_info，于是预算从 6 提到 8。
+    # (2) 还要为"收口回合"留出余量。循环在 react_step >= max_steps 时**先停机再判断**，所以把预算
+    #     用到刚好等于上限的 Planner 永远拿不到最后那次决策机会：证据其实齐了，却只能以
+    #     react_budget_exhausted 结束，报告基于"调查未完成"起草，Auditor 判 report_incomplete，
+    #     一次返工预算用尽后转 safe_degraded。8 步下这条恰好会命中——实测一次 3+3+2 的批次序列刚好
+    #     填满 8 步，而最后那两个 Action 取的正是 Golden 要求的必需证据，因此"让 Prompt 更早收口"
+    #     只会用覆盖率换一个好看的 stop_reason，方向是反的。10 步在同一条轨迹上留出一个整批余量。
+    #     结构性的解法是给"只允许 finish 的最后一回合"单列保留额度，那会改动
+    #     langgraph-react-loop 的循环语义，属于另一个切片；这里先按可配置项校准。
+    # 墙钟预算随后从 60s 放宽到 240s：实测 Planner 单次 8–18s，10 步最坏要五次决策加上工具与检索
+    # 时间（实测一次 3 批次的真实 run 端到端 96.7s），仍按 60s 会把"预算够但时间不够"伪装成正常
+    # 终止；240s 还必须容得下至少一次瞬时重试的最坏开销（见下面 chat_transient_retry_* 与
+    # model_transient_retry 校验），否则一个本可恢复的 429 会被预算截断成 total_timeout，等于加了
+    # 重试又不让它生效。
     react_total_timeout_seconds: float = Field(default=240, gt=0, le=600)
     max_graph_hops: int = Field(default=2, ge=1, le=2)
     max_audit_revisions: int = Field(default=1, ge=0, le=1)
     tool_timeout_seconds: float = Field(default=5, gt=0, le=60)
     tool_retry_count: int = Field(default=1, ge=0, le=1)
+
+    # MCP 传输选型。生产形态是 Streamable HTTP：网关与 Agent 分属不同部署单元，client↔server 这
+    # 一跳必须过网络。默认值仍留 stdio，因为 `tests/conftest.py` 会清空所有 DATAOPS_*，若默认是
+    # HTTP，任何应用启动（健康检查测试、/demo、--skip-postgres 离线评测）都要先有一个可达网关。
+    # 默认值只代表"零配置能跑通"，不代表推荐形态——生产形态由 compose 显式声明。
+    mcp_transport: Literal["stdio", "streamable-http"] = "stdio"
+    mcp_http_url: AnyHttpUrl = AnyHttpUrl("http://127.0.0.1:8900/mcp")
+    mcp_http_host: str = "0.0.0.0"
+    mcp_http_port: int = Field(default=8900, ge=1, le=65535)
+    mcp_auth_token: SecretStr | None = None
+    # 网关限流与 API 限流不能共用一份配额。API 的 120/60s 是按"人 + 前端轮询"的量级定的；网关侧
+    # 一次 call_tool 在无状态模式下是三个 POST（initialize、initialized 通知、tools/call），而且全部
+    # 来自同一个 api 容器 IP，所以按来源计的窗口实际是网关的全局闸门。默认 600/60s 能容下单 run
+    # 满预算取证（10 步 × 3 POST）与若干并发 run，同时仍然挡住"把网关当通用查询接口刷"。
+    mcp_rate_limit_requests: int = Field(default=600, ge=1, le=100_000)
+    mcp_rate_limit_window_seconds: float = Field(default=60, gt=0, le=3600)
 
     # 鉴权默认关闭，让本地演示与测试无需令牌即可跑通；但一旦设置了令牌就必须同时把模式切到
     # bearer，否则实例会拒绝启动——"配了令牌却没启用"比"完全没配"更危险，因为部署者以为接口
@@ -164,6 +191,9 @@ class Settings(BaseSettings):
     # 仍然如实描述"一次 complete 只发一次网络请求"，遥测里每次尝试也仍是独立一条记录。
     model_transient_retry_contract_id: str = "model-transient-retry:v1"
     mcp_contract_id: str = "mcp-tools:v1"
+    # 传输与工具契约分开计版：九个工具名和 `McpToolResponse` 一个字未改，所以 mcp-tools:v1 不动，
+    # 新增的这一个只描述"client↔server 那一跳怎么连"。理由与上面的 model_transient_retry 相同。
+    mcp_transport_contract_id: str = "mcp-transport:v1"
     golden_case_contract_id: str = "golden-case:v10"
     capabilities_contract_id: str = "runtime-capabilities:v1"
     react_loop_contract_id: str = "langgraph-react-loop:v3"
@@ -212,6 +242,7 @@ class Settings(BaseSettings):
         self._validate_run_stream()
         self._validate_retrieval_providers()
         self._validate_api_security()
+        self._validate_mcp_transport()
         self._validate_transient_retry()
         return self
 
@@ -275,6 +306,22 @@ class Settings(BaseSettings):
             raise ValueError("api_auth_token is required when api_auth_mode is bearer")
         if self.api_auth_mode == "disabled" and self.api_auth_token is not None:
             raise ValueError("api_auth_token must be unset when api_auth_mode is disabled")
+
+    def _validate_mcp_transport(self) -> None:
+        """校验 MCP 传输与令牌的组合，并禁止网关地址内嵌凭据。
+
+        `streamable-http` 是网络暴露的工具端点：九个工具虽然只读，暴露出去的是整条链路的排障证据，
+        因此缺令牌直接拒绝启动（fail-closed），而不是先跑起来再指望没人扫到它。反方向同样拦：
+        stdio 却配了令牌说明部署者以为端点受保护，而 stdio 根本没有可鉴权的网络面。URL 不得携带
+        userinfo，否则凭据会随异常文本和 trace 一起外泄——与 chat_base_url 同一条规则。
+        """
+
+        if self.mcp_http_url.username or self.mcp_http_url.password:
+            raise ValueError("mcp_http_url must not include user information")
+        if self.mcp_transport == "streamable-http" and self.mcp_auth_token is None:
+            raise ValueError("mcp_auth_token is required when mcp_transport is streamable-http")
+        if self.mcp_transport == "stdio" and self.mcp_auth_token is not None:
+            raise ValueError("mcp_auth_token must be unset when mcp_transport is stdio")
 
     def _validate_retrieval_providers(self) -> None:
         """校验 embedding / rerank Provider 与其凭据、维度和端点的一致性。

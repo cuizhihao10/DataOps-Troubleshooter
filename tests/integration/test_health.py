@@ -66,12 +66,14 @@ async def test_health_reports_validated_contract_baseline() -> None:
         "api_auth": "api-auth:v1",
         "run_stream": "run-stream:v1",
         "model_transient_retry": "model-transient-retry:v1",
+        "mcp_transport": "mcp-transport:v1",
     }
     assert payload["limits"] == {
-        # 步数预算严格大于 Golden 集里最长的必需工具集（6 个），给真实模型留出试探余量；墙钟预算
-        # 随之放宽到 240s，因为实测 Planner 单次 8–15s，8 步最坏要四次决策加工具与检索时间，并且
-        # 还要能容纳一次瞬时重试的最坏开销（一次超时 30s 加 1s 退避）。
-        "max_react_steps": 8,
+        # 步数预算有两个下界：严格大于 Golden 集里最长的必需工具集（6 个），并且要给"最后一次只做
+        # 收口的 Planner 决策"留出余量——8 步下实测被一个 3+3+2 的批次序列刚好填满，Planner 因此
+        # 拿不到收口回合。墙钟预算 240s 是因为实测 Planner 单次 8–18s，10 步最坏要五次决策加工具
+        # 与检索时间，并且还要能容纳一次瞬时重试的最坏开销（一次超时 30s 加 1s 退避）。
+        "max_react_steps": 10,
         "max_parallel_tool_actions": 3,
         "react_total_timeout_seconds": 240.0,
         "max_graph_hops": 2,
@@ -158,6 +160,16 @@ async def test_health_reports_validated_contract_baseline() -> None:
         "protected_path_prefixes": ["/api/v1", "/metrics"],
         "rate_limit_requests": 120,
         "rate_limit_window_seconds": 60.0,
+    }
+    # 传输必须逐字公开：生产形态是独立部署的 Streamable HTTP 网关，而"以为在打网关、其实还在起
+    # stdio 子进程"是一种不会报错的部署漂移。这里断言的是默认（零配置）形态，因此 transport 是
+    # stdio 且 auth_required 为 false；HTTP 形态由 compose 显式声明并在容器内人工确认。
+    assert payload["mcp"] == {
+        "transport": "stdio",
+        "contract_id": "mcp-transport:v1",
+        "auth_required": False,
+        "tool_timeout_seconds": 5.0,
+        "tool_retry_count": 1,
     }
     # 推流预算与"鉴权模式下是否可用"一起公开：浏览器 EventSource 不能带 Authorization 头，因此
     # available_under_auth 必须随鉴权模式变化，而不是硬编码为 true。

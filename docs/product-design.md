@@ -141,7 +141,7 @@
 - **可观测性**：每次运行生成 `run_id`，记录节点耗时、工具调用、检索路径、模型 token 和错误。
 - **可替换性**：通过统一 LLM/Embedding 接口切换模型，不把供应商 SDK 传播到领域层。
 - **性能目标**：演示模式下端到端 P95 不高于 30 秒（目标值，成立前提是确定性替身路径）；接入真实模型后单案例实测约 90 秒，主要花在 Planner 单次 8–15 秒的决策和 Auditor 单次 22–30 秒的逐条引用核对上，因此 30 秒目标在真实模型下尚未达成，不得当作实测结论引用。超时后返回已有证据和可继续操作。
-- **成本约束**：限制 ReAct 最多 8 步工具行动、2 跳图扩展和 1 次审计返工，均可配置。步数上限必须严格大于 Golden 集里最长的必需工具集（跨组件案例 6 个），否则真实模型的一到两步试探会直接挤掉必需取证。
+- **成本约束**：限制 ReAct 最多 10 步工具行动、2 跳图扩展和 1 次审计返工，均可配置。步数上限有两个下界：必须严格大于 Golden 集里最长的必需工具集（跨组件案例 6 个），否则真实模型的一到两步试探会直接挤掉必需取证；还必须为"只做收口"的最后一次 Planner 决策留出余量，否则恰好用满预算的调查即使证据齐全也只能以 `react_budget_exhausted` 结束并一路降级（8 步下已实测命中）。
 - **学习与求职可解释性**：所有人工编写的代码、配置、测试和脚本必须通过模块级说明、每个类/函数/异步函数/方法/测试函数的 callable 级 docstring、复杂函数关键步骤旁的内联注释和 `docs/implementation-guide.md`，解释文件职责、技术原理、输入输出、数据流、设计取舍、失败路径与验证方式。文件开头的统一说明不能替代函数级说明；注释重点说明“为什么”和“边界”，不得仅逐行复述代码。对于 JSON、锁文件、图片和 DOCX 等无法内嵌注释或机器生成的文件，使用相邻文档、Schema 测试和实现指南说明其结构与生成方式。
 
 # 4. 系统架构
@@ -154,7 +154,7 @@
 
 **Agent 编排层**：LangGraph 维护状态机。Planner 采用有界 ReAct 行为范式，根据标准化 Observation 更新假设并选择下一项 Action；Auditor 独立完成事实与风险审计。只有 Planner 和 Auditor 是 LLM Agent，输入校验、检索、工具执行、Observation 记录、记忆写入和渲染均为确定性节点。
 
-**工具层**：独立本地 MCP Mock 服务暴露 LTS、BDS 和 FlashSync 只读工具，使用合成 Fixture 提供稳定场景和失败注入。
+**工具层**：独立 MCP 服务暴露 LTS、BDS 和 FlashSync 只读工具，使用合成 Fixture 提供稳定场景和失败注入。传输可选（`mcp-transport:v1`）：**生产形态是 Streamable HTTP**——网关作为独立部署单元运行，client↔server 那一跳过网络，审计记录点与限流闸门因此落在 Agent 信任边界之外，多个客户端（人工排查、定时巡检、运维大盘）也能复用同一套工具；stdio 子进程作为可选配置与代码学习路线保留，是零依赖离线测试的默认值。
 
 **知识与记忆层**：PostgreSQL + pgvector 同时保存知识节点、关系边、向量、运维文档切片、历史案例、会话检查点和运行事件。使用关系表与递归查询/应用层遍历实现轻量 GraphRAG，并在同一套基础设施内提供文档 RAG 通道，不额外引入图数据库或独立向量库。
 
@@ -167,12 +167,12 @@
 | API / Demo | FastAPI + 可选 Gradio 挂载 | API 优先，单进程即可提供可视化演示。 |
 | Agent 行为范式 | ReAct + Pydantic 结构化决策 | 将推理决策、工具行动和观察更新形成可测试闭环，避免自由文本驱动工具。 |
 | 编排 | LangGraph | 适合有状态循环、条件分支、返工和 checkpoint。 |
-| 工具协议 | MCP Python SDK / FastMCP | 展示标准化工具边界，便于独立测试和替换。 |
+| 工具协议 | MCP Python SDK / FastMCP | 展示标准化工具边界，便于独立测试和替换。生产传输为 Streamable HTTP，stdio 可选。 |
 | 数据库 | PostgreSQL 16 + pgvector | 一套基础设施承载状态、向量、图关系和案例。 |
 | ORM / Schema | SQLAlchemy 2.x + Pydantic 2.x | 明确持久化与领域边界，支持类型校验。 |
 | 模型接入 | OpenAI-compatible adapter | 兼容 GPT、Qwen、DeepSeek 等调用形态。 |
 | 测试 | pytest + pytest-asyncio | 覆盖节点、工具、检索、记忆和端到端场景。 |
-| 交付 | Docker Compose | 启动 API、MCP Mock 和 PostgreSQL 三个服务。 |
+| 交付 | Docker Compose | 启动 API、MCP 网关和 PostgreSQL 三个服务。 |
 
 ## 4.3 推荐代码结构
 
@@ -237,7 +237,7 @@ Planner 的每轮行为固定为以下三部分：
 
 结构化决策至少包含：`status`（`call_tool` / `finish` / `need_user_input`）、`decision_summary`、`hypothesis_updates`、`action`、`evidence_refs` 和 `stop_reason`。不得要求模型生成工具的 Observation，也不得在状态、日志或 API 中保存完整 `Thought` 文本。
 
-ReAct 循环默认最多 8 步，并满足以下停止条件之一：证据已支持可审计结论、需要用户补充关键参数、继续调用预期信息增益过低、工具预算或总超时耗尽。除上一次调用为可重试的瞬时错误外，不得使用相同参数重复调用同一工具。
+ReAct 循环默认最多 10 步，并满足以下停止条件之一：证据已支持可审计结论、需要用户补充关键参数、继续调用预期信息增益过低、工具预算或总超时耗尽。除上一次调用为可重试的瞬时错误外，不得使用相同参数重复调用同一工具。
 
 可执行的 Planner Prompt 模板、输出 Schema 和运行时防护见 `docs/prompt-contracts.md`。Prompt 必须版本化并纳入 Golden Case 回归，不得把自由文本 `Thought / Action` 解析作为生产工具调用接口。
 
@@ -308,6 +308,12 @@ Auditor 不可用（Provider 故障、拒答、Schema 二次失败）时直接�
 ```
 
 Mock 服务必须支持正常、空结果、超时、权限拒绝和服务异常。工具调用需要超时、重试上限和错误分类；Planner 看到的是标准化 Observation，不直接依赖各组件原始字段。工具失败后仅在瞬时错误且预算允许时重试一次；仍失败时可引用知识库给出低置信度参考，但不得将其包装成已由实时工具确认的根因。
+
+## 6.3 传输与网关边界（`mcp-transport:v1`）
+
+传输选型只描述 client↔server 那一跳，不影响上面的工具集与统一契约。**生产形态是 Streamable HTTP**：网关是独立部署单元，先于 API 启动、独立扩缩、独立升级。这样做的收益与被观测服务在不在云上无关，而是四条部署事实——审计记录点落在 Agent 信任边界之外；人工排查、定时巡检、运维大盘可以复用同一个已在运行的网关；限流闸门放在被观测服务侧而不是靠调用方自觉；三套后端凭据只存在于网关，Agent 只持有一个可撤销的网关令牌。
+
+网关强制 Bearer 令牌与独立配额，缺令牌拒绝启动；令牌只进请求头不进 URL。`stdio` 子进程作为可选配置保留，是零依赖离线测试与代码学习路线的默认值，不再为它新增能力。`/health` 逐字公开实际传输，因为"以为在打网关、其实还在起子进程"是一种不会报错的部署漂移。
 
 # 7. GraphRAG 设计
 
@@ -546,7 +552,7 @@ compose up` 之后可直接演示，代价由 Compose 把端口只绑定到 `127
 
 ## 13.2 建议演示路径
 
-1. 一键启动 API、MCP Mock 和 PostgreSQL。
+1. 一键启动 API、MCP 网关和 PostgreSQL。
 2. 提交跨组件主演示故障，展示 Planner ReAct 的短计划、Action / Observation 时间线和停止原因。
 3. 展示 GraphRAG 的多跳路径与每项结论的证据引用。
 4. 展示 Auditor 拦截或修正一个缺少依据的结论。
@@ -564,7 +570,7 @@ compose up` 之后可直接演示，代价由 Compose 把端口只绑定到 `127
 - [ ] 双 Agent 均有独立提示词、结构化输入输出和可观察运行节点。
 - [ ] Planner 通过有界 ReAct 循环完成 Action / Observation 闭环，能正确停止且不保存或展示原始思维链。
 - [ ] Planner ReAct 与 GraphRAG 实体/关系抽取 Prompt 已版本化，结构化输出和失败路径有测试。
-- [ ] 9 个 LTS/BDS/FlashSync 只读工具均通过真实 MCP 协议暴露，可独立测试并留下 trace。
+- [ ] 9 个 LTS/BDS/FlashSync 只读工具均通过真实 MCP 协议暴露，可独立测试并留下 trace；生产传输为独立部署的 Streamable HTTP 网关，且网关强制令牌。
 - [ ] GraphRAG 返回节点、关系、路径和分数，且主用例实际引用图路径。
 - [ ] Auditor 能检测无依据结论、证据冲突和缺少风险提示的建议。
 - [ ] 长期记忆支持候选、确认、去重、更新、召回和撤销。

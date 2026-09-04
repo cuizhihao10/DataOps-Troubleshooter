@@ -12,9 +12,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.tooling import McpToolRequest, ToolName
 
-# 一轮最多并行三个只读 Action。上限存在的理由是成本而不是美观：每个 MCP 调用都会拉起一个独立
-# stdio 子进程，无界并行会把"省下的等待"换成子进程风暴；三个恰好覆盖"状态 + 日志 + 拓扑"这类
-# 真实互不依赖的取证组合，再多的组合在九个工具的边界内已经属于猜测式广撒网。
+# 一轮最多并行三个只读 Action。上限存在的理由是成本而不是美观：每个 MCP 调用都会独占一份资源
+# （stdio 下是一个子进程，Streamable HTTP 下是网关侧的一个会话与一份限流配额），无界并行会把
+# "省下的等待"换成子进程风暴或网关限流；三个恰好覆盖"状态 + 日志 + 拓扑"这类真实互不依赖的取证
+# 组合，再多的组合在九个工具的边界内已经属于猜测式广撒网。
 MAX_PARALLEL_TOOL_ACTIONS = 3
 
 

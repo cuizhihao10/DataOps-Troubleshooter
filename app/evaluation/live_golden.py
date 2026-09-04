@@ -1,7 +1,8 @@
 """通过生产诊断运行时执行可选的真实模型 Golden 冒烟评测。
 
 该入口在 FastAPI lifespan 内复用真实 PostgreSQL GraphRAG、Planner/Auditor Structured Outputs、
-LangGraph 和 stdio MCP，而不是直接读取 Fixture 拼装答案。v1 默认选择三类代表案例，并只把合成
+LangGraph 和真实 MCP 传输（`DATAOPS_MCP_TRANSPORT` 选定：默认 stdio 子进程，配了网关则走 Streamable
+HTTP），而不是直接读取 Fixture 拼装答案。v1 默认选择三类代表案例，并只把合成
 场景路由元数据追加到用户问题；Golden 允许根因、必要工具、证据答案和评分规则绝不进入 Prompt。
 输出同时包含现有 Golden 评分与脱敏模型调用遥测，未配置数据库或模型密钥时在付费调用前失败。
 """

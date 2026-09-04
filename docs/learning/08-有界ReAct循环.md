@@ -194,7 +194,8 @@ class ReactGraphRuntime:
 （`ReactGraphRuntime`）是两个东西。**
 
 为什么必须分开？因为状态要能落库。第 11 章会把 `ReactGraphState` 序列化进 `session_checkpoints` 以支持
-cancel / resume。而 `planner` 是一个持有 `httpx` 连接池的对象，`executor` 会启 stdio 子进程——这些东西
+cancel / resume。而 `planner` 是一个持有 `httpx` 连接池的对象，`executor` 背后的 MCP 客户端要么持有
+连接池、要么会启子进程——这些东西
 **没有任何合理的 JSON 表示**。如果它们混在状态里，序列化会直接失败，或者更糟：被某个宽松的序列化器
 悄悄丢掉，恢复之后变成 `None`。
 
@@ -686,6 +687,35 @@ return updated
 这个区分很要紧：模型自报 `evidence_sufficient` 是它的判断，控制器判定 `react_budget_exhausted` 是发生
 过的事。
 
+### 8.8.1 检查 1 在模型调用之前，代价是"填满预算就没有收口回合"
+
+第 1 条检查排在模型调用之前，省的是钱，但它有一个**必须写下来的副作用**：`react_step` 恰好等于
+`max_steps` 时循环先停机，Planner 因此拿不到最后那次决策机会。也就是说预算用满的调查，即使证据其实
+已经齐了，也**没有任何机会**说出 `evidence_sufficient`——终态只能是控制器判定的
+`react_budget_exhausted`。
+
+这不是理论推演。一次真实模型 run 以 3+3+2 的批次序列刚好填满 8 步预算，后续的连锁反应是：报告基于
+"调查未完成"起草 → Auditor 判 `report_incomplete` 要求返工 → 唯一一次返工预算用尽 → 转
+`safe_degraded`，最终根因数为 0，记忆候选也因未 accepted 而不落库。整条阶梯每一环都按设计工作，
+产出却是空的。
+
+关键是**别把病因归到模型身上**。"让 Prompt 在剩余步数临界时更早收口"这个方向是反的：那次 run 的最后
+两个 Action 取的正是 Golden 要求的必需证据，提前收口只会用证据覆盖率换一个好看的 `stop_reason`。
+真正的两条出路是：
+
+1. **配置侧缓解**——步数预算除了要大于最长的必需工具集（6 个），还要多留出至少一个整批的余量。
+   默认值因此从 8 提到 10（见第 2 章 §2.4.1）。这条不改任何语义，但它只降低命中概率，不消除失败面：
+   一个恰好用满 10 步的 Planner 依然会撞上同一条路。
+2. **结构侧根治**——给"只允许 `finish` 的最后一回合"单列保留额度，让步数预算只约束取证 Action。
+   这会改动本章的循环语义（`langgraph-react-loop` 要升版本），因此是独立的一个切片，尚未实现。
+
+在第 2 条落地之前，这是一个**已知的、被记录在案的边界**，而不是一个已经修好的问题。
+
+提到 10 步之后的单案例手工复测（`run_83294e77ae9f4d11`，同一条跨组件案例，端到端 63.4 s）走的是
+3+3+3 共 9 步，第四次 Planner 决策拿到了收口回合并自报 `evidence_sufficient`，Auditor 首轮即
+`accept`。注意它只剩 1 步余量——如果那条轨迹再多一个批次，结论会完全一样地翻回去。分母是 1 的观测
+只能说明"缺的是回合而不是能力"，不能当成这条边界已经消失。
+
 ## 8.9 假设投影：结论怎么从模型输出变成领域对象
 
 引用门禁通过之后、`status` 判断之前，插着一段容易被忽略但非常关键的代码：
@@ -931,12 +961,13 @@ if decision is None or not decision.actions:
 
 这是第 8 章标题里"并行取证"那半句的实现。docstring 把四件事一次说完：
 
-> 批次用 `asyncio.gather` 同时发起：九个工具都是只读的，且 `StdioMcpClient` 每次调用都启动独立子进程
-> 会话，因此并发调用之间没有共享连接或游标可被破坏。`return_exceptions=True` 让编程异常在所有兄弟协程
+> 批次用 `asyncio.gather` 同时发起：九个工具都是只读的，且两种传输都不共享会话状态——stdio 每次
+> 调用起一个独立子进程，Streamable HTTP 共享 httpx 连接池但每次 `call_tool` 新建 MCP 会话——因此
+> 并发调用之间没有共享连接或游标可被破坏。`return_exceptions=True` 让编程异常在所有兄弟协程
 > 收尾后再原样重抛，避免第一个失败留下仍在写 span 的孤儿任务。回写按 Action 顺序进行，`react_step`
 > 增加批次长度，因此**并行只买到更低延迟而不是更多取证预算**。
 
-### 8.11.1 并发安全不是靠加锁，是靠 stdio 会话本来就独立
+### 8.11.1 并发安全不是靠加锁，是靠每次调用的会话本来就独立
 
 ```python
 results = await asyncio.gather(
@@ -952,17 +983,21 @@ results = await asyncio.gather(
 )
 ```
 
-一行 `gather`，没有锁、没有信号量、没有连接池。能这么写是因为第 3 章那个设计决定：`StdioMcpClient`
-**每次 `call_tool` 都新起一个 `sys.executable -m mcp_server.server` 子进程会话**。
+一行 `gather`，没有锁、没有信号量、没有连接池。能这么写是因为第 3 章那个设计决定：**每次 `call_tool`
+都是一个全新的 MCP 会话**。stdio 下这意味着新起一个 `sys.executable -m mcp_server.server` 子进程；
+Streamable HTTP 下连接池是共享的，但 `ClientSession` 仍然一次调用一个（§3.4.8 解释了为什么刻意
+不复用会话：长期持有的 `ClientSession` 会把 anyio cancel scope 的生命周期挂在跨任务边界上，而
+`asyncio.timeout` 的取消正好从那里穿过）。
 
-当时那个决定看起来是浪费——每次工具调用都付一次 Python 解释器启动开销。现在收到了回报：三个并发 Action
-跑在三个互不相干的操作系统进程里，**没有任何共享可变状态**，所以并发安全是结构性的，不是靠纪律维持的。
+当时那个决定看起来是浪费——每次工具调用都付一次会话建立开销。现在收到了回报：三个并发 Action
+跑在三个互不相干的会话里，**没有任何共享可变状态**，所以并发安全是结构性的，不是靠纪律维持的。
+换传输也没改变这一点，因为共享的是连接池（httpx 自己保证并发安全），不是协议会话。
 
 如果当初选的是"复用一个长连接会话"，这里就必须处理请求 ID 复用、响应乱序分派、会话崩溃时三个协程一起
 失败——那是一整类 bug。CLAUDE.md 把这个因果关系明确记下来了：
 
-> `execute_tools` 用 `asyncio.gather` 并发跨独立 stdio 子进程执行（`StdioMcpClient` 每次 `call_tool`
-> 都开新会话，所以并发安全）。
+> `execute_tools` 用 `asyncio.gather` 并发执行（两种传输都不共享会话状态：HTTP 下共享 httpx 连接池
+> 但每次 `call_tool` 新建 MCP 会话，stdio 下每次 `call_tool` 起独立子进程，所以并发安全）。
 
 **一个早期为了简单做的决定，在两章之后变成了并行改造的前提条件。** 这类回报是"边界画对"的典型信号。
 
@@ -984,7 +1019,7 @@ observations = [result for result in results if isinstance(result, ToolObservati
 没有被取消，只是没人再等它们。于是会出现：
 
 - 子 span 在父 span 已经退出 `with` 之后才写 `annotate`，父子时间戳颠倒；
-- stdio 子进程没有走完 `aclose()`，留下僵尸进程；
+- 会话没有走完清理：stdio 下留下僵尸子进程，HTTP 下留下一个没被 `__aexit__` 的 MCP 会话占着连接；
 - 报错的堆栈里看不到另外两个工具究竟成功了还是失败了。
 
 `return_exceptions=True` 让 `gather` **等所有协程收尾**，把异常当返回值收集起来。然后我们自己遍历、
