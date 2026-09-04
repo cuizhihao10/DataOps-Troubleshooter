@@ -37,9 +37,19 @@ _USER_TEMPLATE_FIELDS = frozenset(
         "max_react_steps",
         "remaining_tool_calls",
         "max_parallel_actions",
+        "closing_turn",
         "remaining_time_ms",
     }
 )
+
+# 收口回合的说明文字放在渲染层而不是模板里，因为它必须随布尔值整段切换：给模型一个裸的
+# "closing_turn: false" 等于让它自己去猜该做什么，而"本轮可以提交 call_tool"是可直接执行的指令。
+_CLOSING_TURN_TEXT = (
+    "是。取证步数已用尽，本轮不消耗工具步数，也只发放这一次；status 只能是 finish 或"
+    " need_user_input，提交 call_tool 会被控制器整批拒绝并以 react_budget_exhausted 终止运行。"
+    "现在把已收集证据支持的结论写进 hypothesis_updates，这是最后一次机会。"
+)
+_INVESTIGATION_TURN_TEXT = "否。本轮仍在取证预算内，可以按批次上限提交 call_tool。"
 
 
 class PlannerPromptBundle(BaseModel):
@@ -177,6 +187,9 @@ class PlannerPromptRenderer:
             # N 个步数，模型如果算错就会提交刚好超预算的批次，而每次被控制器拒绝都白花一次调用。
             "remaining_tool_calls": str(context.max_react_steps - state.react_step),
             "max_parallel_actions": str(context.max_parallel_actions),
+            "closing_turn": (
+                _CLOSING_TURN_TEXT if context.closing_turn else _INVESTIGATION_TURN_TEXT
+            ),
             "remaining_time_ms": str(context.remaining_time_ms),
         }
         user_message = self._user_template.format_map(values)

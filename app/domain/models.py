@@ -475,6 +475,11 @@ class AgentState(BaseModel):
     tool_events: list[ToolEvent] = Field(default_factory=list)
     retrieved_paths: list[RetrievedPath] = Field(default_factory=list)
     react_step: int = Field(default=0, ge=0)
+    # 收口回合是取证预算之外的一次"只允许 finish"的额度，与 react_step 分开计数：预算耗尽时如果
+    # 直接切断循环，Planner 就永远没有机会把已收集证据写成 hypothesis_updates，报告根因恒为空，
+    # 独立 Auditor 随即以 report_incomplete 否决整次调查。标记进 AgentState 而不是图内部状态，
+    # 因为它必须随 checkpoint 一起持久化——否则 cancel/resume 会让同一次运行领到第二个收口回合。
+    closing_turn_used: bool = False
     next_action: PlannerDecision | None = None
     observation_refs: list[str] = Field(default_factory=list)
     stop_reason: str | None = Field(default=None, max_length=500)

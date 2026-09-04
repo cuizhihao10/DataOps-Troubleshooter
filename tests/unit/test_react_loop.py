@@ -440,14 +440,59 @@ async def test_component_scope_blocks_out_of_capability_tool() -> None:
 
 
 @pytest.mark.asyncio
-async def test_react_budget_stops_before_an_extra_planner_or_tool_call() -> None:
-    """验证达到 max_steps 后图在下一 Planner 调用前停止。
+async def test_react_budget_grants_one_closing_turn_that_lets_planner_finish() -> None:
+    """验证取证步数用尽后控制器额外发放一次收口回合，让 Planner 自己收口。
 
-    最大步骤设为一，首个 Action 正常写回；循环返回 planner 节点时先检查预算，不消费第二个
-    预设决策，也不执行额外工具。react_step 与 executor 数量都恰好为一。
+    最大步骤设为一，首个 Action 正常写回；循环返回 planner 节点时预算已耗尽，但控制器不直接终止，
+    而是以批次上限 0 再调用一次 Planner。停止原因来自 Planner 的结构化 finish 而不是
+    react_budget_exhausted，收口回合不消耗 react_step，也不产生第二次工具调用。
     """
 
-    planner = ScriptedPlanner([_action_decision()])
+    planner = ScriptedPlanner(
+        [_action_decision(), _finish_decision(stop_reason="evidence_insufficient")]
+    )
+    executor = RecordingExecutor()
+    loop = BoundedReactLoop(
+        planner=planner,
+        executor=executor,
+        config=ReactLoopConfig(max_steps=1, total_timeout_seconds=2),
+    )
+
+    result = await loop.run(_run_request())
+
+    assert result.state.stop_reason == "evidence_insufficient"
+    assert result.state.react_step == 1
+    assert result.state.closing_turn_used is True
+    assert len(planner.contexts) == 2
+    assert len(executor.actions) == 1
+    closing_context = planner.contexts[-1]
+    assert closing_context.closing_turn is True
+    assert closing_context.max_parallel_actions == 0
+    assert planner.contexts[0].closing_turn is False
+
+
+@pytest.mark.asyncio
+async def test_closing_turn_projects_hypotheses_even_when_planner_keeps_calling_tools() -> None:
+    """验证收口回合越界提交 call_tool 时仍保留该轮假设更新，并以预算耗尽终止。
+
+    收口回合的批次上限是 0，因此任何 Action 都越界，事件必须是 POLICY_BLOCKED 且停止原因回到
+    react_budget_exhausted。但拦截发生在假设投影之后，所以模型这一轮写下的根因照常进入状态——
+    报告层只认 AgentState.hypotheses，把它一起丢掉等于让一次越界抹掉全部可用结论。
+    """
+
+    closing_batch = _with_updates(
+        _action_decision(),
+        [
+            HypothesisUpdate(
+                hypothesis_id="hyp_closing_turn_projection",
+                status=HypothesisUpdateStatus.NEW,
+                symptom="LTS 任务在合成场景中持续失败。",
+                candidate_root_cause="分区日期格式不合法导致调度拒绝提交。",
+                evidence_refs=[],
+            )
+        ],
+    )
+    planner = ScriptedPlanner([_action_decision(), closing_batch])
     executor = RecordingExecutor()
     loop = BoundedReactLoop(
         planner=planner,
@@ -459,8 +504,37 @@ async def test_react_budget_stops_before_an_extra_planner_or_tool_call() -> None
 
     assert result.state.stop_reason == ReactStopReason.REACT_BUDGET_EXHAUSTED.value
     assert result.state.react_step == 1
-    assert len(planner.contexts) == 1
     assert len(executor.actions) == 1
+    assert [item.hypothesis_id for item in result.state.hypotheses] == [
+        "hyp_closing_turn_projection"
+    ]
+    assert result.events[-1].event_type is ReactEventType.POLICY_BLOCKED
+
+
+@pytest.mark.asyncio
+async def test_closing_turn_is_not_granted_twice_after_a_resumed_state() -> None:
+    """验证已消耗收口回合的状态不会再领到第二次，即使从外部恢复而来。
+
+    cancel/resume 会把 AgentState 从 checkpoint 读回来，若额度只记在图内部状态里，恢复后的运行就能
+    反复领取收口回合，"只发一次"变成事实上无界。这里直接注入 closing_turn_used=True 且预算已满的
+    状态，断言控制器一次模型都不调用就以 react_budget_exhausted 停止。
+    """
+
+    planner = ScriptedPlanner([])
+    executor = RecordingExecutor()
+    loop = BoundedReactLoop(
+        planner=planner,
+        executor=executor,
+        config=ReactLoopConfig(max_steps=1, total_timeout_seconds=2),
+    )
+    request = _run_request()
+    exhausted = request.state.model_copy(update={"react_step": 1, "closing_turn_used": True})
+
+    result = await loop.run(request.model_copy(update={"state": exhausted}))
+
+    assert result.state.stop_reason == ReactStopReason.REACT_BUDGET_EXHAUSTED.value
+    assert planner.contexts == []
+    assert executor.actions == []
 
 
 @pytest.mark.asyncio

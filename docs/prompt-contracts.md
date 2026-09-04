@@ -16,14 +16,22 @@
 
 驱动 Planner 在当前状态上选择一个结构化 Action，或明确结束调查、请求用户补充信息。Observation 由确定性 MCP 工具节点生成，不由模型填写。
 
-### 2.2 v8 双消息、会话上下文、历史解释、并行批次与门禁前提模板
+### 2.2 v9 双消息、会话上下文、历史解释、并行批次、收口回合与门禁前提模板
 
-`planner-react:v8` 延续 system/user 两条消息角色隔离与 v5 的"每轮一批 1 到
+`planner-react:v9` 延续 system/user 两条消息角色隔离与 v5 的"每轮一批 1 到
 `max_parallel_actions` 个互不依赖只读 Action"批次语义，在 v6 的 `trace_id` / `citable_refs` 门禁
 前提与 v7 的两条契约（`hypothesis_updates` 是结论进入报告根因的唯一通道、`stop_reason` 只能取七个
-枚举值）之上，再补齐三处模型此前无从得知的口径：可引用白名单与报告层同源并公开每个 ID 的
+枚举值）之上，v8 补齐三处模型此前无从得知的口径：可引用白名单与报告层同源并公开每个 ID 的
 `source`、只有实时 Observation 引用才能把假设升为 supported、优先级工具未跑完时不得直接
-`evidence_sufficient`。
+`evidence_sufficient`。v9 只新增收口回合：取证步数用尽时控制器额外发放一次批次上限为 0 的回合，
+`closing_turn` 占位符整段切换为可直接执行的指令，说明本轮只能 `finish` / `need_user_input`、不消耗
+工具步数、只发放一次，且越界提交 `call_tool` 会以 `react_budget_exhausted` 终止运行。
+
+v8 → v9 的动因是 v8 那句"在 finish 的那一轮也要提交 hypothesis_updates"在预算被打满时根本无法
+履约：控制器在 `react_step` 达到 `max_steps` 时于再次调用模型之前就切断了循环，于是模型从来没有
+"finish 的那一轮"。后果是一条完整的连锁降级——`AgentState.hypotheses` 为空 → 确定性草稿的
+`root_causes` 恒为空 → Auditor 以 `report_incomplete` 否决 → 返工只删不加、预算耗尽 →
+`safe_degraded`。把 `max_react_steps` 从 8 提到 10 只降低打满预算的概率，不消除这个失败面。
 
 v5 → v6 的升版由首次真实模型冒烟评测（`live-golden-eval:v1`）逼出来：三个案例全部在第一步被整批
 拒绝——两例 `invalid_evidence_reference`、一例 `trace_id_mismatch`，`executed_tools` 全为空。原因
@@ -475,7 +483,7 @@ FAQ 是判断依据，Runbook 里同样存在"禁止操作""升级条件"这类�
 
 ### 2.8 LangGraph 有界 ReAct 运行契约
 
-运行控制器使用 `langgraph-react-loop:v3`。固定图拓扑仍为：
+运行控制器使用 `langgraph-react-loop:v4`。固定图拓扑仍为：
 
 ```text
 select_capabilities
@@ -499,6 +507,19 @@ MCP 执行器内部的瞬时重试不增加 `react_step`，但每次尝试仍保
 检查剩余 Action 预算，并把
 本轮批次上限收敛为 `min(配置并行度, 剩余步数)` 一并注入 Prompt 与门禁，避免两者漂移；独立墙钟预算
 覆盖图调度、Planner 和工具等待，默认值分别为 10 步、单批 3 个并行 Action 和 240 秒。
+
+v4 把"取证预算"与"收口额度"拆成两笔独立预算。`react_step` 达到 `max_steps` 时控制器不再直接终止，
+而是额外发放一次收口回合：批次上限压到 0、`closing_turn=True` 注入 Prompt、`react_step` 不增加，
+Planner 只能返回 `finish` / `need_user_input`。这一轮存在的唯一理由是让模型把已收集证据写成
+`hypothesis_updates`——报告的 `root_causes` 只认 `AgentState.hypotheses`，而 v3 在预算打满时于调用
+模型之前就切断了循环，于是取证做满 8 步的运行反而产出空根因报告，随后被 Auditor 以
+`report_incomplete` 否决并降级。收口额度记在 `AgentState.closing_turn_used` 而不是图内部状态，
+因为它必须随 checkpoint 持久化：只记在图里，cancel/resume 就能让同一次运行反复领取收口回合。
+`PlannerTurnContext` 交叉校验 `closing_turn` 与 `max_parallel_actions == 0` 必须同时成立，任何一侧
+写错都在调用模型之前失败，避免向模型注入"这是最后一轮、但你仍可以取证"这类自相矛盾的预算。
+
+收口回合里仍提交 `call_tool` 属于越界，整批拒绝并以 `react_budget_exhausted` 终止。拦截点刻意放在
+假设投影**之后**：模型不听话不等于它这一轮写下的根因没有价值，能救回来的结论照常进入状态。
 
 确定性门禁在任何 MCP I/O 前执行：
 
@@ -1156,13 +1177,13 @@ v3 的 `--seed-history` 预置历史案例时，写入内容同样受 Prompt 隔
 与 `history_expectation` 标注，`allowed_root_causes`、`required_tools`、必要 Evidence source、故障
 路径和停止原因都不得进入 CaseMemory 任一字段。预置后的历史上下文经生产 confirmed-only 检索进入
 Planner 与 Auditor，因此它改变的是"模型看到什么历史"这一前置条件，而不是 Prompt 模板本身，
-`planner-react:v8` 与 `auditor-report:v2` 的 Prompt ID 不提升；报告必须用 `history_seed` 公开这一轮
+`planner-react:v9` 与 `auditor-report:v2` 的 Prompt ID 不提升；报告必须用 `history_seed` 公开这一轮
 是否预置，未预置的运行不得把四个记忆指标的 0 解释成模型行为。
 
 合成 `scenario_id`、资源 ID 和观察窗口只作为 Mock MCP 寻址信息进入 Planner 的不可信 user 消息。
 runner 不得把 `required_tools`、允许根因、必要 Evidence source、故障路径、预期停止原因或风险标注
 渲染给 Planner/Auditor。增加或改变这段路由 envelope 若影响 system/user 边界，必须同步 Prompt 回归
-测试；当前它没有改变 `planner-react:v8` 或 `auditor-report:v2` 静态模板，因此 Prompt ID 不提升。
+测试；当前它没有改变 `planner-react:v9` 或 `auditor-report:v2` 静态模板，因此 Prompt ID 不提升。
 
 模型调用观测契约为 `model-call-metric:v1`。每个 Provider 调用只允许记录双 Agent 角色、Provider /
 Prompt 契约、模型名、稳定状态、单调时钟耗时和供应商可选 token usage。`ContextVar` 记录器只在一次

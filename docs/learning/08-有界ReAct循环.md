@@ -3,16 +3,16 @@
 第 7 章交付了一个"能把一次决策做对"的模型边界。这一章处理**一串决策**：谁来执行模型选的工具、
 Observation 怎么回到下一轮、预算怎么扣、模型越界时怎么办。
 
-代码只有一个文件：`app/orchestration/react_loop.py`（810 行），契约 ID 是 `langgraph-react-loop:v3`。
+代码只有一个文件：`app/orchestration/react_loop.py`（846 行），契约 ID 是 `langgraph-react-loop:v4`。
 
 ## 8.1 你会验证什么
 
 ```bash
 .venv/Scripts/python -m pytest -q tests/unit/test_react_loop.py
-# 实测：20 passed in 1.02s
+# 实测：22 passed
 ```
 
-这 20 个用例的名字几乎就是本章的目录，值得先通读一遍——每一个都是一条边界的自然语言表述：
+这 22 个用例的名字几乎就是本章的目录，值得先通读一遍——每一个都是一条边界的自然语言表述：
 
 | 用例名 | 它守住的边界 |
 |---|---|
@@ -21,7 +21,9 @@ Observation 怎么回到下一轮、预算怎么扣、模型越界时怎么办�
 | `same_tool_with_different_parameters_executes_as_two_actions` | 去重按参数，不按工具名 |
 | `duplicate_action_is_blocked_before_second_executor_call` | 同参重复在进 MCP 之前被拦 |
 | `component_scope_blocks_out_of_capability_tool` | 越出已批准组件范围的工具被拦 |
-| `react_budget_stops_before_an_extra_planner_or_tool_call` | 预算耗尽时**连模型都不再调** |
+| `react_budget_grants_one_closing_turn_that_lets_planner_finish` | 取证预算耗尽时额外发一次"只允许 finish"的收口回合 |
+| `closing_turn_projects_hypotheses_even_when_planner_keeps_calling_tools` | 收口回合越界整批拒绝，但这一轮的假设照样落库 |
+| `closing_turn_is_not_granted_twice_after_a_resumed_state` | 收口额度只发一次，cancel/resume 不能重新领 |
 | `total_timeout_cancels_blocked_planner_and_preserves_route_event` | 总超时取消挂死节点但保留已有事件 |
 | `invalid_evidence_reference_and_trace_are_blocked` | 编造引用、trace 漂移被拦 |
 | `restored_tool_event_blocks_same_action_with_new_run_trace` | 恢复 checkpoint 后仍能识别同参调用 |
@@ -43,9 +45,9 @@ Observation 怎么回到下一轮、预算怎么扣、模型越界时怎么办�
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `app/orchestration/react_loop.py` | 810 | 图拓扑、三个节点、八道门禁、指纹、假设投影 |
+| `app/orchestration/react_loop.py` | 846 | 图拓扑、三个节点、九道门禁、指纹、假设投影、收口回合 |
 | `app/orchestration/models.py` | 199 | `ReactLoopConfig`、状态、公开事件、八个停止原因 |
-| `tests/unit/test_react_loop.py` | 1046 | 20 个用例 |
+| `tests/unit/test_react_loop.py` | 1120 | 22 个用例 |
 
 ## 8.2 ReAct 是什么，以及本项目改了它哪两处
 
@@ -165,12 +167,14 @@ LangGraph 用 `recursion_limit` 防止图无限循环——超过就抛异常。
 步数，否则合法运行会被误杀。
 
 算一下上界：每轮最多两个节点（`planner_react` + `execute_tools`），最多 `max_steps` 轮（因为每轮至少
-消耗一个工具步），所以 `max_steps * 2`；再加上 `select_capabilities`、最后一次 `planner_react`（那次
-返回 `finish`，不进执行节点）和一点余量，就是 `+ 6`。
+消耗一个工具步），所以 `max_steps * 2`；再加上 `select_capabilities`、以及取证预算耗尽后额外发放的那次
+收口回合（只走 `planner_react`，不进执行节点），最坏情况是 `max_steps * 2 + 2`。默认 `max_steps = 10`
+时是 22 个节点执行，`+ 6` 给出的 26 仍然留着余量。
 
-它是**第二道防线**，不是主要防线。主要防线是 8.8 节那个 `react_step >= max_steps` 检查——它在调用模型
-**之前**就返回终态。`recursion_limit` 只在图实现出错（比如某天有人加了一条边形成新循环）时兜底，而
-兜底的方式是抛异常而不是安全降级，因为那属于实现缺陷，不该伪装成"业务上的安全停止"。
+它是**第二道防线**，不是主要防线。主要防线是 8.8 节那个两段式预算检查——"取证步数用尽"把这一轮切成
+收口回合，"收口回合也已用过"才在调用模型**之前**返回终态。`recursion_limit` 只在图实现出错（比如某天
+有人加了一条边形成新循环）时兜底，而兜底的方式是抛异常而不是安全降级，因为那属于实现缺陷，不该伪装成
+"业务上的安全停止"。
 
 ## 8.5 `ReactGraphRuntime`：依赖不能进状态
 
@@ -389,32 +393,45 @@ summary=(
 时间线不需要重复一遍；而事件 `summary` 有 `max_length=500` 的硬上限，把可枚举的结构化信息塞进自由文本
 是浪费预算。
 
-## 8.8 `planner_react`：八道门禁与它们的顺序
+## 8.8 `planner_react`：九道门禁与它们的顺序
 
 这是全章最长的节点，也是"顺序本身就是设计"的最好例子。docstring 先把原则说了：
 
 > 节点先检查工具步数和剩余时间，再调用可替换 Planner。决策仅记录公开摘要；随后依次校验证据引用、
 > 并行批次大小、剩余步数、工具组件范围、trace 和同参指纹。**任何一条不通过就整批拒绝而不是悄悄截断，
 > 因为"只执行了你要求的一部分"会让 Planner 基于不完整前提继续推理。**
+>
+> 取证步数用尽不再直接终止：控制器额外发放一次批次上限为 0 的收口回合，让 Planner 把已收集证据写成
+> `hypothesis_updates`。收口回合只发一次，且不消耗 `react_step`。
 
 按代码顺序走一遍。
 
 ### 8.8.1 模型调用之前：两道免费的门
 
 ```python
-if graph_state.agent_state.react_step >= runtime.context.config.max_steps:
+budget_exhausted = graph_state.agent_state.react_step >= runtime.context.config.max_steps
+if budget_exhausted and graph_state.agent_state.closing_turn_used:
     return _stop_graph_state(
         graph_state,
         reason=ReactStopReason.REACT_BUDGET_EXHAUSTED,
-        summary="已达到 Planner 工具 Action 上限，循环在再次调用模型前停止。",
+        summary="收口回合已用尽，循环在再次调用模型前停止。",
         event_type=ReactEventType.LOOP_STOPPED,
     )
+closing_turn = budget_exhausted
 ```
 
-摘要里"**在再次调用模型前停止**"这句是重点。步数用尽的时候，再问模型一次也不能有任何 Action 被执行，
-那次调用是纯浪费——按第 7 章的实测，一次 Planner 调用 10–16 秒加一笔 token 费用。
+这里有两个条件而不是一个，是 `v4` 才有的形状。取证步数用尽（`budget_exhausted`）**本身不再终止
+循环**——它只是把这一轮切换成"收口回合"。真正终止的条件是"取证用尽**并且**收口回合也已经用过"。
 
-对应的测试用例名把这条断言写得很清楚：`react_budget_stops_before_an_extra_planner_or_tool_call`。
+为什么要多这一轮：步数用尽的时候再问模型一次，确实不能有任何 Action 被执行，但模型还有一件必须做的
+事——把已经收集到的证据写成 `hypothesis_updates`。报告的根因只认 `AgentState.hypotheses`，如果循环
+在这里直接停机，一个取证做满 8 步、证据其实已经够的运行会产出**空根因报告**，然后被 Auditor 以
+`report_incomplete` 否决、返工预算用尽、降级。§8.8.9 完整记录了这条实测出来的连锁反应，以及 v3 当初
+为什么会长成那样。
+
+`closing_turn` 为真的那一轮，控制器把批次上限压到 0 并把这个事实写进 Prompt，Planner 只能返回
+`finish` 或 `need_user_input`；这一轮不增加 `react_step`，额度用掉的痕迹记在
+`AgentState.closing_turn_used` 上。
 
 第二道是剩余时间：
 
@@ -433,7 +450,8 @@ if remaining_time_ms == 0:
 外层 `asyncio.timeout` 是**抢占式**的（在任意 `await` 点打断），这里的检查是**主动式**的（在花钱之前
 先看一眼）。有了主动检查，"预算只剩 200 毫秒"这种情况就不会再发起一次注定被取消的模型调用。
 
-**两道门都在模型调用之前，且都返回终态而不是抛异常。** 这是"预算属于控制器"最直接的体现。
+**两道门都在模型调用之前，也都不抛异常。** 区别在于门 1 只在收口额度也用尽时返回终态，否则它做的是
+"把这一轮降级成收口回合"；门 2 直接返回终态。两者都是"预算属于控制器"最直接的体现。
 
 ### 8.8.2 注入 Prompt 的批次上限必须与门禁同源
 
@@ -443,15 +461,18 @@ if remaining_time_ms == 0:
 remaining_tool_calls = runtime.context.config.max_steps - graph_state.agent_state.react_step
 context = PlannerTurnContext(
     ...
-    max_parallel_actions=min(
+    max_parallel_actions=0
+    if closing_turn
+    else min(
         runtime.context.config.max_parallel_actions,
         remaining_tool_calls,
     ),
+    closing_turn=closing_turn,
     remaining_time_ms=remaining_time_ms,
 )
 ```
 
-`min(配置并行度, 剩余步数)`。CLAUDE.md 把这条单独列了出来：
+`min(配置并行度, 剩余步数)`，收口回合则直接压到 0。CLAUDE.md 把这条单独列了出来：
 
 > Prompt 里的批次上限与门禁同源：控制器注入 `min(配置并行度, 剩余步数)`。
 
@@ -463,6 +484,10 @@ context = PlannerTurnContext(
 （越界批次照样会被拒），而是**别让门禁去惩罚模型遵守了我们自己给错的规则**。
 
 > 一般规则：任何被门禁检查的约束，都应该以门禁使用的同一个值告诉模型。两处各算一遍必然漂移。
+
+`closing_turn` 是这条规则的一个加强版：批次上限 0 和"这是收口回合"其实是同一件事的两种说法，所以
+`PlannerTurnContext` 直接在 Pydantic 层校验两者必须同时成立（§8.8.9）。**同源不够，还要让不同源本身
+成为一个装配期错误。**
 
 ### 8.8.3 span 只包住模型往返
 
@@ -657,25 +682,30 @@ return updated
 **注意这个循环是"发现即整批拒绝"，而不是"收集所有问题再报告"。** 三个 Action 里第二个越界，第一个也
 不执行。这与 8.8.6 是同一条原则，只是粒度更细。
 
-### 8.8.8 把八道门禁的顺序列出来
+### 8.8.8 把九道门禁的顺序列出来
 
 | 序 | 检查 | 停止原因 | 在模型调用之前？ |
 |---|---|---|---|
-| 1 | 步数预算 | `react_budget_exhausted` | ✅ |
+| 1 | 步数预算**且**收口额度已用 | `react_budget_exhausted` | ✅ |
 | 2 | 剩余墙钟 | `total_timeout` | ✅ |
 | — | *（调用模型；域错误 → 第 7 章的三类 `stop_reason`）* | | |
 | 3 | 引用真实性（决策 + 假设） | `invalid_evidence_reference` | ❌ |
-| 4 | 批次长度 vs 并行上限 | `parallel_limit_exceeded` | ❌ |
-| 5 | 批次长度 vs 剩余步数 | `parallel_budget_exceeded` | ❌ |
-| 6 | 工具属于已批准组件 | `tool_not_allowed_by_capability` | ❌ |
-| 7 | `trace_id` == `run_id` | `trace_id_mismatch` | ❌ |
-| 8 | 指纹未重复（批内 + 历史） | `duplicate_action_blocked` | ❌ |
+| — | *（假设投影：`hypothesis_updates` → `AgentState.hypotheses`）* | | |
+| 4 | 收口回合不得提交 `call_tool` | `react_budget_exhausted` | ❌ |
+| 5 | 批次长度 vs 并行上限 | `parallel_limit_exceeded` | ❌ |
+| 6 | 批次长度 vs 剩余步数 | `parallel_budget_exceeded` | ❌ |
+| 7 | 工具属于已批准组件 | `tool_not_allowed_by_capability` | ❌ |
+| 8 | `trace_id` == `run_id` | `trace_id_mismatch` | ❌ |
+| 9 | 指纹未重复（批内 + 历史） | `duplicate_action_blocked` | ❌ |
 
-顺序的三条规律：
+顺序的四条规律：
 
 1. **不花钱的检查排在花钱之前**（1、2 在模型调用前）。
 2. **影响状态的检查排在写状态之前**（3 在假设投影前）。
-3. **整批性质的检查排在逐条检查之前**（4、5 在 6、7、8 前）——因为一个超长批次根本不需要逐条验证。
+3. **整批性质的检查排在逐条检查之前**（4、5、6 在 7、8、9 前）——因为一个超长批次根本不需要逐条验证。
+4. **门禁 4 是唯一一条刻意排在写状态之后的**，它是对上一条的自觉例外：收口回合里 `call_tool` 必然越界，
+   但"模型不听话"不等于"它这一轮的 `hypothesis_updates` 没有价值"。先投影再拒绝，一个越界批次就只损失
+   这批工具调用，而不会连带抹掉这一轮唯一能救回来的结论。
 
 `ReactStopReason` 的 docstring 把这八个值的共同性质讲清楚了：
 
@@ -687,17 +717,24 @@ return updated
 这个区分很要紧：模型自报 `evidence_sufficient` 是它的判断，控制器判定 `react_budget_exhausted` 是发生
 过的事。
 
-### 8.8.1 检查 1 在模型调用之前，代价是"填满预算就没有收口回合"
+### 8.8.9 收口回合：一个实测出来的失败面，以及它怎么被结构性闭合
 
-第 1 条检查排在模型调用之前，省的是钱，但它有一个**必须写下来的副作用**：`react_step` 恰好等于
-`max_steps` 时循环先停机，Planner 因此拿不到最后那次决策机会。也就是说预算用满的调查，即使证据其实
-已经齐了，也**没有任何机会**说出 `evidence_sufficient`——终态只能是控制器判定的
-`react_budget_exhausted`。
+门禁 1 和 4 之所以长成现在这样，起因是一次真实模型评测暴露的失败面。这一节按"缺陷 → 误诊 → 根治"的
+顺序讲，因为最容易学到东西的不是最终代码，而是为什么一开始那版看起来完全合理。
+
+`v3` 的门禁 1 只有一个条件：`react_step >= max_steps` 就停机。理由很硬——步数用尽的时候，再问模型一次
+也不能有任何 Action 被执行，那次调用按第 7 章的实测是 10–16 秒加一笔 token。省钱的检查排在花钱之前，
+这条原则本身没错。
+
+错的是"那次调用是纯浪费"这个前提。Planner 的最后一轮除了发工具调用，还要做一件不花外部资源的事：
+把已收集的 Observation 写成 `hypothesis_updates`。报告的 `root_causes` 只投影自
+`AgentState.hypotheses`（§8.9），所以掐掉这一轮等于掐掉结论的唯一出口。
 
 这不是理论推演。一次真实模型 run 以 3+3+2 的批次序列刚好填满 8 步预算，后续的连锁反应是：报告基于
 "调查未完成"起草 → Auditor 判 `report_incomplete` 要求返工 → 唯一一次返工预算用尽 → 转
 `safe_degraded`，最终根因数为 0，记忆候选也因未 accepted 而不落库。整条阶梯每一环都按设计工作，
-产出却是空的。
+产出却是空的。同一次评测里 `planner-react:v8` 的系统 Prompt 还写着"在 finish 的那一轮也要提交
+`hypothesis_updates`"——那一轮根本不存在，指令在这个状态下**字面上无法被遵守**。
 
 关键是**别把病因归到模型身上**。"让 Prompt 在剩余步数临界时更早收口"这个方向是反的：那次 run 的最后
 两个 Action 取的正是 Golden 要求的必需证据，提前收口只会用证据覆盖率换一个好看的 `stop_reason`。
@@ -707,14 +744,47 @@ return updated
    默认值因此从 8 提到 10（见第 2 章 §2.4.1）。这条不改任何语义，但它只降低命中概率，不消除失败面：
    一个恰好用满 10 步的 Planner 依然会撞上同一条路。
 2. **结构侧根治**——给"只允许 `finish` 的最后一回合"单列保留额度，让步数预算只约束取证 Action。
-   这会改动本章的循环语义（`langgraph-react-loop` 要升版本），因此是独立的一个切片，尚未实现。
+   这条已经落地，就是本章的 `langgraph-react-loop:v4`（Prompt 同步升到 `planner-react:v9`）。
 
-在第 2 条落地之前，这是一个**已知的、被记录在案的边界**，而不是一个已经修好的问题。
+`v4` 把一个预算拆成两个：**取证预算**（`react_step` vs `max_steps`）管工具调用，**收口额度**
+（`AgentState.closing_turn_used`）管那一次写结论的机会。四个设计决定值得单独看，它们都不是随手选的：
 
-提到 10 步之后的单案例手工复测（`run_83294e77ae9f4d11`，同一条跨组件案例，端到端 63.4 s）走的是
-3+3+3 共 9 步，第四次 Planner 决策拿到了收口回合并自报 `evidence_sufficient`，Auditor 首轮即
-`accept`。注意它只剩 1 步余量——如果那条轨迹再多一个批次，结论会完全一样地翻回去。分母是 1 的观测
-只能说明"缺的是回合而不是能力"，不能当成这条边界已经消失。
+- **批次上限 0 与 `closing_turn` 标志必须同时成立**，`PlannerTurnContext` 在 Pydantic 层交叉校验，
+  不一致直接 `ValidationError`。控制器的一处编码错误因此会在装配时炸掉，而不是伪装成"模型这一轮表现
+  异常"混进评测结果。
+- **收口回合不消耗 `react_step`**。它买的是一次表达机会，不是一次取证机会；让它扣步数就等于把
+  `max_steps` 的含义从"能查多少"改成"能查多少减一"。
+- **额度记在 `AgentState` 而不是图内部状态，并且在调用模型之前就标记为已用**。前者是因为它必须随
+  checkpoint 持久化——只存在图状态里的话，cancel/resume 能让同一次运行反复领到收口回合；后者是因为
+  等模型返回后再标记，一次超时或取消就能让"只发一次"变成空话。
+- **越界拦截排在假设投影之后**（门禁 4）。收口回合里提交 `call_tool` 必然整批拒绝并以
+  `react_budget_exhausted` 终止，但这一轮的 `hypothesis_updates` 照样先落进
+  `AgentState.hypotheses`，理由见 §8.8.8 的第 4 条规律。
+
+Prompt 侧的配合也不是加一个布尔值就完事。渲染层把 `closing_turn` 换成两段互斥的整句指令
+（`app/agents/prompting.py` 的 `_CLOSING_TURN_TEXT` / `_INVESTIGATION_TURN_TEXT`），因为给模型一个裸的
+`closing_turn: false` 等于让它自己猜该做什么，而"本轮可以按批次上限提交 `call_tool`"是可直接执行的。
+`planner_react_v9_system.txt` 另有一段硬约束，明确写出"这一轮不消耗工具步数""只发放一次""再提交
+`call_tool` 会被整批拒绝、你这一轮的结论也白写"，以及最后那条最容易被模型搞错的：
+**只要现有 Observation 已经足以支持某个根因，就照常给 `evidence_sufficient`，不要因为"预算用尽"
+这个事实本身而放弃已经成立的判断。**
+
+三个用例把这些性质钉住了：`react_budget_grants_one_closing_turn_that_lets_planner_finish`（预算填满
+后仍有一轮、`stop_reason` 是模型自报的 `evidence_sufficient`、批次上限为 0）、
+`closing_turn_projects_hypotheses_even_when_planner_keeps_calling_tools`（越界批次被拒但假设已落库）、
+`closing_turn_is_not_granted_twice_after_a_resumed_state`（注入 `closing_turn_used=True` 的恢复状态，
+模型一次都不该被调用）。
+
+**诚实边界：`v4` / `v9` 目前只有单元测试证据，没有任何真实模型实测数字。**
+`docs/live-golden-eval-results.md` 的 Run A–I 全部测于 `planner-react:v8` + `langgraph-react-loop:v3`，
+所以"这个改动把 `stop_reason_hit_rate` 和 `root_cause_top1_hit_rate` 提升了多少"是一个待测量项，不是
+一个已知结论。能确定的只是失败面从"可能发生"变成"结构上不可能发生"。
+
+顺便修掉一处容易误读的旧记录：提到 10 步之后的单案例手工复测（`run_83294e77ae9f4d11`，同一条跨组件
+案例，端到端 63.4 s）走的是 3+3+3 共 9 步，第四次 Planner 决策自报 `evidence_sufficient`、Auditor
+首轮即 `accept`。那时还没有 `v4`，所以它靠的是**预算余量**而不是保留额度——只剩 1 步，如果那条轨迹
+再多一个批次，结论会完全一样地翻回去。分母是 1 的观测只能说明"缺的是回合而不是能力"，这也正是选择
+结构性根治而不是继续加大 `max_steps` 的依据。
 
 ## 8.9 假设投影：结论怎么从模型输出变成领域对象
 
@@ -773,9 +843,13 @@ agent_state = agent_state.model_copy(
 注意 8.8.6 的 `if decision.status is not PlannerStatus.CALL_TOOL` 在这段投影**之后**。也就是说模型说
 "我查完了，可以结束"的那一轮，它同时提交的 `hypothesis_updates` 照样被收进状态。
 
-这跟 v8 Prompt 的硬约束是配套的（第 7 章 §7.10.3）：Prompt 要求模型在 `finish` 的那一轮也必须提交
+这跟 v9 Prompt 的硬约束是配套的（第 7 章 §7.10.3）：Prompt 要求模型在 `finish` 的那一轮也必须提交
 `hypothesis_updates`，因为那通常正是根因最终确定的一轮。如果投影写在 `status` 判断之后，**最有价值的那
 一轮更新恰好会被丢掉**——这正是 8.9.1 那个事故最讽刺的部分。
+
+顺带一提，v8 时代这条 Prompt 约束在一种状态下**字面上无法被遵守**：预算恰好填满时"finish 的那一轮"
+根本不存在。`langgraph-react-loop:v4` 的收口回合（§8.8.9）把这个前提补齐了——先有那一轮，Prompt 的
+要求才有意义。
 
 ### 8.9.4 置信度不让模型自报
 
@@ -1491,7 +1565,7 @@ react.tool_batch         kind=tool_call    入口: action_count, tool_names, rea
 | 7 | `asyncio.timeout` | `wait_for` 包整个 `async for` | `wait_for` 对异步生成器语义不清 |
 | 8 | 单节点内 `gather` 扇出 | LangGraph 原生 fan-out | 指纹去重、预算记账、原子回写都需要一个统一决策点 |
 | 9 | `recursion_limit = max_steps*2+6` | 依赖 LangGraph 默认值 | 显式第二道防线，且与业务预算同源 |
-| 10 | 步数/时间门禁在模型调用**前** | 调用后再判 | 一次注定无效的调用是 10–16 秒加真金白银 |
+| 10 | 剩余时间门禁在模型调用**前** | 调用后再判 | 一次注定无效的调用是 10–16 秒加真金白银 |
 | 11 | Prompt 注入 `min(并行度, 剩余步数)` | 恒定注入配置值 | 否则模型合规提交的批次也会被拒，白花一次调用 |
 | 12 | 门禁失败**整批拒绝** | 截断成允许长度 | 部分执行让 Planner 基于"其余也执行了"的错误前提推理 |
 | 13 | `parallel_limit` 与 `parallel_budget` 两个原因 | 合成一个 | 两者指向两种不同的修法 |
@@ -1523,6 +1597,12 @@ react.tool_batch         kind=tool_call    入口: action_count, tool_names, rea
 | 39 | span 父子靠 ContextVar | 参数一路传递 | 遥测不该出现在业务函数签名里 |
 | 40 | 无采集器时 no-op | 要求测试装配遥测 | 可观测性不能改变业务代码结构 |
 | 41 | 峰值并发探针验证并行 | 断言总耗时变短 | 时间断言必然 flaky；峰值断言是确定性的 |
+| 42 | 取证预算耗尽先发一次收口回合 | 直接停机省下这次调用 | 掐掉最后一轮 = 掐掉结论的唯一出口，报告根因恒为空 |
+| 43 | 收口回合不消耗 `react_step` | 照常扣一步 | 它买的是一次表达机会，不是一次取证机会 |
+| 44 | 额度存 `AgentState`，调用模型**前**标记 | 存图内部状态 / 返回后标记 | cancel/resume 或一次超时都能让"只发一次"变成空话 |
+| 45 | 批次上限 0 与 `closing_turn` 交叉校验 | 只传批次上限 | 控制器编码错误要炸在装配期，不能伪装成"模型表现异常" |
+| 46 | 收口越界拦截在假设投影**之后** | 投影之前 | 模型不听话 ≠ 这一轮的 `hypothesis_updates` 没价值 |
+| 47 | `closing_turn` 渲染成整句指令 | 注入裸布尔值 | `closing_turn: false` 等于让模型自己猜该做什么 |
 
 ## 8.17 本章遗留的缺口
 
@@ -1536,7 +1616,8 @@ react.tool_batch         kind=tool_call    入口: action_count, tool_names, rea
 **2. `recursion_limit = self._config.max_steps * 2 + 6` 里的常数 6 没有对应测试。** 8.4.2 讲了它是第二道
 防线，但如果哪天往图里加了两个节点，这个公式会静默变得偏紧——表现是长 run 在没有任何门禁触发的情况下抛
 LangGraph 的 `GraphRecursionError`，而那个异常**不会**被翻译成 `stop_reason`（8.6 节的 `except` 只接
-`TimeoutError`）。一个"节点数变化时公式必须重算"的断言能让它显式失败。
+`TimeoutError`）。v4 的收口回合已经从这 6 的余量里吃掉了 1（最坏路径变成 `max_steps * 2 + 2`），这正是
+"公式里的余量会被后续切片悄悄消耗"的实例。一个"节点数变化时公式必须重算"的断言能让它显式失败。
 
 **3. `_observation_summary` 的失败分支没有断言"不含响应内容"。** 8.11.7 说摘要刻意只报规模，但守这条的
 只有代码审查。第 7 章 §7.12 那个 8 键 `model_dump` 隐私断言是个好模板：对事件摘要做一次"不得出现响应体
@@ -1553,10 +1634,11 @@ LangGraph 的 `GraphRecursionError`，而那个异常**不会**被翻译成 `sto
 模型在这个循环里的角色被压缩得很小——它只做一件事：在给定的证据、假设和允许工具集下输出一个结构化决策。
 其余全部由代码决定：
 
-- **能不能调**：八道门禁，两道在花钱之前（8.8）
+- **能不能调**：九道门禁，两道在花钱之前（8.8）
 - **调几个**：`min(并行度, 剩余步数)`，且并行不买预算（8.8.2、8.11.5）
 - **结论怎么算**：确定性投影 + 查表置信度 + 只认实时 Observation（8.9）
 - **什么时候停**：控制器判定八种 + 模型自报七种，两套分开记（8.8.8）
+- **预算用尽之后还能说什么**：一次不扣步数、只允许 `finish` 的收口回合（8.8.9）
 - **用户看到什么**：8 字段、`extra="forbid"`、`frozen=True` 的事件模型（8.13）
 
 第 7 章把"一次模型调用"做可靠，第 8 章把"一串模型调用"做有界。下一章处理最后一段：**模型说的话怎么变成

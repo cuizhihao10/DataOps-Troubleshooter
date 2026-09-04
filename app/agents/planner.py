@@ -121,7 +121,8 @@ class PlannerTurnContext(BaseModel):
 
     `state` 只包含公开摘要、证据和工具事件，不包含 Thought；capabilities 是确定性注册表输出。
     剩余毫秒、最大步骤和本轮可并行 Action 数由控制器计算，模型不能自行扩大预算、提高并行度或
-    替换可用工具范围。
+    替换可用工具范围。`closing_turn` 标记取证预算耗尽后那一次只允许 finish 的收口回合，它与
+    `max_parallel_actions == 0` 必须同时成立，避免向模型注入自相矛盾的预算。
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -132,7 +133,10 @@ class PlannerTurnContext(BaseModel):
     confirmed_case_memories: tuple[CaseMemory, ...] = ()
     history_case_matches: tuple[SimilarCaseReference, ...] = ()
     max_react_steps: int = Field(ge=1, le=20)
-    max_parallel_actions: int = Field(ge=1, le=MAX_PARALLEL_TOOL_ACTIONS)
+    # 下界是 0 而不是 1：收口回合把"本轮不允许任何工具调用"直接编码成批次上限 0，让同一个字段既
+    # 表达并行度也表达"取证已关闭"，模型无需从两处配置自己推断。
+    max_parallel_actions: int = Field(ge=0, le=MAX_PARALLEL_TOOL_ACTIONS)
+    closing_turn: bool = False
     remaining_time_ms: int = Field(ge=0, le=600_000)
 
     @model_validator(mode="after")
@@ -149,10 +153,11 @@ class PlannerTurnContext(BaseModel):
             raise ValueError("state intent must match the capability selection")
         if self.state.active_capabilities != expected_names:
             raise ValueError("state active_capabilities must match the capability selection")
-        if self.state.react_step >= self.max_react_steps:
-            raise ValueError("planner cannot run after the ReAct action budget is exhausted")
-        if self.max_parallel_actions > self.max_react_steps - self.state.react_step:
-            raise ValueError("parallel action allowance cannot exceed the remaining step budget")
+        # closing_turn 与批次上限 0 互为冗余表达，两侧必须同时成立：只写一侧就会出现"告诉模型这是
+        # 最后一轮、却仍允许它提交工具调用"或者反过来"批次上限 0 但没说明原因"的矛盾上下文，而模型
+        # 面对矛盾预算的行为无法预测。控制器写错哪一侧都在调用模型之前失败。
+        if self.closing_turn != (self.max_parallel_actions == 0):
+            raise ValueError("closing turn must coincide with a zero parallel action allowance")
         if any(
             memory.status is not MemoryStatus.CONFIRMED for memory in self.confirmed_case_memories
         ):
@@ -161,6 +166,15 @@ class PlannerTurnContext(BaseModel):
             item.case_id for item in self.history_case_matches
         ]:
             raise ValueError("Planner history explanations must match confirmed memory order")
+        # 以下两条只在取证回合成立。收口回合是预算耗尽后专门发放的额度，react_step 此时必然已经等于
+        # max_react_steps，它唯一的用途就是让模型把结论写进 hypothesis_updates；上面与预算无关的
+        # 校验对两种回合一律适用，不能因为放行收口回合而顺带跳过。
+        if self.closing_turn:
+            return self
+        if self.state.react_step >= self.max_react_steps:
+            raise ValueError("planner cannot run after the ReAct action budget is exhausted")
+        if self.max_parallel_actions > self.max_react_steps - self.state.react_step:
+            raise ValueError("parallel action allowance cannot exceed the remaining step budget")
         return self
 
 

@@ -423,7 +423,7 @@ START
 `select_capabilities` 调用固定 registry，并把意图和名称注入 AgentState；`planner_react` 调用
 可替换 `PlannerAgent` 协议，接收结构化 PlannerDecision；`execute_tools` 使用注入执行器跨真实
 MCP 执行本轮整批 Action，随后原子回写 Evidence、ToolEvent、observation_refs 和 react_step。
-编译后的图名为 `dataops_bounded_react_v3`，契约 ID 为 `langgraph-react-loop:v3`。
+编译后的图名为 `dataops_bounded_react_v3`，契约 ID 为 `langgraph-react-loop:v4`。
 
 LangGraph 的 state_schema 使用 `ReactGraphState` Pydantic 模型。每个节点接收和返回强类型
 模型，框架最终给出的映射也立即通过 `model_validate` 重建。Planner、Executor、Registry 和
@@ -511,12 +511,30 @@ Planner 永远拿不到最后那次决策机会：证据其实已经齐了，run
 `safe_degraded`，最终 `root_causes` 为 0。这不是模型不收口，而是预算算术：一次真实 run 用
 3+3+2 的批次序列刚好填满 8 步，而最后那两个 Action 取的正是 Golden 要求的必需证据，因此"让
 Prompt 更早收口"只会用证据覆盖率换一个好看的 `stop_reason`，方向是反的。10 步在同一条轨迹上
-留出一个整批余量。要**结构性**地消除这条失败面，得给"只允许 finish 的最后一回合"单列保留额度，
-那会改动 `langgraph-react-loop` 的循环语义，属于另一个切片；在此之前它是一个已知的、可通过配置
-缓解但未被证明不可能命中的边界。**墙钟 60 → 240 秒**是步数调整的必然后果：实测 Planner 单次
+留出一个整批余量，但它只降低命中概率，不消除失败面。**`langgraph-react-loop:v4` 做了结构性闭合**：
+取证预算与收口额度拆成两笔独立预算，`react_step` 达到 `max_steps` 时控制器额外发放一次批次上限为 0
+的收口回合（详见 10.5.1），于是"预算恰好用满"不再等于"模型没有机会收口"。步数默认值仍保持 10，
+因为它修掉的是覆盖率下界，与收口回合是两个不同的失败面。**墙钟 60 → 240 秒**是步数调整的必然后果：实测 Planner 单次
 决策 8–18 秒，10 步在最坏情况下要五次决策再加工具与检索时间（一次 3 批次的真实 run 端到端
 96.7 秒），仍用 60 秒只会把"时间不够"伪装成"步数用完"，而这两种终止原因对使用者的含义完全不同
 （前者要加时间或减并发，后者要重新设计取证顺序）；240 秒还必须容得下一次瞬时重试的最坏开销。
+
+#### 10.5.1 收口回合
+
+`react_step >= max_steps` 时，v4 先看 `AgentState.closing_turn_used`：为假就发放收口回合，为真才是
+真正的 `react_budget_exhausted`。收口回合有四条性质，每条都对应一个具体的失败面：
+
+- **批次上限压到 0，`closing_turn=True` 注入 Prompt。** 两者由 `PlannerTurnContext` 交叉校验必须
+  同时成立。只写标记会告诉模型"这是最后一轮"却仍允许它提交工具调用；只写上限 0 会让模型面对一个
+  无法执行任何动作、又没有解释的回合。矛盾上下文下模型行为不可预测，因此这个校验放在 Pydantic
+  层——控制器的编码错误不该以"模型表现不稳定"的形式出现在评测结果里。
+- **不消耗 `react_step`。** 它不发起任何工具调用，把它记进取证预算等于用一次收口换掉一次取证。
+- **额度记在 `AgentState` 而不是图内部状态，并且在调用模型之前就标记为已消耗。** `AgentState` 是
+  随 checkpoint 持久化的那一份；只记在图里，cancel/resume 就能让同一次运行反复领取收口回合，"只发
+  一次"变成事实上无界。标记时机同理：等模型返回后再标记，一次超时或取消就能重新领一次。
+- **越界拦截放在假设投影之后。** 收口回合仍提交 `call_tool` 属于越界，整批拒绝并以
+  `react_budget_exhausted` 终止；但模型不听话不等于它这一轮写下的 `hypothesis_updates` 没有价值，
+  报告层只认 `AgentState.hypotheses`，把它一起丢掉等于让一次越界抹掉全部可救的结论。
 
 递归上限按 `max_steps * 2 + 6` 设置，覆盖路由、每次 execute/planner 回边和最终预算检查。
 它是框架死循环的第二道防线，业务停止仍由 react_step 和 stop_reason 决定。
@@ -561,9 +579,9 @@ Evidence 与 ToolEvent 的稳定 ID 现在包含规范化请求身份。此前�
 依赖在 `pyproject.toml` 中声明为 `openai>=2.45,<3`，当前锁定 2.45.0。Provider 设置
 `max_retries=0`，避免 SDK 自动重试隐藏真实调用次数或突破 LangGraph 总超时。
 
-### 11.2 v8 Prompt 的 system/user 隔离、追问上下文、历史解释、并行批次与门禁前提
+### 11.2 v9 Prompt 的 system/user 隔离、追问上下文、历史解释、并行批次、收口回合与门禁前提
 
-`planner-react:v8` 使用两个独立文件：system 只包含角色、安全和输出行为；user 承载查询、同会话
+`planner-react:v9` 使用两个独立文件：system 只包含角色、安全和输出行为；user 承载查询、同会话
 上一轮公开报告、raw confirmed 案例、确定性 history_case_matches、工具 Evidence、GraphRAG 和预算。
 历史相似度/差异同样是不可信低优先级 JSON，不能覆盖 system 的实时事实优先规则。
 
@@ -572,6 +590,15 @@ v8 相对 v7 只补齐三处"控制器已经在执行、但模型看不到"的�
 模型引用 Bundle 知识证据反而被整批拒绝）；system 侧写明只有 `source` 为 `tool` 的实时 Observation
 引用能把假设升为 `supported`；user 侧新增 `{unexecuted_priority_tools}`，并规定该列表非空且工具
 可能改变结论时不得直接 `evidence_sufficient`。
+
+v9 相对 v8 只新增收口回合，同样不改变消息角色边界。v8 的 system 侧写着"在 finish 的那一轮也要提交
+`hypothesis_updates`"，但这句话在预算被打满时无法履约：v3 控制器在 `react_step` 达到 `max_steps`
+时，于再次调用模型之前就切断了循环，模型从来没有"finish 的那一轮"。v9 由控制器额外发放一次批次
+上限为 0 的收口回合，并把 `{closing_turn}` 渲染成整段可直接执行的指令而不是裸布尔值——模型看到
+`closing_turn: false` 无从判断该做什么，而"本轮仍在取证预算内，可以按批次上限提交 call_tool"是可
+执行的。收口回合的文案写明只能 `finish` / `need_user_input`、不消耗工具步数、只发放一次、越界会以
+`react_budget_exhausted` 终止，并明确"预算用尽"这个事实本身不构成放弃已成立判断的理由：只要现有
+Observation 已支持某个根因，就照常提交 `hypothesis_updates` 并用 `evidence_sufficient`。
 
 v5 相对 v4 改两件事：`call_tool` 从"选一个 Action"变成"提交 1 到 `max_parallel_actions` 个互不
 依赖的 Action"，并新增 `remaining_tool_calls` 与 `max_parallel_actions` 两个运行预算占位符。这两个
@@ -2099,7 +2126,7 @@ Agent**，且独立性落在四个可检查的地方：
 
 | 隔离维度 | Planner | Auditor |
 |---|---|---|
-| Prompt 契约 | `planner-react:v8` | `auditor-report:v2` |
+| Prompt 契约 | `planner-react:v9` | `auditor-report:v2` |
 | Provider 契约 | `openai-compatible-planner:v1` | `openai-compatible-auditor:v1` |
 | 输出 Schema | `PlannerDecision`（actions 数组） | `AuditResult`（accept/revise + 有限问题码） |
 | Schema 修复预算 | `planner_schema_repair_count` | `auditor_schema_repair_count` |

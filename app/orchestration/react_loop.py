@@ -228,14 +228,33 @@ async def _planner_react(
     节点先检查工具步数和剩余时间，再调用可替换 Planner。决策仅记录公开摘要；随后依次校验证据
     引用、并行批次大小、剩余步数、工具组件范围、trace 和同参指纹。任何一条不通过就整批拒绝而
     不是悄悄截断，因为"只执行了你要求的一部分"会让 Planner 基于不完整前提继续推理。
+
+    取证步数用尽不再直接终止：控制器额外发放一次批次上限为 0 的收口回合，让 Planner 把已收集
+    证据写成 hypothesis_updates。收口回合只发一次，且不消耗 react_step。
     """
 
-    if graph_state.agent_state.react_step >= runtime.context.config.max_steps:
+    # 取证预算耗尽后先看收口回合是否还在：直接停会让 Planner 永远没机会把证据写成结论，而报告的
+    # root_causes 只认 AgentState.hypotheses，于是 8 步全部命中工具的运行反而产出空根因报告，
+    # 独立 Auditor 以 report_incomplete 否决、返工预算耗尽转 degraded——首次真实模型评测里
+    # stop_reason 与根因两项同时失分就是这条链，与模型能力无关。收口回合已用过才是真的预算耗尽。
+    budget_exhausted = graph_state.agent_state.react_step >= runtime.context.config.max_steps
+    if budget_exhausted and graph_state.agent_state.closing_turn_used:
         return _stop_graph_state(
             graph_state,
             reason=ReactStopReason.REACT_BUDGET_EXHAUSTED,
-            summary="已达到 Planner 工具 Action 上限，循环在再次调用模型前停止。",
+            summary="收口回合已用尽，循环在再次调用模型前停止。",
             event_type=ReactEventType.LOOP_STOPPED,
+        )
+    closing_turn = budget_exhausted
+    if closing_turn:
+        # 额度在调用模型之前就记为已消耗：cancel/resume 会从 checkpoint 恢复 AgentState，若等模型
+        # 返回后再标记，一次超时或取消就能让同一次运行反复领到收口回合，"只发一次"就成了空话。
+        graph_state = graph_state.model_copy(
+            update={
+                "agent_state": graph_state.agent_state.model_copy(
+                    update={"closing_turn_used": True}
+                )
+            }
         )
 
     selection = graph_state.capability_selection
@@ -256,6 +275,13 @@ async def _planner_react(
     # 剩余步数同时进入 Prompt 和并行上限：模型看到的可并行数量必须等于控制器真正允许的数量，
     # 否则它会反复提交刚好超预算的批次，而每次拒绝都白花一次模型调用。
     remaining_tool_calls = runtime.context.config.max_steps - graph_state.agent_state.react_step
+    # 收口回合把批次上限压到 0，PlannerTurnContext 会交叉校验这两个字段必须同时表达"取证已关闭"；
+    # 取证回合里 remaining_tool_calls 必然 ≥ 1，因为预算耗尽的分支在上面已经走掉了。
+    max_parallel_actions = (
+        0
+        if closing_turn
+        else min(runtime.context.config.max_parallel_actions, remaining_tool_calls)
+    )
     context = PlannerTurnContext(
         state=graph_state.agent_state,
         capabilities=selection,
@@ -263,10 +289,8 @@ async def _planner_react(
         confirmed_case_memories=graph_state.confirmed_case_memories,
         history_case_matches=graph_state.history_case_matches,
         max_react_steps=runtime.context.config.max_steps,
-        max_parallel_actions=min(
-            runtime.context.config.max_parallel_actions,
-            remaining_tool_calls,
-        ),
+        max_parallel_actions=max_parallel_actions,
+        closing_turn=closing_turn,
         remaining_time_ms=remaining_time_ms,
     )
     try:
@@ -350,6 +374,17 @@ async def _planner_react(
             reason=decision.stop_reason.value if decision.stop_reason else "planner_stopped",
             summary="Planner 已选择结束调查或请求用户补充信息。",
             event_type=ReactEventType.LOOP_STOPPED,
+        )
+
+    if closing_turn:
+        # 收口回合的批次上限是 0，因此任何 call_tool 都越界。这里才是"预算真的耗尽"：Planner 拿到了
+        # 额外一轮却仍要继续取证。拦截点刻意放在假设投影之后——模型不听话不等于它这一轮的
+        # hypothesis_updates 没有价值，能救回来的结论要照常进状态，报告不该因为一次越界而丢空。
+        return _stop_graph_state(
+            updated,
+            reason=ReactStopReason.REACT_BUDGET_EXHAUSTED,
+            summary="Planner 在收口回合仍提交工具调用，批次已整批拒绝并结束运行。",
+            event_type=ReactEventType.POLICY_BLOCKED,
         )
 
     actions = list(decision.actions)

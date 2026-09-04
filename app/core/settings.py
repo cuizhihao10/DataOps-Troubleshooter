@@ -56,14 +56,14 @@ class Settings(BaseSettings):
     #     设计成必然拿不到满覆盖——真实模型总要花一到两步试探，零余量下每次试探都直接换掉一个必需
     #     取证。首次真实模型评测就撞上了这一点：跨组件案例执行满 6 步后以 react_budget_exhausted
     #     结束，却漏掉 bds.get_table_info，于是预算从 6 提到 8。
-    # (2) 还要为"收口回合"留出余量。循环在 react_step >= max_steps 时**先停机再判断**，所以把预算
-    #     用到刚好等于上限的 Planner 永远拿不到最后那次决策机会：证据其实齐了，却只能以
-    #     react_budget_exhausted 结束，报告基于"调查未完成"起草，Auditor 判 report_incomplete，
-    #     一次返工预算用尽后转 safe_degraded。8 步下这条恰好会命中——实测一次 3+3+2 的批次序列刚好
-    #     填满 8 步，而最后那两个 Action 取的正是 Golden 要求的必需证据，因此"让 Prompt 更早收口"
-    #     只会用覆盖率换一个好看的 stop_reason，方向是反的。10 步在同一条轨迹上留出一个整批余量。
-    #     结构性的解法是给"只允许 finish 的最后一回合"单列保留额度，那会改动
-    #     langgraph-react-loop 的循环语义，属于另一个切片；这里先按可配置项校准。
+    # (2) 8 步实测撞上过另一条路：一次 3+3+2 的批次序列刚好填满预算，而 v3 的循环在
+    #     react_step >= max_steps 时先停机再判断，Planner 因此拿不到写结论的那一轮，证据齐了也只能
+    #     以 react_budget_exhausted 结束 → 报告基于"调查未完成"起草 → Auditor 判 report_incomplete
+    #     → 一次返工预算用尽转 safe_degraded。那两个 Action 取的正是 Golden 要求的必需证据，所以
+    #     "让 Prompt 更早收口"方向是反的：那是用覆盖率换一个好看的 stop_reason。10 步在同一条轨迹上
+    #     留出一个整批余量。langgraph-react-loop:v4 随后做了结构性闭合（预算耗尽额外发一次批次上限
+    #     为 0、不消耗 react_step 的收口回合），本项因此不再承担"给收口留余量"的职责，但第 (1) 条的
+    #     试探余量下界仍然成立，默认值保持 10。
     # 墙钟预算随后从 60s 放宽到 240s：实测 Planner 单次 8–18s，10 步最坏要五次决策加上工具与检索
     # 时间（实测一次 3 批次的真实 run 端到端 96.7s），仍按 60s 会把"预算够但时间不够"伪装成正常
     # 终止；240s 还必须容得下至少一次瞬时重试的最坏开销（见下面 chat_transient_retry_* 与
@@ -183,7 +183,7 @@ class Settings(BaseSettings):
     document_manifest_file: Path = Path("data/knowledge/documents/manifest.json")
     database_url: SecretStr | None = None
 
-    planner_prompt_id: str = "planner-react:v8"
+    planner_prompt_id: str = "planner-react:v9"
     planner_provider_contract_id: str = "openai-compatible-planner:v1"
     auditor_prompt_id: str = "auditor-report:v2"
     auditor_provider_contract_id: str = "openai-compatible-auditor:v1"
@@ -196,7 +196,7 @@ class Settings(BaseSettings):
     mcp_transport_contract_id: str = "mcp-transport:v1"
     golden_case_contract_id: str = "golden-case:v10"
     capabilities_contract_id: str = "runtime-capabilities:v1"
-    react_loop_contract_id: str = "langgraph-react-loop:v3"
+    react_loop_contract_id: str = "langgraph-react-loop:v4"
     audited_report_workflow_contract_id: str = "audited-report-workflow:v2"
     diagnosis_workflow_contract_id: str = "audited-diagnosis-workflow:v2"
     diagnosis_api_contract_id: str = "diagnosis-resources:v4"

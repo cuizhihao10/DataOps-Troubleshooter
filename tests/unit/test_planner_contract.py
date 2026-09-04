@@ -230,7 +230,7 @@ def test_versioned_prompt_contains_required_runtime_placeholders() -> None:
     """
 
     prompt = load_planner_prompt()
-    assert PLANNER_PROMPT_ID == "planner-react:v8"
+    assert PLANNER_PROMPT_ID == "planner-react:v9"
     for placeholder in (
         "{user_query}",
         "{session_context}",
@@ -244,18 +244,19 @@ def test_versioned_prompt_contains_required_runtime_placeholders() -> None:
         "{max_react_steps}",
         "{remaining_tool_calls}",
         "{max_parallel_actions}",
+        "{closing_turn}",
     ):
         assert placeholder in prompt
 
 
 def test_v8_prompt_separates_static_system_rules_from_runtime_placeholders() -> None:
-    """验证 v8 Prompt 的 system 模板不包含任何运行时用户数据占位符。
+    """验证 v9 Prompt 的 system 模板不包含任何运行时用户数据占位符。
 
     system/user 分离防止用户问题被提升到系统优先级；测试同时确认 user 模板承担问题、证据、
     capability 和预算字段，并确认批次独立性、trace_id 逐字复制、evidence_refs 白名单、
-    hypothesis_updates 是结论唯一通道、stop_reason 七个枚举值，以及 v8 新增的两条口径——只有
+    hypothesis_updates 是结论唯一通道、stop_reason 七个枚举值，v8 新增的两条口径——只有
     source 为 tool 的实时 Observation 引用能把假设升为 supported、优先级工具未跑完不得直接结束——
-    都写在静态 system 侧，而不是可被运行数据改写的位置。
+    以及 v9 新增的收口回合规则，都写在静态 system 侧，而不是可被运行数据改写的位置。
     """
 
     system_prompt, user_prompt = load_planner_prompt_parts()
@@ -271,6 +272,9 @@ def test_v8_prompt_separates_static_system_rules_from_runtime_placeholders() -> 
     assert "decision_summary 只是给人看的说明文字" in system_prompt
     assert "source 为 tool 的实时 Observation 引用" in system_prompt
     assert "不得直接 finish" in system_prompt
+    assert "关于收口回合的硬约束" in system_prompt
+    assert "收口回合只发放一次" in system_prompt
+    assert "这一轮不消耗工具步数" in system_prompt
     for reason in PlannerStopReason:
         assert reason.value in system_prompt
     for placeholder in (

@@ -6,23 +6,22 @@ Prompt ID 与文本文件分离，便于 Golden Case 回归记录具体版本。
 
 from pathlib import Path
 
-PLANNER_PROMPT_ID = "planner-react:v8"
-PLANNER_SYSTEM_PROMPT_PATH = Path(__file__).with_name("planner_react_v8_system.txt")
-PLANNER_USER_PROMPT_PATH = Path(__file__).with_name("planner_react_v8_user.txt")
+PLANNER_PROMPT_ID = "planner-react:v9"
+PLANNER_SYSTEM_PROMPT_PATH = Path(__file__).with_name("planner_react_v9_system.txt")
+PLANNER_USER_PROMPT_PATH = Path(__file__).with_name("planner_react_v9_user.txt")
 AUDITOR_PROMPT_ID = "auditor-report:v2"
 AUDITOR_SYSTEM_PROMPT_PATH = Path(__file__).with_name("auditor_report_v2_system.txt")
 AUDITOR_USER_PROMPT_PATH = Path(__file__).with_name("auditor_report_v2_user.txt")
 
 
 def load_planner_prompt_parts() -> tuple[str, str]:
-    """读取 v8 Planner 的 system 与 user 两个受版本控制模板。
+    """读取 v9 Planner 的 system 与 user 两个受版本控制模板。
 
-    v7 已经把"hypothesis_updates 是结论进入报告根因的唯一通道"和 stop_reason 七个枚举值写给模型。
-    v8 修正剩下三处模型无从得知的口径：可引用白名单与报告层同源（Bundle 的 kn_*/path_*/dc_* 与
-    confirmed 案例都能引用，v7 却明确禁止，导致模型引用 Prompt 里给出的知识证据被门禁整批拒绝）、
-    只有实时 Observation 引用才能把假设升为 supported，以及优先级工具尚未执行时不得直接
-    evidence_sufficient——首次真实模型评测里两个案例正是在缺少依赖拓扑与表结构证据时提前结束。
-    缺失或编码错误直接抛 I/O 异常，不回退旧版本。
+    v8 已经修正了可引用白名单口径、supported 只认实时 Observation、以及优先级工具未执行时不得
+    evidence_sufficient 这三处模型无从得知的规则。v9 只增加收口回合：取证步数用尽时控制器额外发放
+    一次批次上限为 0 的回合，模型必须在这一轮把结论写成 hypothesis_updates。v8 的"finish 那一轮也要
+    提交 hypothesis_updates"在预算被打满时根本无法履约——控制器在再次调用模型前就切断了循环，于是
+    根因恒为空、Auditor 以 report_incomplete 否决，整次取证白做。缺失或编码错误直接抛 I/O 异常。
     """
 
     return (

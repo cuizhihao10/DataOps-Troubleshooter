@@ -23,6 +23,13 @@ Run H 是第一组 `scope=full` 实测数字（28/28、`case_coverage_rate=1.000
 仓库仍然不提交任何密钥、端点地址或原始报告 JSON：`live-golden*.json` 已在 `.gitignore` 中，对外
 口径只保留本文的聚合数字与逐案例判定。
 
+**Prompt 已升到 `planner-react:v9`、循环契约已升到 `langgraph-react-loop:v4`（收口回合），而本文
+Run A–I 全部在 `planner-react:v8` + `langgraph-react-loop:v3` 下测得。** v9/v4 尚未发布任何真实模型
+实测运行，因此下面所有数字都不能当作 v9 的成绩读，也不能因为"结构上修掉了一条失败面"就预期任何
+指标上升。这次改动的可验证范围只有单元与集成测试：预算打满后 Planner 确实拿到一次只允许 finish 的
+回合、该回合的假设更新确实进入状态、额度确实只发一次。它对 `stop_reason_hit_rate` 与
+`root_cause_top1_hit_rate` 的影响是**待测量项**，需要在同一端点上重跑一轮才能发布。
+
 最近一次真实模型运行是 Run I（`scope=custom`，3 条记忆案例，第一轮带 `--seed-history` 预置，见
 "Run I"一节）；最近一次全量运行仍是 Run H（`scope=full`，28 条）。在它们之前的 Run G（评分器
 `golden-diagnosis-eval:v23`）给出了新增指标 `root_cause_anchor_hit_rate` 的第一个实测值 0.500，分母
@@ -462,18 +469,22 @@ Run I 不能与 Run A–H 放在同一列：案例集合不同（3 条记忆案�
   `safe_degraded` → `root_causes` 为 0。因此"让 Prompt 更早收口"是反方向的修法：那次 run 的最后两个
   Action 取的正是必需证据，提前收口只会用证据覆盖率换一个好看的 `stop_reason`。已做的处置是把
   `DATAOPS_MAX_REACT_STEPS` 默认值从 8 提到 10（理由链条见 `docs/learning/08-有界ReAct循环.md`
-  §8.8.1），**这只降低命中概率、不消除失败面**：恰好用满 10 步仍会撞上同一条路，结构性解法要给
-  "只允许 finish 的最后一回合"单列保留额度，属于未实现的独立切片。同时这意味着 **Run A–I 的全部数字
-  都是在 8 步预算下测得的**；预算改动本身不构成任何指标的改善证据，`stop_reason_hit_rate` 的新值必须
-  等下一次 live 运行实测，上表数字一律不得改写。
+  §8.8.1），**这只降低命中概率、不消除失败面**：恰好用满 10 步仍会撞上同一条路。结构性解法已在
+  `langgraph-react-loop:v4` 落地——取证预算与收口额度拆成两笔，预算打满时控制器额外发放一次批次上限
+  为 0 的收口回合（`planner-react:v9` 的 `{closing_turn}`），因此"恰好用满预算"不再等于"没有回合可
+  用"。**但这条闭合只有测试证据，没有 live 实测证据**：v9/v4 尚未跑过任何真实模型运行。同时这意味着
+  **Run A–I 的全部数字都是在 8 步预算、v8/v3 契约下测得的**；预算改动与循环语义改动本身都不构成任何
+  指标的改善证据，`stop_reason_hit_rate` 的新值必须等下一次 live 运行实测，上表数字一律不得改写。
 - **10 步预算下的单案例手工复测（不是评测运行，不得计入上表任何指标）。** 同一条跨组件案例
   （`golden_cross_chain_pk_conflict`，同一段合成路由元数据，经 compose 生产装配 + Streamable HTTP
   网关 + PostgreSQL Worker），`run_83294e77ae9f4d11`，端到端 63.4 s：三个 3 并行批次共 9 个 Action
-  全部成功（九个工具各一次），`react_step=9`，第四次 Planner 决策拿到了收口回合并自报
+  全部成功（九个工具各一次），`react_step=9`，第四次 Planner 决策因为 10 步预算仍有余量而得以发生
+  （那时还没有 v4 的收口回合，靠的是余量而不是保留额度），并自报
   `stop_reason=evidence_sufficient`，Auditor 首轮即 `accept`（0 问题、`retry_count=0`，未触发返工或
   降级），报告含 2 条根因（其中一条是 FlashSync 主键冲突）、9 条证据，Golden 声明的三条
-  `required_evidence_sources` 全部命中，记忆候选 `staged` 待确认。这条观测支持"8 步下缺的是收口回合
-  而不是模型能力"，但**分母是 1**：它既不能替代 `stop_reason_hit_rate` 的重测，也不构成任何百分比。
+  `required_evidence_sources` 全部命中，记忆候选 `staged` 待确认。这条观测支持"8 步下缺的是最后那次
+  决策机会而不是模型能力"，也正是 v4 把它变成保留额度的依据，但**分母是 1**：它既不能替代
+  `stop_reason_hit_rate` 的重测，也不构成任何百分比。
   同一次运行里 `risk_level` 仍是 low（Golden 期望 medium，且唯一一条处置建议是"继续补齐证据"的通用
   步骤），说明 `RiskLevel` 那条缺口与步数预算无关，依旧未闭合。
 - **Planner 超时配置与该模型的响应分布同量级，这是 Run H 最大的单一失分来源。** 实测成功调用中位

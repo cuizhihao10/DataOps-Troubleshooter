@@ -447,7 +447,7 @@ def test_live_golden_status_document_separates_runnable_contract_from_measuremen
     assert "也不允许因为契约升版而改写" in report
     assert "覆盖 Golden 全部 28 条才是 `full`" in report
     assert "只发布三案例 smoke 的实测成绩" in report
-    assert "planner-react:v8" in report
+    assert "planner-react:v9" in report
     assert "golden_lts_invalid_partition_parameter_single" in report
     assert "golden_cross_lts_bds_flashsync_watermark_timezone_mismatch" in report
     assert "golden_bds_conflicting_partition_evidence" in report
@@ -736,7 +736,7 @@ def test_langgraph_react_runtime_contract_is_versioned_and_explicit() -> None:
 
     prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
 
-    assert "langgraph-react-loop:v3" in prompt_contract
+    assert "langgraph-react-loop:v4" in prompt_contract
     assert "Planner → execute_tools → Observation → Planner" in prompt_contract
     assert "MCP 执行器内部的瞬时重试不增加 `react_step`" in prompt_contract
     assert "一批 N 个 Action 记 N 步" in prompt_contract
@@ -760,7 +760,7 @@ def test_planner_v5_and_structured_output_repair_are_documented() -> None:
 
     prompt_contract = Path("docs/prompt-contracts.md").read_text(encoding="utf-8")
 
-    assert "planner-react:v8" in prompt_contract
+    assert "planner-react:v9" in prompt_contract
     assert "session_context" in prompt_contract
     assert "history_case_matches" in prompt_contract
     assert "system/user 两条消息" in prompt_contract

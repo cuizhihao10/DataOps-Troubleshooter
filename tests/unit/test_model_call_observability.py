@@ -32,7 +32,7 @@ def test_bound_measurement_records_only_version_status_duration_and_usage() -> N
             role=ModelCallRole.PLANNER,
             provider_contract_id="openai-compatible-planner:v1",
             model="synthetic-model",
-            prompt_contract_id="planner-react:v8",
+            prompt_contract_id="planner-react:v9",
         )
         measurement.finish(
             ModelCallStatus.SUCCEEDED,

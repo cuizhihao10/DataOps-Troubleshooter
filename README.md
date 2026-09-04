@@ -22,9 +22,9 @@
 - 两阶段检索先按倍数多召回候选，再由 `BAAI/bge-reranker-v2-m3` 重排并按 `final_score = (1 - w) * hybrid + w * rerank` 融合；重排器不可用或分数条数不齐时整体降级为一阶段排序并把 `reranker_model` 留空，绝不把一阶段排序说成精排结果。
 - 报告只把 Runbook/SOP 的步骤小节提升为处置建议，复盘“改进项”、FAQ 与“禁止操作”即使被召回也只能作为证据；文档切片与图证据共用同一字节预算但拥有独立条数上限，加载顺序为路径 → 种子节点 → 文档切片，被裁切片 ID 出现在 `omitted_chunk_ids`。
 - 五项 capability 以 `runtime-capabilities:v1` 输出 Prompt 片段、工具优先级、输入要求和输出规则；历史匹配仅按需启用，实时 Observation 始终优先。
-- `langgraph-react-loop:v3` 真实执行 capability 注入、Planner 决策、MCP Action、Observation 回写和回到 Planner，并把 raw confirmed 案例与确定性解释绑定后注入 Planner。
+- `langgraph-react-loop:v4` 真实执行 capability 注入、Planner 决策、MCP Action、Observation 回写和回到 Planner，并把 raw confirmed 案例与确定性解释绑定后注入 Planner。
 - 同一轮可提交 1–3 个互不依赖的只读 Action，批内经 `asyncio.gather` 真并发执行：HTTP 传输下共享连接池但各建独立 MCP 会话，stdio 传输下跨独立子进程，两者都不共享会话状态；一批 N 个 Action 仍消耗 N 个步数，并行只压缩等待时间而不发放额外取证预算，任一门禁不通过整批拒绝而不截断。
-- `planner-react:v8` 隔离 system/user 数据，注入同会话上一轮报告、历史案例共同点/差异点/参考动作/避坑提示，以及由渲染层算好的剩余步数、本轮批次上限、`trace_id`、带 `source` 标注的可引用 ID 白名单（与报告层同一份来源映射）和尚未执行的优先级工具；`hypothesis_updates` 是模型结论进入报告根因的唯一通道（`decision_summary` 不会被解析），升为 supported 只认实时 Observation 引用，`stop_reason` 收敛为七个可评测枚举值。Structured Outputs 仍只返回结构化 Action 数组，批次上限由 Pydantic 校验器执行（strict Schema 不接受 `maxItems`）。
+- `planner-react:v9` 隔离 system/user 数据，注入同会话上一轮报告、历史案例共同点/差异点/参考动作/避坑提示，以及由渲染层算好的剩余步数、本轮批次上限、`trace_id`、带 `source` 标注的可引用 ID 白名单（与报告层同一份来源映射）和尚未执行的优先级工具；`hypothesis_updates` 是模型结论进入报告根因的唯一通道（`decision_summary` 不会被解析），升为 supported 只认实时 Observation 引用，`stop_reason` 收敛为七个可评测枚举值。取证步数打满时控制器额外发放一次批次上限为 0 的收口回合（`{closing_turn}` 渲染成整段可执行指令，不消耗步数、只发一次），因为"预算恰好用满"此前等于"模型没有机会把结论写成 hypothesis_updates"，报告根因随之恒空并被 Auditor 以 `report_incomplete` 否决；该闭合目前只有测试证据，**尚未在 v9/v4 下发布任何真实模型实测数字**。Structured Outputs 仍只返回结构化 Action 数组，批次上限由 Pydantic 校验器执行（strict Schema 不接受 `maxItems`）。
 - 假设更新经同一道引用白名单门禁后确定性投影进 `AgentState.hypotheses`：组件取本次已批准的 capability 组件，置信度按状态映射（candidate 0.4 / supported 0.7 / rejected 0），模型不能自报这两项，报告里也就不会出现无法复算的自评数字。
 - 确定性 Builder 只把有有效支持引用且无反对证据的假设提升为根因；链路和建议分别引用 `path_id` 与知识节点证据。
 - `auditor-report:v2` 使用独立 Structured Outputs Agent 审核实时事实与历史解释冲突；`audited-report-workflow:v2` 的确定性问题可否决错误 accept，最多返工一次。

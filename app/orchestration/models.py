@@ -16,7 +16,7 @@ from app.domain.planner import MAX_PARALLEL_TOOL_ACTIONS
 from app.domain.tooling import ToolName
 from app.retrieval.models import GraphEvidenceBundle
 
-REACT_LOOP_CONTRACT_ID = "langgraph-react-loop:v3"
+REACT_LOOP_CONTRACT_ID = "langgraph-react-loop:v4"
 
 
 class ReactLoopStatus(StrEnum):
